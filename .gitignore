@@ -1,0 +1,8 @@
+# Local test data
+test-data/
+
+# Generated logs and temporary files
+*.log
+*.tmp
+Thumbs.db
+.DS_Store
