@@ -5,13 +5,23 @@
     snapshot on demand (Start Menu shortcut uses -Manual).
 
     Parameters
-      -Manual       Always show the UI, even after a clean shutdown.
-      -NoUI         Restore everything without showing a window.
-      -DryRun       Print what would be restored and exit.
-      -Force        Start apps even when they are already running.
-      -SnapshotPath Use a specific snapshot JSON file.
-      -TabMode      Smart (default), Captured, Native or None.
-      -MaxAgeHours  Override the configured maximum snapshot age.
+      -Manual          Always show the UI, even after a clean shutdown.
+      -NoUI            Restore everything without showing a window.
+      -DryRun          Print what would be restored and exit.
+      -Force           Start apps even when they are already running.
+      -SnapshotPath    Use a specific snapshot JSON file.
+      -TabMode         Smart (default), Captured, Native or None.
+      -MaxAgeHours     Override the configured maximum snapshot age.
+      -ListSnapshots   Print saved snapshots and exit.
+      -IncludeApps     Only restore apps matching these wildcard patterns.
+      -IncludeFolders  Only restore folders matching these wildcard patterns.
+      -IncludeBrowsers Only restore browsers matching these wildcard patterns.
+      -ExcludeApps     Skip apps matching these wildcard patterns.
+      -ExcludeFolders  Skip folders matching these wildcard patterns.
+      -ExcludeBrowsers Skip browsers matching these wildcard patterns.
+
+    Include/exclude filters apply to -NoUI and -DryRun. Interactive restores
+    use the checkboxes in the restore window.
 #>
 [CmdletBinding()]
 param(
@@ -22,7 +32,14 @@ param(
     [string]$SnapshotPath,
     [ValidateSet('Smart', 'Captured', 'Native', 'None')][string]$TabMode,
     [int]$MaxAgeHours = 0,
-    [int]$StartupDelaySeconds = 0
+    [int]$StartupDelaySeconds = 0,
+    [switch]$ListSnapshots,
+    [string[]]$IncludeApps,
+    [string[]]$IncludeFolders,
+    [string[]]$IncludeBrowsers,
+    [string[]]$ExcludeApps,
+    [string[]]$ExcludeFolders,
+    [string[]]$ExcludeBrowsers
 )
 
 $ErrorActionPreference = 'Stop'
@@ -64,6 +81,106 @@ function Format-RSSnapshotLabel {
     $stats = Get-RSStats -Snapshot $Entry.Snapshot
     return ('{0}  -  {1} app(s), {2} folder(s), {3} browser(s), {4} tab(s)' -f
         $Entry.CapturedAt.ToString('g'), $stats.Apps, $stats.Folders, $stats.Browsers, $stats.Tabs)
+}
+
+function Get-RSPlanStats {
+    param($Plan)
+    $tabs = 0
+    foreach ($browser in @($Plan.browsers)) {
+        foreach ($profile in @($browser.profiles)) {
+            $tabs += @($profile.tabs).Count
+        }
+    }
+    return [pscustomobject]@{
+        Apps     = @($Plan.apps).Count
+        Folders  = @($Plan.explorer).Count
+        Browsers = @($Plan.browsers).Count
+        Tabs     = $tabs
+    }
+}
+
+function Expand-RSPatternList {
+    param([string[]]$Patterns)
+    $expanded = New-Object System.Collections.Generic.List[string]
+    foreach ($pattern in @($Patterns)) {
+        foreach ($part in ([string]$pattern -split ',')) {
+            $trimmed = $part.Trim()
+            if (-not [string]::IsNullOrWhiteSpace($trimmed)) { $expanded.Add($trimmed) }
+        }
+    }
+    return $expanded.ToArray()
+}
+
+function Select-RSPlan {
+    param(
+        $Plan,
+        [string[]]$IncludeApps,
+        [string[]]$IncludeFolders,
+        [string[]]$IncludeBrowsers,
+        [string[]]$ExcludeApps,
+        [string[]]$ExcludeFolders,
+        [string[]]$ExcludeBrowsers
+    )
+
+    # PowerShell -File passes "A,B" as one string, so accept comma-separated
+    # patterns as well as a real array when the script is called directly.
+    $IncludeApps = @(Expand-RSPatternList -Patterns $IncludeApps)
+    $IncludeFolders = @(Expand-RSPatternList -Patterns $IncludeFolders)
+    $IncludeBrowsers = @(Expand-RSPatternList -Patterns $IncludeBrowsers)
+    $ExcludeApps = @(Expand-RSPatternList -Patterns $ExcludeApps)
+    $ExcludeFolders = @(Expand-RSPatternList -Patterns $ExcludeFolders)
+    $ExcludeBrowsers = @(Expand-RSPatternList -Patterns $ExcludeBrowsers)
+
+    $apps = @($Plan.apps)
+    if ($IncludeApps -and @($IncludeApps).Count -gt 0) {
+        $apps = @($apps | Where-Object {
+            $leaf = ''
+            if (-not [string]::IsNullOrWhiteSpace([string]$_.exe)) {
+                $leaf = [System.IO.Path]::GetFileNameWithoutExtension([string]$_.exe)
+            }
+            Test-SRPatternMatch -Patterns $IncludeApps -Values @([string]$_.name, [string]$_.exe, $leaf)
+        })
+    }
+    if ($ExcludeApps -and @($ExcludeApps).Count -gt 0) {
+        $apps = @($apps | Where-Object {
+            $leaf = ''
+            if (-not [string]::IsNullOrWhiteSpace([string]$_.exe)) {
+                $leaf = [System.IO.Path]::GetFileNameWithoutExtension([string]$_.exe)
+            }
+            -not (Test-SRPatternMatch -Patterns $ExcludeApps -Values @([string]$_.name, [string]$_.exe, $leaf))
+        })
+    }
+
+    $folders = @($Plan.explorer)
+    if ($IncludeFolders -and @($IncludeFolders).Count -gt 0) {
+        $folders = @($folders | Where-Object {
+            Test-SRPatternMatch -Patterns $IncludeFolders -Values @([string]$_)
+        })
+    }
+    if ($ExcludeFolders -and @($ExcludeFolders).Count -gt 0) {
+        $folders = @($folders | Where-Object {
+            -not (Test-SRPatternMatch -Patterns $ExcludeFolders -Values @([string]$_))
+        })
+    }
+
+    $browsers = @($Plan.browsers)
+    if ($IncludeBrowsers -and @($IncludeBrowsers).Count -gt 0) {
+        $browsers = @($browsers | Where-Object {
+            Test-SRPatternMatch -Patterns $IncludeBrowsers -Values @([string]$_.key, [string]$_.name)
+        })
+    }
+    if ($ExcludeBrowsers -and @($ExcludeBrowsers).Count -gt 0) {
+        $browsers = @($browsers | Where-Object {
+            -not (Test-SRPatternMatch -Patterns $ExcludeBrowsers -Values @([string]$_.key, [string]$_.name))
+        })
+    }
+
+    return [pscustomobject]@{
+        apps     = $apps
+        explorer = $folders
+        browsers = $browsers
+        tabMode  = $Plan.tabMode
+    }
 }
 
 function Show-RSMessage {
@@ -165,7 +282,7 @@ if (-not [string]::IsNullOrWhiteSpace($SnapshotPath)) {
     })
 } else {
     $allSnapshots = @(Get-SRSnapshots)
-    if ($Manual) {
+    if ($Manual -or $ListSnapshots) {
         foreach ($entry in $allSnapshots) { $snapshotEntries.Add($entry) }
     } else {
         $cutoff = $now.AddHours(-1 * [Math]::Abs($MaxAgeHours))
@@ -175,6 +292,26 @@ if (-not [string]::IsNullOrWhiteSpace($SnapshotPath)) {
             $snapshotEntries.Add($entry)
         }
     }
+}
+
+if ($ListSnapshots) {
+    if ($snapshotEntries.Count -eq 0) {
+        Write-Output 'No snapshots found.'
+        exit 0
+    }
+    foreach ($entry in $snapshotEntries) {
+        $stats = Get-RSStats -Snapshot $entry.Snapshot
+        Write-Output ([pscustomobject]@{
+            CapturedAt = $entry.CapturedAt
+            AgeMinutes = [Math]::Round(((Get-Date) - $entry.CapturedAt).TotalMinutes, 1)
+            Apps       = $stats.Apps
+            Folders    = $stats.Folders
+            Browsers   = $stats.Browsers
+            Tabs       = $stats.Tabs
+            Path       = $entry.Path
+        })
+    }
+    exit 0
 }
 
 if ($snapshotEntries.Count -eq 0) {
@@ -235,8 +372,19 @@ if (-not $restoreBrowsers) {
 
 $planAll = New-SRRestorePlan -Snapshot $entry.Snapshot -All -TabMode $TabMode
 
+$hasFilters = [bool]($IncludeApps -or $IncludeFolders -or $IncludeBrowsers -or
+    $ExcludeApps -or $ExcludeFolders -or $ExcludeBrowsers)
+if ($hasFilters) {
+    if (-not $NoUI -and -not $DryRun) {
+        Write-Warning 'Include/exclude filters apply to -NoUI and -DryRun. The restore window uses its checkboxes instead.'
+    }
+    $planAll = Select-RSPlan -Plan $planAll `
+        -IncludeApps $IncludeApps -IncludeFolders $IncludeFolders -IncludeBrowsers $IncludeBrowsers `
+        -ExcludeApps $ExcludeApps -ExcludeFolders $ExcludeFolders -ExcludeBrowsers $ExcludeBrowsers
+}
+
 if ($DryRun) {
-    $stats = Get-RSStats -Snapshot $entry.Snapshot
+    $stats = Get-RSPlanStats -Plan $planAll
     Write-Output ('Snapshot: {0}' -f $entry.Path)
     Write-Output ('Captured: {0} ({1})' -f $entry.CapturedAt.ToString('g'), (Format-RSAge -CapturedAt $entry.CapturedAt))
     Write-Output ('Contents: {0} app(s), {1} folder(s), {2} browser(s), {3} tab(s)' -f $stats.Apps, $stats.Folders, $stats.Browsers, $stats.Tabs)
@@ -256,6 +404,12 @@ if ($DryRun) {
 # ---------------------------------------------------------------------------
 
 if ($NoUI -or -not [Environment]::UserInteractive) {
+    if (@($planAll.apps).Count -eq 0 -and @($planAll.explorer).Count -eq 0 -and @($planAll.browsers).Count -eq 0) {
+        $emptyMessage = 'No items matched the include/exclude filters or browser settings.'
+        Write-SRLog -Level WARN -Message $emptyMessage
+        Write-Output $emptyMessage
+        exit 0
+    }
     Write-SRLog -Message ('Non-interactive restore started from {0} (tab mode {1}).' -f $entry.Path, $TabMode)
     try {
         $results = Invoke-SRRestore -Plan $planAll -Force:$Force

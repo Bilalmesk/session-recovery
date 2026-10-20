@@ -10,6 +10,8 @@ Session Recovery is a small, local Windows utility. It runs quietly in the backg
 - Keeps snapshots on your PC. Nothing is uploaded.
 - Works with Chrome, Edge, Brave, Vivaldi, Opera and Firefox.
 - Keeps browser windows together and preserves duplicate tabs.
+- Configurable exclusions keep sensitive apps, folders and URLs out of new snapshots.
+- Selective command-line restore, snapshot listing and a diagnostics report for advanced use.
 - Uses either Windows Task Scheduler (one UAC prompt) or a Startup-folder watcher (no administrator rights).
 
 ## Contents
@@ -24,6 +26,8 @@ Session Recovery is a small, local Windows utility. It runs quietly in the backg
 - [Browser tab modes](#browser-tab-modes)
 - [Command-line reference](#command-line-reference)
 - [Configuration](#configuration)
+- [Advanced features](#advanced-features)
+- [Diagnostics](#diagnostics)
 - [Crash detection](#crash-detection)
 - [Data, logs and privacy](#data-logs-and-privacy)
 - [Troubleshooting](#troubleshooting)
@@ -42,7 +46,10 @@ Session Recovery is a small, local Windows utility. It runs quietly in the backg
 - **Browser tabs** are read directly from the browser's own session files. No extension, remote debugging port or browser automation is used.
 - **Window groups are preserved** for Chromium browsers, so tabs that belonged to the same browser window reopen together.
 - **Duplicate tabs are preserved** instead of being collapsed into one.
-- **Snapshot history** is rotated automatically so it cannot grow without limit.
+- **Capture exclusions** keep chosen applications, folders and URL patterns out of new snapshot files.
+- **Selective restore filters** let scripts restore only matching apps, folders or browsers, or exclude specific ones.
+- **Snapshot history** is rotated by file count and, optionally, by age.
+- **Snapshot listing and diagnostics** make automation and troubleshooting easier.
 - **Everything is local.** The tool makes no network requests and does not collect telemetry.
 
 ## Supported software
@@ -127,7 +134,7 @@ You should see a line ending in `Snapshot saved`. The snapshot files are in:
 %LOCALAPPDATA%\SessionRecovery\snapshots
 ```
 
-You can also open **Start Menu > Session Recovery > Restore Session** (or the desktop shortcut) to confirm that the restore window lists your current applications and folders.
+You can also open **Start Menu > Session Recovery > Restore Session** (or the desktop shortcut) to confirm that the restore window lists your current applications and folders. If anything looks wrong, open **Start Menu > Session Recovery > Run Diagnostics** for a health report.
 
 ## Installation options
 
@@ -138,6 +145,7 @@ Pass these options to `Install-SessionRecovery.ps1`:
 | `-NoTasks` | off | Use the Startup-folder watcher instead of scheduled tasks. No administrator rights required. |
 | `-IntervalMinutes <n>` | `3` | Minutes between snapshots. Minimum 1. |
 | `-KeepSnapshots <n>` | `48` | Number of snapshot files to keep. Older files are deleted automatically. |
+| `-KeepSnapshotDays <n>` | `0` | Delete snapshots older than this many days. `0` disables age-based deletion. |
 | `-PromptOnLogon <mode>` | `CrashOnly` | `CrashOnly`, `Always` or `Never`. |
 | `-DefaultTabMode <mode>` | `Smart` | `Smart`, `Captured`, `Native` or `None`. |
 | `-NoDesktopShortcut` | off | Do not create the desktop shortcut. |
@@ -155,6 +163,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-SessionRecovery.ps
 
 # Ask to restore after every logon, not only after a crash
 powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-SessionRecovery.ps1 -PromptOnLogon Always
+
+# Keep the last 48 snapshots, but nothing older than 30 days
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-SessionRecovery.ps1 -KeepSnapshotDays 30
 ```
 
 ### What the installer creates
@@ -165,7 +176,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-SessionRecovery.ps
 | `%LOCALAPPDATA%\SessionRecovery\snapshots` | Snapshot JSON files. |
 | `%LOCALAPPDATA%\SessionRecovery\logs` | `session-recovery.log` and its rotated backup. |
 | `%LOCALAPPDATA%\SessionRecovery\config.json` | Settings. |
-| Start Menu > Session Recovery | Restore Session, Take Snapshot Now, Uninstall Session Recovery. |
+| Start Menu > Session Recovery | Restore Session, Take Snapshot Now, Run Diagnostics, Uninstall Session Recovery. |
 | Desktop | Restore Session shortcut (unless `-NoDesktopShortcut` is used). |
 | Task Scheduler | `SessionRecovery-Snapshot` and `SessionRecovery-RestorePrompt` (default mode). |
 | Startup folder | Watcher and restore-prompt shortcuts (`-NoTasks` mode). |
@@ -174,8 +185,8 @@ The installer stops an older watcher before copying new files, so upgrading does
 
 ## How it works
 
-1. **Capture.** A hidden PowerShell process reads the visible top-level windows, their owning process paths, File Explorer locations and browser session files. It writes a small JSON file under `%LOCALAPPDATA%\SessionRecovery\snapshots`.
-2. **Rotate.** After each snapshot, the oldest files are removed so only `keepSnapshots` files remain.
+1. **Capture.** A hidden PowerShell process reads the visible top-level windows, their owning process paths, File Explorer locations and browser session files. Configured exclusions are applied before the data is written, then a small JSON file is saved under `%LOCALAPPDATA%\SessionRecovery\snapshots`.
+2. **Rotate.** After each snapshot, the oldest files are removed so only `keepSnapshots` files remain. If `keepSnapshotDays` is greater than zero, files older than that many days are deleted as well.
 3. **Detect.** At logon, the restore prompt reads the Windows System event log and compares the latest unexpected-shutdown event with the latest clean-shutdown event.
 4. **Restore.** If the previous shutdown was unexpected (or `promptOnLogon` is `Always`), the tool shows the latest snapshot from before logon. You choose what to reopen, and the selected applications, folders and browser windows are started.
 
@@ -192,6 +203,8 @@ Snapshots are taken at logon and then on the configured interval. The watcher mo
 | Minimized/maximized state and window position | Minimized state only | Minimized apps start minimized; maximized state and position are not restored |
 | Unsaved document contents | No | No |
 | Passwords, cookies or form data | No | No |
+
+Capture exclusions (`excludeApps`, `excludeFolders` and `excludeUrls`) can remove matching items from new snapshots. If every tab in a browser profile is excluded, that profile is omitted from the snapshot so a native browser restore cannot reopen the excluded pages.
 
 ## Restoring a session
 
@@ -268,6 +281,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\SessionRe
 
 Running `Watch-Session.ps1` without `-Once` starts a continuous watcher. Do not start a second watcher: a named mutex prevents duplicates, and the second process exits immediately.
 
+### List saved snapshots
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\SessionRecovery\app\Restore-Session.ps1" -ListSnapshots
+```
+
+Each result includes `CapturedAt`, `AgeMinutes`, item counts and the full snapshot path. Because the script writes objects, you can also import it or pipe the output through `Format-Table` or `ConvertTo-Json` when using it from PowerShell.
+
 ### Restore a session
 
 ```powershell
@@ -284,6 +305,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\SessionRe
 | `-TabMode <mode>` | Override the configured tab mode for this run. |
 | `-MaxAgeHours <n>` | Override `maxRestoreAgeHours` for automatic snapshot selection. |
 | `-StartupDelaySeconds <n>` | Wait before showing the UI. Used internally by the Startup-folder restore shortcut. |
+| `-ListSnapshots` | Print saved snapshots and exit. |
+| `-IncludeApps <patterns>` | Only restore apps whose name, executable path or executable leaf name matches at least one wildcard pattern. |
+| `-IncludeFolders <patterns>` | Only restore folders whose path matches at least one wildcard pattern. |
+| `-IncludeBrowsers <patterns>` | Only restore browsers whose key or display name matches at least one wildcard pattern. |
+| `-ExcludeApps <patterns>` | Skip apps matching any wildcard pattern. |
+| `-ExcludeFolders <patterns>` | Skip folders matching any wildcard pattern. |
+| `-ExcludeBrowsers <patterns>` | Skip browsers matching any wildcard pattern. |
+
+Include and exclude filters apply to `-NoUI` and `-DryRun`. Interactive restores use the checkboxes in the restore window; if you pass filters together with `-Manual` without `-DryRun` or `-NoUI`, the script shows a warning and ignores them. Patterns use PowerShell wildcard syntax (`*`, `?`, `[abc]`) and are case-insensitive. For `powershell.exe -File`, pass multiple patterns as one comma-separated argument (for example `-IncludeApps 'OpenCode,ZCode'`); when calling the script directly from PowerShell, a normal array also works.
 
 Examples:
 
@@ -296,6 +326,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\SessionRe
 
 # Restore the latest eligible snapshot after a clean shutdown, with the UI
 powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\SessionRecovery\app\Restore-Session.ps1" -Manual
+
+# List snapshots with their age and path
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\SessionRecovery\app\Restore-Session.ps1" -ListSnapshots
+
+# Preview a filtered restore without launching anything
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\SessionRecovery\app\Restore-Session.ps1" -DryRun -SnapshotPath "C:\Backups\session.json" -IncludeApps 'OpenCode','ZCode' -IncludeBrowsers Brave
+
+# Restore only one app and one browser, and skip the project folder
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\SessionRecovery\app\Restore-Session.ps1" -NoUI -IncludeApps 'OpenCode' -IncludeBrowsers 'Brave' -ExcludeFolders 'C:\Users\*'
+
+# Restore everything except selected apps and browsers
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\SessionRecovery\app\Restore-Session.ps1" -NoUI -ExcludeApps 'Game*','Chat*' -ExcludeBrowsers 'vivaldi'
 ```
 
 `-NoUI` still applies the automatic age and pre-logon filters. It does not check whether the last shutdown was a crash, so it can be used after a normal restart. `-Manual` shows all saved snapshots regardless of age; use it to recover an older session.
@@ -314,10 +356,14 @@ Default contents:
 {
   "snapshotIntervalMinutes": 3,
   "keepSnapshots": 48,
+  "keepSnapshotDays": 0,
   "promptOnLogon": "CrashOnly",
   "maxRestoreAgeHours": 72,
   "restoreBrowsers": true,
-  "defaultTabMode": "Smart"
+  "defaultTabMode": "Smart",
+  "excludeApps": [],
+  "excludeFolders": [],
+  "excludeUrls": []
 }
 ```
 
@@ -325,18 +371,126 @@ Default contents:
 | --- | --- | --- |
 | `snapshotIntervalMinutes` | `3` | Minutes between snapshots. Minimum 1. |
 | `keepSnapshots` | `48` | Maximum number of snapshot files. At the default interval this is about 2.4 hours of history. |
+| `keepSnapshotDays` | `0` | Delete snapshots older than this many days. `0` disables age-based deletion. |
 | `promptOnLogon` | `CrashOnly` | `CrashOnly` prompts only after an unexpected shutdown; `Always` prompts at every logon; `Never` disables the automatic prompt. Manual restore still works. |
 | `maxRestoreAgeHours` | `72` | The automatic prompt ignores snapshots older than this. Manual restore lists all snapshots. |
 | `restoreBrowsers` | `true` | Set to `false` to remove browsers from the restore plan and the restore window entirely. |
 | `defaultTabMode` | `Smart` | Tab mode used when the restore window opens: `Smart`, `Captured`, `Native` or `None`. |
+| `excludeApps` | `[]` | Wildcard patterns matched against each app's display name and executable path. Matching apps are not written to new snapshots. Example: `["KeePass*", "*\\1Password.exe"]`. |
+| `excludeFolders` | `[]` | Wildcard patterns matched against File Explorer folder paths. Matching folders are not written to new snapshots. Example: `["C:\\Users\\bilal\\Private*", "D:\\Taxes"]`. |
+| `excludeUrls` | `[]` | Wildcard patterns matched against captured browser URLs. Matching tabs are omitted from new snapshots. Example: `["*bank*", "*mail.google.com*"]`. |
 
 Edit the file with Notepad or another plain-text editor. Keep the JSON valid: quoted property names, commas between entries, no trailing comma. If the file cannot be parsed, the module logs a warning and falls back to the defaults.
 
 ### Applying changes
 
-- **Watcher mode (`-NoTasks`):** `snapshotIntervalMinutes` and `keepSnapshots` are read on every cycle/save. The new interval applies after the current sleep ends; no restart is needed. Other settings are read when the restore prompt runs.
-- **Scheduled-task mode:** `keepSnapshots` and the restore settings are read at runtime. To change the snapshot interval, re-run the installer with the new `-IntervalMinutes` value (or edit the task trigger in Task Scheduler).
-- **Reinstalling:** the installer stops the old watcher, copies the program files and applies the install-time options (`-IntervalMinutes`, `-KeepSnapshots`, `-PromptOnLogon`, `-DefaultTabMode`). Snapshots and the other settings are preserved.
+- **Watcher mode (`-NoTasks`):** `snapshotIntervalMinutes`, `keepSnapshots`, `keepSnapshotDays` and the exclusion lists are read on every cycle/save. The new interval applies after the current sleep ends; no restart is needed. Other settings are read when the restore prompt runs.
+- **Scheduled-task mode:** `keepSnapshots`, `keepSnapshotDays`, the exclusion lists and the restore settings are read at runtime. To change the snapshot interval, re-run the installer with the new `-IntervalMinutes` value (or edit the task trigger in Task Scheduler).
+- **Reinstalling:** the installer stops the old watcher, copies the program files and applies the install-time options (`-IntervalMinutes`, `-KeepSnapshots`, `-KeepSnapshotDays`, `-PromptOnLogon`, `-DefaultTabMode`). Snapshots, exclusions and the other settings are preserved.
+- **Exclusions affect new snapshots only.** JSON files created before you added a pattern still contain the old data. Delete those files if you need to remove the data immediately.
+
+## Advanced features
+
+### Keep sensitive data out of snapshots
+
+Add these properties inside the existing `config.json` object (the other properties are omitted here):
+
+```json
+{
+  "excludeApps": ["KeePass*", "*\\1Password.exe"],
+  "excludeFolders": ["C:\\Users\\bilal\\Private*", "D:\\Taxes"],
+  "excludeUrls": ["*bank*", "*mail.google.com*"]
+}
+```
+
+The arrays are matched with PowerShell wildcard syntax and are case-insensitive:
+
+- `excludeApps` is checked against both the app's display name and its full executable path. `KeePass*` hides KeePass even if the executable lives in an unusual folder.
+- `excludeFolders` is checked against the full folder path. Use a trailing `*` to match everything under a folder.
+- `excludeUrls` is checked against each captured URL. Excluded tabs are removed before the snapshot is written. If all tabs in a browser profile are excluded, the profile is dropped from the snapshot so native browser restore cannot reopen those pages.
+
+The watcher and the snapshot script read these values on every capture; no restart is needed. Only new snapshots are affected. Existing JSON files still contain anything captured before the pattern was added.
+
+To verify the result, take a snapshot and inspect it:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\SessionRecovery\app\Save-Session.ps1"
+$snapshot = Get-ChildItem "$env:LOCALAPPDATA\SessionRecovery\snapshots" -Filter 'session-*.json' |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+Get-Content $snapshot.FullName -Raw | ConvertFrom-Json |
+    Select-Object apps, explorer, browsers
+```
+
+### Restore only part of a snapshot
+
+Use `-ListSnapshots` to see the available files, then combine `-SnapshotPath`, `-DryRun` and the include/exclude filters:
+
+```powershell
+$restore = "$env:LOCALAPPDATA\SessionRecovery\app\Restore-Session.ps1"
+
+# Show snapshots first
+powershell -NoProfile -ExecutionPolicy Bypass -File $restore -ListSnapshots
+
+# Preview only two apps and one browser
+powershell -NoProfile -ExecutionPolicy Bypass -File $restore -DryRun -SnapshotPath "C:\Backups\session.json" `
+    -IncludeApps 'OpenCode','ZCode' -IncludeBrowsers Brave
+
+# Restore that selection without a window
+powershell -NoProfile -ExecutionPolicy Bypass -File $restore -NoUI -SnapshotPath "C:\Backups\session.json" `
+    -IncludeApps 'OpenCode','ZCode' -IncludeBrowsers Brave
+```
+
+- App patterns match the display name, the full executable path and the executable leaf name.
+- Folder patterns match the full folder path. Browsers match either their key (`brave`, `chrome`, `firefox`, etc.) or display name.
+- Include filters are applied first; exclude filters are applied afterward. If both select the same item, it is excluded.
+- Filters apply to `-NoUI` and `-DryRun`. The interactive window uses its checkboxes. If a filtered restore matches nothing, it prints a message and exits without starting anything.
+
+### Retain snapshots by age
+
+Set `keepSnapshotDays` to a positive number in the existing object to delete old snapshot files even when the `keepSnapshots` count has not been reached:
+
+```json
+{
+  "keepSnapshotDays": 30
+}
+```
+
+At the default three-minute interval, the 48-file count limit is reached in about 2.4 hours, so age-based rotation is mainly useful with a large `keepSnapshots` value or a longer interval. Both limits are applied; a file is deleted when either limit says it is too old or beyond the count. Keep a separate backup if you need long-term history.
+
+## Diagnostics
+
+The installed **Start Menu > Session Recovery > Run Diagnostics** shortcut opens a console report and leaves the window open. The report checks:
+
+- Whether the program files and snapshot folder exist.
+- Whether `config.json` parses correctly.
+- Snapshot count, total size, latest snapshot time and age.
+- Whether a scheduled task or Startup watcher is present, including watcher process IDs.
+- Detected browser executables.
+- Current settings, exclusions and the last log lines.
+
+Run it from PowerShell instead:
+
+```powershell
+$diagnostics = "$env:LOCALAPPDATA\SessionRecovery\app\Diagnostics.ps1"
+
+# Human-readable report
+powershell -NoProfile -ExecutionPolicy Bypass -File $diagnostics
+
+# Machine-readable JSON
+powershell -NoProfile -ExecutionPolicy Bypass -File $diagnostics -Json
+
+# Save a report for a bug report or your own records
+powershell -NoProfile -ExecutionPolicy Bypass -File $diagnostics -ReportPath "$env:TEMP\session-recovery-report.txt"
+```
+
+The diagnostics script only reads local state and the log; it does not upload anything. `-Json` writes JSON to standard output, and `-ReportPath` writes the same text or JSON to a file. You can also call the module directly:
+
+```powershell
+Import-Module "$env:LOCALAPPDATA\SessionRecovery\app\SessionRecovery.psm1" -Force
+Get-SRDiagnostics | Format-List
+```
+
+When asking for help, include the diagnostics report and the last 50 log lines. Remove anything you consider sensitive first: the report includes executable paths, folder paths, URLs and log messages.
 
 ## Crash detection
 
@@ -369,6 +523,8 @@ Test-SRUnexpectedShutdown
 | `%LOCALAPPDATA%\SessionRecovery\app` | Installed program files. |
 
 - Snapshots contain executable paths, window titles, folder paths and browser URLs. Treat them as private data.
+- Capture exclusions reduce what new snapshots store, but they do not rewrite existing snapshot files. Delete old files if you need to remove data immediately.
+- Diagnostics reports also contain executable paths, folder paths, URLs and recent log lines. Review a report before sharing it.
 - The tool does not upload anything and does not contact a server. It does not use a browser extension or a debugging port.
 - Browser session files are opened read-only.
 - Snapshots and logs are not encrypted. If your device is shared, rely on Windows account permissions or BitLocker.
@@ -378,7 +534,9 @@ Test-SRUnexpectedShutdown
 
 ### First checks
 
-Run these in one PowerShell window so the variables stay available:
+The quickest check is **Start Menu > Session Recovery > Run Diagnostics**. It reports config validity, snapshot age, the watcher/task mode, detected browsers and recent log lines. See [Diagnostics](#diagnostics) for the command-line forms.
+
+For a deeper look, run these in one PowerShell window so the variables stay available:
 
 ```powershell
 $root = Join-Path $env:LOCALAPPDATA 'SessionRecovery'
@@ -508,6 +666,21 @@ Session Recovery only captures visible, top-level desktop windows. Common reason
 
 File Explorer is captured only when a folder window is open. Special shell locations and virtual folders may not have a normal file-system path and are skipped.
 
+If an item is missing because of an exclusion you added, see [An excluded app or URL still appears](#an-excluded-app-or-url-still-appears).
+
+### An excluded app or URL still appears
+
+Exclusions are applied when a snapshot is created, not when it is restored:
+
+- Existing JSON files keep the data they already contain. Delete old files or wait for them to rotate out.
+- `excludeApps` patterns are matched against the display name and full executable path. If the display name is unusual, use a path pattern such as `*\\KeePass.exe`.
+- `excludeFolders` patterns are matched against the complete folder path, not just the last segment. Use `*\\Private*` if the parent folder can vary.
+- `excludeUrls` patterns are matched against the whole captured URL. Use `*bank*`, not just `bank`.
+- Patterns are case-insensitive PowerShell wildcards. A literal `[` or `?` has special meaning; escape or avoid it.
+- If all tabs in a browser profile are excluded, the profile is omitted. If some tabs remain, the browser is still captured with the remaining tabs.
+
+Take a fresh snapshot and inspect it as shown in [Keep sensitive data out of snapshots](#keep-sensitive-data-out-of-snapshots) to confirm the pattern is working.
+
 ### A browser does not reopen its tabs
 
 - For reliable capture, the browser should be running when the snapshot is taken, because tabs are read from its session files.
@@ -552,6 +725,16 @@ Check the restore result window and the log for the exact message. Common causes
 
 The already-running check compares executable paths. It can miss an app that was started through a launcher, updater stub or a different copy of the executable. Leave the force option off, and uncheck apps that Windows already started automatically at logon.
 
+### A selective restore does nothing
+
+- `-IncludeApps`, `-IncludeFolders`, `-IncludeBrowsers`, `-ExcludeApps`, `-ExcludeFolders` and `-ExcludeBrowsers` apply to `-NoUI` and `-DryRun`. The interactive window uses its checkboxes instead.
+- Run the same command with `-DryRun` first. The `Contents:` line reflects the filtered plan.
+- Include filters are applied before exclude filters. If both match an item and it is excluded, it will not be restored.
+- Quote patterns with spaces or wildcard characters in PowerShell. For example: `-IncludeApps 'Visual Studio*'`.
+- App patterns match display name, full executable path and leaf name. Browser patterns match the browser key (`brave`, `chrome`, `firefox`, etc.) or display name.
+- If `restoreBrowsers` is `false`, browsers are removed before filters are applied, so `-IncludeBrowsers` will not bring them back. Set it to `true` if you need selective browser restore.
+- If nothing matches, the script prints `No items matched the include/exclude filters or browser settings.` and exits without launching anything. Use `-ListSnapshots` to confirm that the chosen snapshot contains what you expect.
+
 ### The restore window is clipped or hard to read
 
 The window has a minimum size of 760×560 and is resizable. If Windows display scaling makes the text cramped, maximize the window or lower the display scaling. For unattended restores, use `-NoUI` instead of the window.
@@ -561,7 +744,7 @@ The window has a minimum size of 760×560 and is resizable. If Windows display s
 Snapshots are brief, but machines with hundreds of tabs or many windows take longer to inspect. You can:
 
 - Increase `snapshotIntervalMinutes` to 5 or 10.
-- Reduce `keepSnapshots`.
+- Reduce `keepSnapshots` or set `keepSnapshotDays` to a small positive number.
 - Check for duplicate watcher processes; the mutex should prevent them, but a manually started copy can still appear briefly.
 - Check the snapshot folder size:
 
@@ -608,6 +791,9 @@ The uninstaller schedules deletion of files that are still in use and may need a
 - **A readable current browser session wins over the snapshot.** If the browser has already written a new session, the tool may reopen those tabs instead of the older snapshot's tabs.
 - **Crash detection is heuristic**, not a guarantee that every crash or clean shutdown is classified correctly.
 - **Snapshots and logs are not encrypted.** They contain window titles and URLs.
+- **Exclusions do not rewrite existing snapshots.** They only affect snapshots captured after the pattern is added.
+- **Selective restore filters are command-line only.** The interactive window supports individual checkboxes, not wildcard filters.
+- **Age-based retention can delete history permanently.** Keep a separate backup if you need older snapshots.
 - **The tool is per-user.** Each Windows user needs their own installation and data.
 
 ## Uninstall
@@ -636,6 +822,7 @@ You can run the tool without installing it:
 cd session-recovery
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Import-Module '.\src\SessionRecovery.psm1' -Force; Save-SRSnapshot"
 powershell -NoProfile -ExecutionPolicy Bypass -File .\src\Restore-Session.ps1 -Manual
+powershell -NoProfile -ExecutionPolicy Bypass -File .\src\Diagnostics.ps1
 ```
 
 To keep test data away from your real snapshots, point the module at a temporary data folder before importing it:
@@ -655,9 +842,10 @@ session-recovery/
 ├── Uninstall-SessionRecovery.ps1    Removes the installation
 ├── README.md                        This guide
 └── src/
-    ├── SessionRecovery.psm1         Capture, browser parsing, crash detection, restore engine
+    ├── SessionRecovery.psm1         Capture, exclusions, browser parsing, diagnostics, restore engine
     ├── Save-Session.ps1             One-shot snapshot entry point
-    ├── Restore-Session.ps1          Restore UI and command-line restore
+    ├── Restore-Session.ps1          Restore UI, selective CLI restore and snapshot listing
+    ├── Diagnostics.ps1              Health report for the installation and snapshots
     ├── Watch-Session.ps1            Hidden periodic watcher
     └── RunHidden.vbs                Starts the scripts without a console window
 ```

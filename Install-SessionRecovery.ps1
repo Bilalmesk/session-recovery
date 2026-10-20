@@ -19,12 +19,14 @@
       powershell -ExecutionPolicy Bypass -File Install-SessionRecovery.ps1
       powershell -ExecutionPolicy Bypass -File Install-SessionRecovery.ps1 -NoTasks
       powershell -ExecutionPolicy Bypass -File Install-SessionRecovery.ps1 -IntervalMinutes 5
+      powershell -ExecutionPolicy Bypass -File Install-SessionRecovery.ps1 -KeepSnapshotDays 30
 #>
 [CmdletBinding()]
 param(
     [string]$InstallDirectory = (Join-Path $env:LOCALAPPDATA 'SessionRecovery\app'),
     [int]$IntervalMinutes = 3,
     [int]$KeepSnapshots = 48,
+    [int]$KeepSnapshotDays = 0,
     [ValidateSet('CrashOnly', 'Always', 'Never')][string]$PromptOnLogon = 'CrashOnly',
     [ValidateSet('Smart', 'Captured', 'Native', 'None')][string]$DefaultTabMode = 'Smart',
     [switch]$NoTasks,
@@ -90,6 +92,7 @@ if ($useTasks -and -not $isAdmin -and -not $Elevated) {
         '-InstallDirectory', "`"$InstallDirectory`"",
         '-IntervalMinutes', $IntervalMinutes,
         '-KeepSnapshots', $KeepSnapshots,
+        '-KeepSnapshotDays', $KeepSnapshotDays,
         '-PromptOnLogon', $PromptOnLogon,
         '-DefaultTabMode', $DefaultTabMode,
         '-Elevated'
@@ -137,6 +140,7 @@ $moduleFiles = @(
     'Save-Session.ps1',
     'Restore-Session.ps1',
     'Watch-Session.ps1',
+    'Diagnostics.ps1',
     'RunHidden.vbs'
 )
 
@@ -186,6 +190,7 @@ try {
     $config = Get-SRConfig
     $config.snapshotIntervalMinutes = [Math]::Max(1, $IntervalMinutes)
     $config.keepSnapshots = [Math]::Max(1, $KeepSnapshots)
+    $config.keepSnapshotDays = [Math]::Max(0, $KeepSnapshotDays)
     $config.promptOnLogon = $PromptOnLogon
     $config.defaultTabMode = $DefaultTabMode
     Save-SRConfig -Config $config
@@ -228,6 +233,13 @@ New-SRShortcut -Path (Join-Path $startMenuFolder 'Take Snapshot Now.lnk') `
     -TargetPath $powershellPath -Arguments $snapshotArguments -WorkingDirectory $InstallDirectory `
     -IconLocation "$env:SystemRoot\System32\shell32.dll,137" `
     -Description 'Save a snapshot of the current windows and tabs right now.'
+
+$diagnosticsArguments = '-NoProfile -ExecutionPolicy Bypass -NoExit -File "{0}"' -f (Join-Path $InstallDirectory 'Diagnostics.ps1')
+New-SRShortcut -Path (Join-Path $startMenuFolder 'Run Diagnostics.lnk') `
+    -TargetPath $powershellPath -Arguments $diagnosticsArguments -WorkingDirectory $InstallDirectory `
+    -IconLocation "$env:SystemRoot\System32\shell32.dll,221" `
+    -Description 'Show a Session Recovery health report.'
+Write-Step "Created Start Menu shortcut: Run Diagnostics"
 
 $uninstallArguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}"' -f (Join-Path $InstallDirectory 'Uninstall-SessionRecovery.ps1')
 New-SRShortcut -Path (Join-Path $startMenuFolder 'Uninstall Session Recovery.lnk') `
@@ -341,6 +353,7 @@ if ($tasksReady) {
     Write-Host  '  Restore prompt : Startup folder entry at logon'
 }
 Write-Host  '  Manual restore : Start Menu > Session Recovery > Restore Session'
+Write-Host  '  Diagnostics    : Start Menu > Session Recovery > Run Diagnostics'
 Write-Host  '  Uninstall      : Start Menu > Session Recovery > Uninstall Session Recovery'
 Write-Host ''
 Write-Host 'Snapshots are taken automatically from now on. To undo everything, run the uninstaller.'

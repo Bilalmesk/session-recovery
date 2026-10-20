@@ -591,10 +591,14 @@ function Get-SRDefaultConfig {
     [pscustomobject][ordered]@{
         snapshotIntervalMinutes = 3
         keepSnapshots           = 48
+        keepSnapshotDays        = 0
         promptOnLogon           = 'CrashOnly'
         maxRestoreAgeHours      = 72
         restoreBrowsers         = $true
         defaultTabMode          = 'Smart'
+        excludeApps             = @()
+        excludeFolders          = @()
+        excludeUrls             = @()
     }
 }
 
@@ -695,6 +699,21 @@ function Test-SRRestorableUrl {
     param([string]$Url)
     if ([string]::IsNullOrWhiteSpace($Url)) { return $false }
     return ($Url -match '^(?i)(https?|file)://')
+}
+
+function Test-SRPatternMatch {
+    param(
+        [string[]]$Patterns,
+        [string[]]$Values
+    )
+    foreach ($pattern in @($Patterns)) {
+        if ([string]::IsNullOrWhiteSpace([string]$pattern)) { continue }
+        foreach ($value in @($Values)) {
+            if ([string]::IsNullOrWhiteSpace([string]$value)) { continue }
+            if ([string]$value -like [string]$pattern) { return $true }
+        }
+    }
+    return $false
 }
 
 function Get-SRSafeArguments {
@@ -1459,6 +1478,43 @@ function New-SRSnapshot {
     $folders = @(Get-SRExplorerFolders -Windows $windows)
     $browsers = @(Get-SRBrowsers -Windows $windows -ProcessMap $processMap)
 
+    # Apply the user's capture exclusions before the snapshot is written, so
+    # excluded names, folders and URLs never reach the JSON files on disk.
+    $config = Get-SRConfig
+
+    $excludeApps = @($config.excludeApps)
+    if ($excludeApps.Count -gt 0) {
+        $apps = @($apps | Where-Object {
+            -not (Test-SRPatternMatch -Patterns $excludeApps -Values @([string]$_.name, [string]$_.exe))
+        })
+    }
+
+    $excludeFolders = @($config.excludeFolders)
+    if ($excludeFolders.Count -gt 0) {
+        $folders = @($folders | Where-Object {
+            -not (Test-SRPatternMatch -Patterns $excludeFolders -Values @([string]$_))
+        })
+    }
+
+    $excludeUrls = @($config.excludeUrls)
+    if ($excludeUrls.Count -gt 0) {
+        foreach ($browser in $browsers) {
+            $keptProfiles = New-Object System.Collections.Generic.List[object]
+            foreach ($profile in @($browser.profiles)) {
+                $before = @($profile.tabs).Count
+                $profile.tabs = @($profile.tabs | Where-Object {
+                    -not (Test-SRPatternMatch -Patterns $excludeUrls -Values @([string]$_.url))
+                })
+                # If every tab in a profile was excluded, drop the profile so
+                # Smart/native restore cannot silently reopen excluded pages.
+                if ($before -gt 0 -and @($profile.tabs).Count -eq 0) { continue }
+                $keptProfiles.Add($profile)
+            }
+            $browser.profiles = $keptProfiles.ToArray()
+        }
+        $browsers = @($browsers | Where-Object { @($_.profiles).Count -gt 0 })
+    }
+
     $now = Get-Date
     $logonTime = Get-SRLogonTime
     $tabCount = 0
@@ -1491,10 +1547,26 @@ function New-SRSnapshot {
 }
 
 function Remove-OldSRSnapshots {
-    param([int]$Keep = 48)
+    param(
+        [int]$Keep = 48,
+        [int]$MaxAgeDays = 0
+    )
     if ($Keep -lt 1) { $Keep = 1 }
+
     $files = @(Get-ChildItem -LiteralPath $script:SRSnapshotDir -Filter 'session-*.json' -File -ErrorAction SilentlyContinue |
         Sort-Object -Property LastWriteTime -Descending)
+
+    if ($MaxAgeDays -gt 0) {
+        $cutoff = (Get-Date).AddDays(-1 * [Math]::Abs($MaxAgeDays))
+        foreach ($file in $files) {
+            if ($file.LastWriteTime -lt $cutoff) {
+                try { Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop } catch { }
+            }
+        }
+        $files = @(Get-ChildItem -LiteralPath $script:SRSnapshotDir -Filter 'session-*.json' -File -ErrorAction SilentlyContinue |
+            Sort-Object -Property LastWriteTime -Descending)
+    }
+
     if ($files.Count -le $Keep) { return }
     foreach ($file in $files[$Keep..($files.Count - 1)]) {
         try { Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop } catch { }
@@ -1529,7 +1601,7 @@ function Save-SRSnapshot {
         $path = Join-Path $script:SRSnapshotDir $fileName
         $json = $snapshot | ConvertTo-Json -Depth 12
         [System.IO.File]::WriteAllText($path, $json, (New-Object System.Text.UTF8Encoding($false)))
-        Remove-OldSRSnapshots -Keep ([int]$config.keepSnapshots)
+        Remove-OldSRSnapshots -Keep ([int]$config.keepSnapshots) -MaxAgeDays ([int]$config.keepSnapshotDays)
         Write-SRLog -Message ("Snapshot saved: {0} ({1} apps, {2} folders, {3} browsers, {4} tabs)" -f $path, $snapshot.stats.apps, $snapshot.stats.folders, $snapshot.stats.browsers, $snapshot.stats.tabs)
         return $path
     } catch {
@@ -1975,6 +2047,134 @@ function Get-SRSnapshotByPath {
     if (-not (Test-Path -LiteralPath $Path)) { throw "Snapshot not found: $Path" }
     $snapshot = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json
     return $snapshot
+}
+
+function Get-SRDiagnostics {
+    $root = Get-SRRoot
+    $snapshotDir = Get-SRSnapshotDirectory
+    $logDir = Get-SRLogDirectory
+    $configPath = Get-SRConfigPath
+
+    $config = Get-SRConfig
+    $configValid = $true
+    $configError = $null
+    if (Test-Path -LiteralPath $configPath) {
+        try {
+            Get-Content -LiteralPath $configPath -Raw -ErrorAction Stop | ConvertFrom-Json | Out-Null
+        } catch {
+            $configValid = $false
+            $configError = $_.Exception.Message
+        }
+    }
+
+    $snapshots = @(Get-SRSnapshots)
+    $latest = $null
+    if ($snapshots.Count -gt 0) { $latest = $snapshots[0] }
+
+    $latestPath = $null
+    $latestAt = $null
+    $latestAgeMinutes = $null
+    if ($null -ne $latest) {
+        $latestPath = [string]$latest.Path
+        $latestAt = ([datetimeoffset]$latest.CapturedAt).ToString('o')
+        $latestAgeMinutes = [Math]::Round(((Get-Date) - $latest.CapturedAt).TotalMinutes, 1)
+    }
+
+    $snapshotFiles = @(Get-ChildItem -LiteralPath $snapshotDir -Filter 'session-*.json' -File -ErrorAction SilentlyContinue)
+    $snapshotBytes = [int64]0
+    if ($snapshotFiles.Count -gt 0) {
+        $measured = $snapshotFiles | Measure-Object -Property Length -Sum
+        if ($null -ne $measured.Sum) { $snapshotBytes = [int64]$measured.Sum }
+    }
+
+    $watcherPids = @()
+    try {
+        $watcherPids = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object {
+            $_.CommandLine -and ($_.CommandLine -match '(?i)Watch-Session\.ps1')
+        } | ForEach-Object { [int]$_.ProcessId })
+    } catch { }
+
+    $tasks = New-Object System.Collections.Generic.List[object]
+    foreach ($name in @('SessionRecovery-Snapshot', 'SessionRecovery-RestorePrompt')) {
+        try {
+            $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+            if ($null -ne $task) {
+                $tasks.Add([pscustomobject]@{
+                    Name  = [string]$task.TaskName
+                    State = [string]$task.State
+                })
+            }
+        } catch { }
+    }
+
+    $browsers = New-Object System.Collections.Generic.List[object]
+    try {
+        $processMap = Get-SRProcessMap
+        foreach ($definition in @(Get-SRBrowserDefinitions)) {
+            try {
+                $exe = Resolve-SRBrowserExe -Definition $definition -ProcessMap $processMap
+                if (-not [string]::IsNullOrWhiteSpace([string]$exe)) {
+                    $browsers.Add([pscustomobject]@{
+                        Name = [string]$definition.name
+                        Key  = [string]$definition.key
+                        Exe  = [string]$exe
+                    })
+                }
+            } catch { }
+        }
+    } catch { }
+
+    $logPath = Join-Path $logDir 'session-recovery.log'
+    $recentLog = @()
+    if (Test-Path -LiteralPath $logPath) {
+        try {
+            $recentLog = @(Get-Content -LiteralPath $logPath -Tail 8 -ErrorAction Stop | ForEach-Object { [string]$_ })
+        } catch { }
+    }
+
+    $scheduleMode = 'Not running'
+    if ($tasks.Count -gt 0) {
+        $scheduleMode = 'Scheduled tasks'
+    } elseif ($watcherPids.Count -gt 0) {
+        $scheduleMode = 'Startup watcher'
+    }
+
+    $installed = Test-Path -LiteralPath (Join-Path $root 'app\SessionRecovery.psm1')
+
+    return [pscustomobject]@{
+        GeneratedAt              = (Get-Date).ToString('o')
+        PowerShellVersion        = $PSVersionTable.PSVersion.ToString()
+        OSVersion                = [Environment]::OSVersion.VersionString
+        Installed                = [bool]$installed
+        Root                     = $root
+        ConfigPath               = $configPath
+        ConfigValid              = [bool]$configValid
+        ConfigError              = $configError
+        SnapshotDirectory        = $snapshotDir
+        SnapshotCount            = $snapshots.Count
+        LatestSnapshot           = $latestPath
+        LatestSnapshotAt         = $latestAt
+        LatestSnapshotAgeMinutes = $latestAgeMinutes
+        SnapshotBytes            = $snapshotBytes
+        LogPath                  = $logPath
+        ScheduleMode             = $scheduleMode
+        WatcherPids              = @($watcherPids)
+        ScheduledTasks           = $tasks.ToArray()
+        Browsers                 = $browsers.ToArray()
+        Settings                 = [pscustomobject]@{
+            IntervalMinutes     = [int]$config.snapshotIntervalMinutes
+            KeepSnapshots       = [int]$config.keepSnapshots
+            KeepSnapshotDays    = [int]$config.keepSnapshotDays
+            PromptOnLogon       = [string]$config.promptOnLogon
+            MaxRestoreAgeHours  = [int]$config.maxRestoreAgeHours
+            RestoreBrowsers     = [bool]$config.restoreBrowsers
+            DefaultTabMode      = [string]$config.defaultTabMode
+            ExcludeApps         = @($config.excludeApps)
+            ExcludeFolders      = @($config.excludeFolders)
+            ExcludeUrls         = @($config.excludeUrls)
+        }
+        RecentLog                = @($recentLog)
+    }
 }
 
 
