@@ -868,7 +868,7 @@ function Get-SRApplications {
         if ($skip) { continue }
 
         $commandLine = [string]$process.CommandLine
-        if ($commandLine -match '(?i)SessionRecovery|Save-Session\.ps1|Restore-Session\.ps1|Watch-Session\.ps1|Install-SessionRecovery\.ps1|Uninstall-SessionRecovery\.ps1') { continue }
+        if ($commandLine -match '(?i)SessionRecovery|Save-Session\.ps1|Restore-Session\.ps1|Watch-Session\.ps1|Tray-SessionRecovery\.ps1|Install-SessionRecovery\.ps1|Uninstall-SessionRecovery\.ps1') { continue }
 
         # Our own hidden helper and shell host never need to be restored.
         if ($processName -in @('wscript', 'conhost')) { continue }
@@ -2094,6 +2094,13 @@ function Get-SRDiagnostics {
         } | ForEach-Object { [int]$_.ProcessId })
     } catch { }
 
+    $trayPids = @()
+    try {
+        $trayPids = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object {
+            $_.CommandLine -and ($_.CommandLine -match '(?i)Tray-SessionRecovery\.ps1')
+        } | ForEach-Object { [int]$_.ProcessId })
+    } catch { }
+
     $tasks = New-Object System.Collections.Generic.List[object]
     foreach ($name in @('SessionRecovery-Snapshot', 'SessionRecovery-RestorePrompt')) {
         try {
@@ -2134,7 +2141,9 @@ function Get-SRDiagnostics {
 
     $scheduleMode = 'Not running'
     if ($tasks.Count -gt 0) {
-        $scheduleMode = 'Scheduled tasks'
+        $scheduleMode = if ($trayPids.Count -gt 0) { 'Scheduled tasks + tray' } else { 'Scheduled tasks' }
+    } elseif ($trayPids.Count -gt 0) {
+        $scheduleMode = 'Background tray'
     } elseif ($watcherPids.Count -gt 0) {
         $scheduleMode = 'Startup watcher'
     }
@@ -2159,6 +2168,7 @@ function Get-SRDiagnostics {
         LogPath                  = $logPath
         ScheduleMode             = $scheduleMode
         WatcherPids              = @($watcherPids)
+        TrayPids                 = @($trayPids)
         ScheduledTasks           = $tasks.ToArray()
         Browsers                 = $browsers.ToArray()
         Settings                 = [pscustomobject]@{

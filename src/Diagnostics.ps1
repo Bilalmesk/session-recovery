@@ -51,6 +51,7 @@ try {
         }
         $lines.Add(('Schedule mode: {0}' -f $diagnostics.ScheduleMode))
         $lines.Add(('Watcher processes: {0}' -f (($diagnostics.WatcherPids -join ', '))))
+        $lines.Add(('Tray processes: {0}' -f (($diagnostics.TrayPids -join ', '))))
         if (@($diagnostics.ScheduledTasks).Count -gt 0) {
             foreach ($task in @($diagnostics.ScheduledTasks)) {
                 $lines.Add(('Scheduled task: {0} ({1})' -f $task.Name, $task.State))
@@ -98,7 +99,7 @@ try {
             $lines.Add('WARNING: the latest snapshot is older than expected.')
         }
         if ($diagnostics.ScheduleMode -eq 'Not running') {
-            $lines.Add('WARNING: no scheduled task or watcher process was detected.')
+            $lines.Add('WARNING: no scheduled task, tray app or watcher process was detected.')
         }
 
         $text = $lines -join [Environment]::NewLine

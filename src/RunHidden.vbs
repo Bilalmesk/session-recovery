@@ -1,10 +1,12 @@
 ' Session Recovery helper
 ' Starts a PowerShell script with no visible window.
 '
-' Usage: wscript.exe RunHidden.vbs [save|watch|restore]
-'   save     take one snapshot (default)
-'   watch    keep taking snapshots every few minutes
-'   restore  show the restore prompt after a logon
+' Usage: wscript.exe RunHidden.vbs [save|watch|tray|tray-monitor|restore]
+'   save          take one snapshot (default)
+'   watch         keep taking snapshots every few minutes
+'   tray          run the background tray app and take snapshots
+'   tray-monitor  run the tray app without owning the snapshot timer
+'   restore       show the restore prompt after a logon
 
 Option Explicit
 
@@ -23,6 +25,8 @@ here = fso.GetParentFolderName(WScript.ScriptFullName)
 Select Case mode
     Case "watch"
         scriptPath = fso.BuildPath(here, "Watch-Session.ps1")
+    Case "tray", "tray-monitor"
+        scriptPath = fso.BuildPath(here, "Tray-SessionRecovery.ps1")
     Case "restore"
         scriptPath = fso.BuildPath(here, "Restore-Session.ps1")
     Case Else
@@ -39,6 +43,10 @@ command = """" & powershellPath & """ -NoProfile -ExecutionPolicy Bypass -Window
 Select Case mode
     Case "restore"
         command = command & " -StartupDelaySeconds 20"
+    Case "tray-monitor"
+        command = command & " -MonitorOnly"
+    Case "tray"
+        ' no extra arguments
     Case "watch"
         ' no extra arguments
     Case Else

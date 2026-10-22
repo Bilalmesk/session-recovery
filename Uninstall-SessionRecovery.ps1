@@ -54,17 +54,17 @@ Write-Host 'Uninstalling Session Recovery...'
 Write-Host ''
 
 # ---------------------------------------------------------------------------
-# Stop the hidden watcher, if it is running
+# Stop the hidden watcher or tray app, if running
 # ---------------------------------------------------------------------------
 
 try {
-    $watchers = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object {
-        $_.CommandLine -and ($_.CommandLine -match '(?i)Watch-Session\.ps1')
+    $backgroundProcesses = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object {
+        $_.CommandLine -and ($_.CommandLine -match '(?i)Watch-Session\.ps1|Tray-SessionRecovery\.ps1')
     })
-    foreach ($watcher in $watchers) {
+    foreach ($process in $backgroundProcesses) {
         try {
-            Stop-Process -Id ([int]$watcher.ProcessId) -Force -ErrorAction Stop
-            Write-Host ("  Stopped watcher process {0}" -f $watcher.ProcessId)
+            Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction Stop
+            Write-Host ("  Stopped background process {0}" -f $process.ProcessId)
         } catch { }
     }
 } catch { }
@@ -90,7 +90,7 @@ foreach ($name in $taskNames) {
 # ---------------------------------------------------------------------------
 
 $startupDirectory = [Environment]::GetFolderPath('Startup')
-foreach ($name in @('Session Recovery - Snapshot Watcher.lnk', 'Session Recovery - Restore Prompt.lnk')) {
+foreach ($name in @('Session Recovery - Background.lnk', 'Session Recovery - Snapshot Watcher.lnk', 'Session Recovery - Restore Prompt.lnk')) {
     $path = Join-Path $startupDirectory $name
     if (Test-Path -LiteralPath $path) {
         Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue

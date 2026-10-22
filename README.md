@@ -1,4 +1,4 @@
-# Session Recovery
+﻿# Session Recovery
 
 **Reopen the apps, Explorer folders and browser tabs that were open before a crash, power cut or unexpected restart.**
 
@@ -8,14 +8,15 @@ Session Recovery is a local Windows utility. It snapshots your desktop every few
 
 - Windows 10/11 with Windows PowerShell 5.1.
 - Chrome, Edge, Brave, Vivaldi, Opera and Firefox.
-- Uses Task Scheduler (one UAC prompt) or a Startup-folder watcher with no administrator rights.
+- Uses a background notification-area app (no administrator rights) or Task Scheduler.
 - Everything stays on your PC.
 
 ## Features
 
 - Automatic snapshots every 3 minutes, plus one at logon.
+- Background tray app with restore, snapshot-now, pause, folders, settings, diagnostics and exit actions.
 - Crash-aware restore prompt, manual restore window, and unattended command-line restore.
-- Apps, File Explorer folders and grouped browser tabs are restored together.
+- Apps, File Explorer folders and grouped browser tabs are restored together, with app icons in the restore list.
 - Duplicate tabs and browser window groups are preserved.
 - Capture exclusions keep chosen apps, folders and URLs out of new snapshots.
 - Selective restore by app, folder or browser, with wildcard include/exclude filters.
@@ -24,7 +25,13 @@ Session Recovery is a local Windows utility. It snapshots your desktop every few
 
 ## Quick start
 
-### Install
+### Install from the MSI
+
+Download `SessionRecovery-<version>.msi` from the GitHub **Releases** page and run it. The MSI installs per-user into `%LOCALAPPDATA%\SessionRecovery\app` without a UAC prompt. It creates the Start Menu shortcuts, the desktop **Restore Session** shortcut, a Startup entry that launches the background tray app after the next sign-in, and a Startup entry for the crash restore prompt.
+
+The MSI is not code-signed. If Windows SmartScreen appears, choose **More info → Run anyway** after verifying the SHA256 published with the release.
+
+### Install with the PowerShell installer
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-SessionRecovery.ps1
@@ -35,20 +42,23 @@ Windows shows a UAC prompt once and registers two scheduled tasks:
 - `SessionRecovery-Snapshot` — snapshots at logon and every 3 minutes.
 - `SessionRecovery-RestorePrompt` — checks for a crash at logon.
 
+The tray app also starts at sign-in in monitor-only mode, so you still get the notification-area controls.
+
 To install without administrator rights:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-SessionRecovery.ps1 -NoTasks
 ```
 
-This creates a hidden watcher and restore prompt in the Startup folder instead.
+This creates a background tray app and restore prompt in the Startup folder instead. The tray app owns the snapshot timer.
 
 The installer creates:
 
 - Program files in `%LOCALAPPDATA%\SessionRecovery\app`.
 - Data in `%LOCALAPPDATA%\SessionRecovery` (`snapshots`, `logs`, `config.json`).
-- Start Menu shortcuts: **Restore Session**, **Take Snapshot Now**, **Run Diagnostics** and **Uninstall Session Recovery**.
+- Start Menu shortcuts: **Restore Session**, **Take Snapshot Now**, **Run in Background**, **Run Diagnostics** and **Uninstall Session Recovery**.
 - A desktop **Restore Session** shortcut.
+- A **Session Recovery - Background** Startup entry. The MSI and `-NoTasks` mode also add a **Session Recovery - Restore Prompt** Startup entry.
 
 ### Check that it works
 
@@ -70,7 +80,7 @@ Open **Restore Session** to confirm the window lists your current apps and folde
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `-NoTasks` | off | Use the Startup-folder watcher instead of scheduled tasks. No administrator rights. |
+| `-NoTasks` | off | Use the background tray app instead of scheduled tasks. No administrator rights. |
 | `-IntervalMinutes <n>` | `3` | Minutes between snapshots. |
 | `-KeepSnapshots <n>` | `48` | Maximum number of snapshot files. |
 | `-KeepSnapshotDays <n>` | `0` | Delete snapshots older than this many days. `0` disables age cleanup. |
@@ -93,7 +103,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-SessionRecovery.ps
 powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-SessionRecovery.ps1 -NoTasks -PromptOnLogon Always
 ```
 
-Re-running the installer replaces program files, stops an old watcher and preserves snapshots and most settings.
+Re-running the installer replaces program files, stops the old background app and preserves snapshots and most settings.
+
+## Background tray
+
+The notification-area app makes the background state visible and gives you quick controls:
+
+- **Left-click** the icon to open the restore window.
+- **Right-click** for the menu: restore, take a snapshot now, pause or resume automatic snapshots, open the snapshots folder, edit settings, run diagnostics, or exit.
+- The tooltip and menu show the latest snapshot time and the current background mode.
+- **Pause** is available when the tray app owns the snapshot timer. When Windows scheduled tasks are driving snapshots, the tray runs in monitor-only mode so snapshots are never duplicated.
+- The tray app starts from the Startup folder. The MSI and `-NoTasks` installer use it as the only background process; the scheduled-task installer uses it as a status and control surface.
+
+If the tray icon is hidden by Windows, open the notification-area overflow (the `^` chevron) and drag **Session Recovery** onto the taskbar to keep it visible.
 
 ## How it works
 
@@ -222,7 +244,7 @@ Add patterns inside the existing JSON object:
 
 Patterns are case-insensitive. If every tab in a browser profile is excluded, that profile is omitted so native restore cannot reopen the excluded pages.
 
-Watcher mode and one-shot snapshots read exclusions on every capture; no restart is needed. Scheduled-task mode also reads them at runtime. **Only new snapshots are affected.** Existing JSON files still contain anything captured earlier.
+Tray mode and one-shot snapshots read exclusions on every capture; no restart is needed. Scheduled-task mode also reads them at runtime. **Only new snapshots are affected.** Existing JSON files still contain anything captured earlier.
 
 To verify, take a snapshot and inspect it:
 
@@ -235,7 +257,7 @@ Get-ChildItem "$env:LOCALAPPDATA\SessionRecovery\snapshots" -Filter 'session-*.j
 
 ### Applying changes
 
-- **Watcher mode (`-NoTasks`):** interval, retention and exclusions are read every cycle.
+- **Tray mode (`-NoTasks` or MSI):** interval, retention and exclusions are read every cycle.
 - **Scheduled-task mode:** retention, exclusions and restore settings are read at runtime. Re-run the installer to change the snapshot interval.
 - **Reinstalling:** install-time options are applied, while snapshots, exclusions and other settings are preserved.
 - Both retention limits apply: a file is deleted when it is beyond the count or older than `keepSnapshotDays`.
@@ -252,7 +274,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $diagnostics -Json
 powershell -NoProfile -ExecutionPolicy Bypass -File $diagnostics -ReportPath "$env:TEMP\session-recovery-report.txt"
 ```
 
-The report checks program files, config validity, snapshot count/size/age, watcher or scheduled-task mode, browsers, settings, exclusions and recent log lines.
+The report checks program files, config validity, snapshot count/size/age, tray or scheduled-task mode, browsers, settings, exclusions and recent log lines.
 
 You can also call the module directly:
 
@@ -280,7 +302,7 @@ Diagnostics are local-only. Reports contain paths, URLs and log messages, so rev
 
 ## Troubleshooting
 
-Start with **Run Diagnostics**. It usually shows whether the problem is config, snapshots, the watcher or a task.
+Start with **Run Diagnostics**. It usually shows whether the problem is config, snapshots, the tray app or a task.
 
 For a manual check:
 
@@ -289,14 +311,14 @@ $root = Join-Path $env:LOCALAPPDATA 'SessionRecovery'
 Get-Content (Join-Path $root 'logs\session-recovery.log') -Tail 50
 Get-ChildItem (Join-Path $root 'snapshots') -File | Sort-Object LastWriteTime -Descending | Select-Object -First 5 Name, Length, LastWriteTime
 Get-ScheduledTask -TaskName 'SessionRecovery-*' -ErrorAction SilentlyContinue | Format-Table TaskName, State
-Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.CommandLine -like '*Watch-Session.ps1*' } | Select-Object ProcessId, CommandLine
+Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.CommandLine -match 'Tray-SessionRecovery.ps1|Watch-Session.ps1' } | Select-Object ProcessId, CommandLine
 ```
 
 | Problem | What to check |
 | --- | --- |
 | Installer blocked | Run it with `powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-SessionRecovery.ps1`; unblock downloaded files with `Unblock-File`. |
 | No UAC or tasks missing | Install with `-NoTasks`, or re-run and approve UAC. Check Task Scheduler and Task Manager → Startup. |
-| No snapshots | Run `Save-Session.ps1`; check the log, snapshot folder permissions, free space, and whether the watcher or task is running. |
+| No snapshots | Run `Save-Session.ps1`; check the log, snapshot folder permissions, free space, and whether the tray app or task is running. |
 | No restore prompt after a crash | Check `promptOnLogon`, `maxRestoreAgeHours`, crash detection and whether the prompt was already skipped. Use **Restore Session**. |
 | Prompt appears after a normal restart | Crash detection is heuristic. Set `promptOnLogon` to `Never` or click **Skip**. |
 | Apps missing from a snapshot | Only visible top-level windows are captured. UWP apps, elevated apps, tray-only apps and apps that exited are skipped. |
@@ -337,7 +359,9 @@ Get-WinEvent -FilterHashtable @{
 
 ## Uninstall
 
-Use **Start Menu → Session Recovery → Uninstall Session Recovery**, or:
+If you installed from the MSI, use **Settings → Apps → Installed apps → Session Recovery → Uninstall**, or **Start Menu → Session Recovery → Uninstall Session Recovery**. The MSI removes program files and shortcuts but keeps your snapshots and settings.
+
+For the PowerShell installer, use **Start Menu → Session Recovery → Uninstall Session Recovery**, or:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\SessionRecovery\app\Uninstall-SessionRecovery.ps1"
@@ -345,11 +369,22 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\SessionRe
 
 Add `-RemoveData` to delete snapshots, logs and config as well. Removing scheduled tasks may require UAC.
 
+## Building the MSI
+
+Prerequisites: .NET SDK 6 or newer and internet access for the WiX NuGet restore.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\Build-MSI.ps1 -Version 1.0.0
+```
+
+The build writes `dist\SessionRecovery-1.0.0.msi`, its `.sha256` file and a short release README. `dist\` is intentionally ignored by Git; publish the MSI as a GitHub Release asset rather than committing it.
+
 ## Running from source
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Import-Module '.\src\SessionRecovery.psm1' -Force; Save-SRSnapshot"
 powershell -NoProfile -ExecutionPolicy Bypass -File .\src\Restore-Session.ps1 -Manual
+powershell -NoProfile -ExecutionPolicy Bypass -File .\src\Tray-SessionRecovery.ps1 -MonitorOnly
 powershell -NoProfile -ExecutionPolicy Bypass -File .\src\Diagnostics.ps1
 ```
 
@@ -369,11 +404,14 @@ session-recovery/
 ├── Install-SessionRecovery.ps1      Installer and shortcuts
 ├── Uninstall-SessionRecovery.ps1    Uninstaller
 ├── README.md                        This guide
+├── assets/                          Brand icon and installer artwork
+├── installer/                       WiX MSI project and build script
 └── src/
     ├── SessionRecovery.psm1         Capture, exclusions, browsers, diagnostics, restore engine
     ├── Save-Session.ps1             One-shot snapshot
     ├── Restore-Session.ps1          Restore UI, selective CLI restore, snapshot listing
+    ├── Tray-SessionRecovery.ps1     Notification-area app and background snapshot timer
     ├── Diagnostics.ps1              Health report
-    ├── Watch-Session.ps1            Hidden watcher
+    ├── Watch-Session.ps1            Legacy hidden watcher (compatibility)
     └── RunHidden.vbs                Hidden launcher
 ```

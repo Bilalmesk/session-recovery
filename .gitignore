@@ -6,3 +6,10 @@ test-data/
 *.tmp
 Thumbs.db
 .DS_Store
+
+# MSI build output
+dist/
+installer/obj/
+installer/bin/
+*.wixpdb
+*.wixobj
