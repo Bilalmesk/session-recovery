@@ -61,6 +61,9 @@ try {
     $backgroundProcesses = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object {
         $_.CommandLine -and ($_.CommandLine -match '(?i)Watch-Session\.ps1|Tray-SessionRecovery\.ps1')
     })
+    $backgroundProcesses += @(Get-CimInstance Win32_Process -Filter "Name='SessionRecovery.exe'" -ErrorAction SilentlyContinue | Where-Object {
+        $_.CommandLine -and ($_.CommandLine -match '(?i)--tray')
+    })
     foreach ($process in $backgroundProcesses) {
         try {
             Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction Stop
@@ -104,10 +107,13 @@ if (Test-Path -LiteralPath $startMenuFolder) {
     Write-Host '  Removed Start Menu folder: Session Recovery'
 }
 
-$desktopShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Restore Session.lnk'
-if (Test-Path -LiteralPath $desktopShortcut) {
-    Remove-Item -LiteralPath $desktopShortcut -Force -ErrorAction SilentlyContinue
-    Write-Host '  Removed desktop shortcut: Restore Session'
+$desktop = [Environment]::GetFolderPath('Desktop')
+foreach ($name in @('Session Recovery.lnk', 'Restore Session.lnk')) {
+    $desktopShortcut = Join-Path $desktop $name
+    if (Test-Path -LiteralPath $desktopShortcut) {
+        Remove-Item -LiteralPath $desktopShortcut -Force -ErrorAction SilentlyContinue
+        Write-Host ("  Removed desktop shortcut: {0}" -f $name)
+    }
 }
 
 # ---------------------------------------------------------------------------

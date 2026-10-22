@@ -8,12 +8,12 @@
 
     Examples
       powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\Build-MSI.ps1
-      powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\Build-MSI.ps1 -Version 1.0.1
+      powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\Build-MSI.ps1 -Version 2.0.1
 #>
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string]$Version = '1.0.0',
+    [string]$Version = '2.0.0',
     [switch]$NoRestore
 )
 
@@ -32,6 +32,17 @@ if (-not (Test-Path -LiteralPath $project)) {
 
 if (-not (Test-Path -LiteralPath $dist)) {
     New-Item -ItemType Directory -Path $dist -Force | Out-Null
+}
+
+# The native host is generated, so always make sure the MSI picks up a fresh
+# binary before WiX compiles the package.
+$launcherBuilder = Join-Path $PSScriptRoot 'Build-Launcher.ps1'
+if (-not (Test-Path -LiteralPath $launcherBuilder)) {
+    throw "Launcher build script not found: $launcherBuilder"
+}
+& $launcherBuilder -Force
+if ($LASTEXITCODE -ne 0) {
+    throw "Launcher build failed with exit code $LASTEXITCODE."
 }
 
 $buildArgs = @(
@@ -64,20 +75,33 @@ Session Recovery {0}
 Reopen the apps, File Explorer folders and browser tabs that were open before
 a crash, power cut or unexpected restart.
 
+What's new in 2.0
+-----------------
+- Modern Session Recovery Studio with Dashboard, Snapshots, Exclusions,
+  Settings, Diagnostics and About pages.
+- Native SessionRecovery.exe host: no visible cmd or PowerShell windows.
+- Improved Chrome/Chromium tab capture with structured session files,
+  UI Automation and local history fallback. Approximate tabs are marked.
+- Snapshot timeline with previews and one-click restore.
+- Optional desktop shortcut and a choose-your-folder installer.
+
 Install
 -------
 1. Download both files from the GitHub Releases page:
      SessionRecovery-{0}.msi
      SessionRecovery-{0}.msi.sha256
-2. Run the MSI. It installs for the current user in:
+2. Run the MSI. The Custom Setup page lets you choose the install folder and
+   keep or clear the optional Desktop shortcut. The default install is for the
+   current user in:
      %LOCALAPPDATA%\SessionRecovery\app
    No administrator rights are required.
    The MSI is not code-signed. If Windows SmartScreen appears, choose
    More info > Run anyway after checking the SHA256 below.
-3. Session Recovery starts in the notification area after the next sign-in.
-   You can also open Start Menu > Session Recovery > Run in Background.
-4. Left-click the tray icon to restore a session, or right-click it for the
-   menu (snapshot now, pause, folders, settings, diagnostics, exit).
+3. A Session Recovery desktop icon opens the Studio. The background app starts
+   after the next sign-in; you can also open Start Menu > Session Recovery >
+   Run in Background.
+4. Left-click the tray icon to open the Studio, or right-click it for the menu
+   (restore, snapshot now, pause, folders, settings, diagnostics, exit).
 
 Verify the download (optional)
 ------------------------------

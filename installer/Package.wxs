@@ -21,14 +21,29 @@
     <Property Id="MSIINSTALLPERUSER" Value="1" />
     <Property Id="ARPPRODUCTICON" Value="SessionRecoveryIcon" />
     <Property Id="ARPNOREPAIR" Value="1" />
-    <Property Id="WIXUI_EXITDIALOGOPTIONALTEXT" Value="Session Recovery will start automatically after your next sign-in." />
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALTEXT" Value="Session Recovery is ready. Open it from the Start Menu or the desktop shortcut." />
 
-    <Feature Id="MainFeature" Title="Session Recovery" Level="1">
+    <!-- Remember a custom install folder so uninstall resolves the same path.
+         Without this, Windows Installer falls back to the default per-user
+         folder and leaves a custom-location install behind. -->
+    <Property Id="INSTALLFOLDER">
+      <RegistrySearch Id="InstallFolderSearch" Root="HKCU" Key="Software\SessionRecovery" Name="InstallDir" Type="raw" />
+    </Property>
+
+    <Feature Id="MainFeature" Title="Session Recovery" Description="The Session Recovery Studio, background protection and restore tools." Level="1" AllowAbsent="no">
       <ComponentGroupRef Id="ApplicationComponents" />
       <ComponentGroupRef Id="MenuComponents" />
+      <ComponentGroupRef Id="StartupComponents" />
     </Feature>
 
-    <ui:WixUI Id="WixUI_Minimal" />
+    <Feature Id="DesktopShortcutFeature" Title="Desktop shortcut" Description="Create a Session Recovery icon on the desktop." Level="1">
+      <ComponentGroupRef Id="DesktopShortcutComponents" />
+    </Feature>
+
+    <!-- FeatureTree gives the user a Browse button for the install folder
+         and a checkbox for the optional desktop shortcut. -->
+    <ui:WixUI Id="WixUI_FeatureTree" />
     <WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
     <WixVariable Id="WixUIBannerBmp" Value="..\assets\installer-banner.bmp" />
     <WixVariable Id="WixUIDialogBmp" Value="..\assets\installer-dialog.bmp" />
@@ -49,120 +64,23 @@
 
   <Fragment>
     <ComponentGroup Id="ApplicationComponents" Directory="INSTALLFOLDER">
-      <Component Id="SessionRecoveryModule" Guid="{5A3CB50A-6C42-4154-AFE4-58B91F52662D}">
+      <Component Id="ApplicationFiles" Guid="{5A3CB50A-6C42-4154-AFE4-58B91F52662D}">
+        <File Id="SessionRecoveryExe" Source="..\dist\SessionRecovery.exe" />
         <File Id="SessionRecoveryPsm1" Source="..\src\SessionRecovery.psm1" />
-        <RegistryValue Root="HKCU" Key="Software\SessionRecovery\Components" Name="Module" Type="integer" Value="1" KeyPath="yes" />
+        <File Id="SaveSessionPs1" Source="..\src\Save-Session.ps1" />
+        <File Id="RestoreSessionPs1" Source="..\src\Restore-Session.ps1" />
+        <File Id="TrayAppPs1" Source="..\src\Tray-SessionRecovery.ps1" />
+        <File Id="WatchSessionPs1" Source="..\src\Watch-Session.ps1" />
+        <File Id="DiagnosticsPs1" Source="..\src\Diagnostics.ps1" />
+        <File Id="RunHiddenVbs" Source="..\src\RunHidden.vbs" />
+        <File Id="StudioPs1" Source="..\src\Studio-SessionRecovery.ps1" />
+        <File Id="StudioControlsCs" Source="..\src\StudioControls.cs" />
+        <File Id="BrandIconFile" Source="..\assets\SessionRecovery.ico" />
+        <File Id="ReadmeMd" Source="..\README.md" />
+        <RegistryValue Root="HKCU" Key="Software\SessionRecovery\Components" Name="ApplicationFiles" Type="integer" Value="1" KeyPath="yes" />
+        <RemoveFile Id="RemoveLegacyUninstaller" Name="Uninstall-SessionRecovery.ps1" On="install" />
         <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
         <RemoveFolder Id="RemoveSessionRecoveryRoot" Directory="SessionRecoveryRoot" On="uninstall" />
-      </Component>
-
-      <Component Id="BrandIcon" Guid="{58BCAFC7-E248-42AB-B878-9A8BFAD6FCFD}">
-        <File Id="BrandIconFile" Source="..\assets\SessionRecovery.ico" />
-        <RegistryValue Root="HKCU" Key="Software\SessionRecovery\Components" Name="BrandIcon" Type="integer" Value="1" KeyPath="yes" />
-      </Component>
-
-      <Component Id="SaveSessionScript" Guid="{85A54130-9329-4C8C-BC11-47A002B1C8F5}">
-        <File Id="SaveSessionPs1" Source="..\src\Save-Session.ps1" />
-        <RegistryValue Root="HKCU" Key="Software\SessionRecovery\Components" Name="SaveSession" Type="integer" Value="1" KeyPath="yes" />
-        <Shortcut Id="TakeSnapshotStartMenu"
-                  Directory="ApplicationProgramsFolder"
-                  Name="Take Snapshot Now"
-                  Icon="SessionRecoveryIcon"
-                  Target="[SystemFolder]powershell.exe"
-                  Arguments='-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "[INSTALLFOLDER]Save-Session.ps1" -Quiet'
-                  WorkingDirectory="INSTALLFOLDER"
-                  Description="Save a snapshot of the current windows and tabs right now." />
-      </Component>
-
-      <Component Id="RestoreSessionScript" Guid="{42D5DC06-6D7D-40B0-AFA4-CE140E91DD27}">
-        <File Id="RestoreSessionPs1" Source="..\src\Restore-Session.ps1" />
-        <RegistryValue Root="HKCU" Key="Software\SessionRecovery\Components" Name="RestoreSession" Type="integer" Value="1" KeyPath="yes" />
-        <Shortcut Id="RestoreSessionStartMenu"
-                  Directory="ApplicationProgramsFolder"
-                  Name="Restore Session"
-                  Icon="SessionRecoveryIcon"
-                  Target="[SystemFolder]powershell.exe"
-                  Arguments='-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "[INSTALLFOLDER]Restore-Session.ps1" -Manual'
-                  WorkingDirectory="INSTALLFOLDER"
-                  Description="Reopen the windows and tabs from a saved session." />
-        <Shortcut Id="RestoreSessionDesktop"
-                  Directory="DesktopFolder"
-                  Name="Restore Session"
-                  Icon="SessionRecoveryIcon"
-                  Target="[SystemFolder]powershell.exe"
-                  Arguments='-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "[INSTALLFOLDER]Restore-Session.ps1" -Manual'
-                  WorkingDirectory="INSTALLFOLDER"
-                  Description="Reopen the windows and tabs from a saved session." />
-      </Component>
-
-      <Component Id="WatchSessionScript" Guid="{769B2AFC-D302-48FC-B983-9F25667237B5}">
-        <File Id="WatchSessionPs1" Source="..\src\Watch-Session.ps1" />
-        <RegistryValue Root="HKCU" Key="Software\SessionRecovery\Components" Name="WatchSession" Type="integer" Value="1" KeyPath="yes" />
-      </Component>
-
-      <Component Id="TrayAppScript" Guid="{7F241011-9BF3-40EF-84E0-3D1B232D73A2}">
-        <File Id="TrayAppPs1" Source="..\src\Tray-SessionRecovery.ps1" />
-        <RegistryValue Root="HKCU" Key="Software\SessionRecovery\Components" Name="TrayApp" Type="integer" Value="1" KeyPath="yes" />
-        <Shortcut Id="RunInBackgroundStartMenu"
-                  Directory="ApplicationProgramsFolder"
-                  Name="Run in Background"
-                  Icon="SessionRecoveryIcon"
-                  Target="[SystemFolder]wscript.exe"
-                  Arguments='"[INSTALLFOLDER]RunHidden.vbs" tray'
-                  WorkingDirectory="INSTALLFOLDER"
-                  Description="Start the Session Recovery notification-area app." />
-      </Component>
-
-      <Component Id="DiagnosticsScript" Guid="{65ED6429-FF46-4CB1-8FC0-B85A4ED6C8CB}">
-        <File Id="DiagnosticsPs1" Source="..\src\Diagnostics.ps1" />
-        <RegistryValue Root="HKCU" Key="Software\SessionRecovery\Components" Name="Diagnostics" Type="integer" Value="1" KeyPath="yes" />
-        <Shortcut Id="DiagnosticsStartMenu"
-                  Directory="ApplicationProgramsFolder"
-                  Name="Run Diagnostics"
-                  Icon="SessionRecoveryIcon"
-                  Target="[SystemFolder]powershell.exe"
-                  Arguments='-NoProfile -ExecutionPolicy Bypass -NoExit -File "[INSTALLFOLDER]Diagnostics.ps1"'
-                  WorkingDirectory="INSTALLFOLDER"
-                  Description="Show a Session Recovery health report." />
-      </Component>
-
-      <Component Id="RunHiddenScript" Guid="{5B5C4737-FD7B-4014-9FA0-74D049DFBBE5}">
-        <File Id="RunHiddenVbs" Source="..\src\RunHidden.vbs" />
-        <RegistryValue Root="HKCU" Key="Software\SessionRecovery\Components" Name="RunHidden" Type="integer" Value="1" KeyPath="yes" />
-        <Shortcut Id="StartupBackgroundShortcut"
-                  Directory="StartupFolder"
-                  Name="Session Recovery - Background"
-                  Icon="SessionRecoveryIcon"
-                  Target="[SystemFolder]wscript.exe"
-                  Arguments='"[INSTALLFOLDER]RunHidden.vbs" tray'
-                  WorkingDirectory="INSTALLFOLDER"
-                  Description="Session Recovery: runs the notification-area app and keeps snapshots while you are logged on." />
-        <Shortcut Id="StartupRestoreShortcut"
-                  Directory="StartupFolder"
-                  Name="Session Recovery - Restore Prompt"
-                  Icon="SessionRecoveryIcon"
-                  Target="[SystemFolder]wscript.exe"
-                  Arguments='"[INSTALLFOLDER]RunHidden.vbs" restore'
-                  WorkingDirectory="INSTALLFOLDER"
-                  Description="Session Recovery: shows the restore prompt after logon." />
-      </Component>
-
-      <Component Id="LegacyStartupCleanup" Directory="StartupFolder" Guid="{B5ADE475-3606-4ECA-92B0-3C4EEA1DDB4B}">
-        <RemoveFile Id="RemoveLegacyWatcherShortcut" Name="Session Recovery - Snapshot Watcher.lnk" On="install" />
-        <RegistryValue Root="HKCU" Key="Software\SessionRecovery\Components" Name="LegacyStartupCleanup" Type="integer" Value="1" KeyPath="yes" />
-      </Component>
-
-      <Component Id="ReadmeFile" Guid="{B57FF865-685C-471D-A1C0-847FA6EC10DB}">
-        <File Id="ReadmeMd" Source="..\README.md" />
-        <RegistryValue Root="HKCU" Key="Software\SessionRecovery\Components" Name="Readme" Type="integer" Value="1" KeyPath="yes" />
-        <Shortcut Id="UninstallStartMenu"
-                  Directory="ApplicationProgramsFolder"
-                  Name="Uninstall Session Recovery"
-                  Icon="SessionRecoveryIcon"
-                  Target="[SystemFolder]msiexec.exe"
-                  Arguments='/x [ProductCode]'
-                  WorkingDirectory="INSTALLFOLDER"
-                  Description="Remove Session Recovery." />
       </Component>
     </ComponentGroup>
   </Fragment>
@@ -174,6 +92,95 @@
         <RemoveFolder Id="RemoveStartMenuFolder" On="uninstall" />
         <RegistryValue Root="HKCU" Key="Software\SessionRecovery" Name="InstallDir" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
         <RemoveRegistryKey Root="HKCU" Key="Software\SessionRecovery" Action="removeOnUninstall" />
+
+        <Shortcut Id="StudioStartMenu"
+                  Directory="ApplicationProgramsFolder"
+                  Name="Session Recovery"
+                  Icon="SessionRecoveryIcon"
+                  Target="[INSTALLFOLDER]SessionRecovery.exe"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Description="Open the Session Recovery Studio." />
+        <Shortcut Id="TakeSnapshotStartMenu"
+                  Directory="ApplicationProgramsFolder"
+                  Name="Take Snapshot Now"
+                  Icon="SessionRecoveryIcon"
+                  Target="[INSTALLFOLDER]SessionRecovery.exe"
+                  Arguments="--snapshot"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Description="Save a snapshot of the current windows and tabs right now." />
+        <Shortcut Id="RestoreSessionStartMenu"
+                  Directory="ApplicationProgramsFolder"
+                  Name="Restore Session"
+                  Icon="SessionRecoveryIcon"
+                  Target="[INSTALLFOLDER]SessionRecovery.exe"
+                  Arguments="--restore-manual"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Description="Reopen the windows and tabs from a saved session." />
+        <Shortcut Id="RunInBackgroundStartMenu"
+                  Directory="ApplicationProgramsFolder"
+                  Name="Run in Background"
+                  Icon="SessionRecoveryIcon"
+                  Target="[INSTALLFOLDER]SessionRecovery.exe"
+                  Arguments="--tray"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Description="Start the Session Recovery notification-area app." />
+        <Shortcut Id="DiagnosticsStartMenu"
+                  Directory="ApplicationProgramsFolder"
+                  Name="Run Diagnostics"
+                  Icon="SessionRecoveryIcon"
+                  Target="[INSTALLFOLDER]SessionRecovery.exe"
+                  Arguments="--diagnostics"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Description="Show a Session Recovery health report." />
+        <Shortcut Id="UninstallStartMenu"
+                  Directory="ApplicationProgramsFolder"
+                  Name="Uninstall Session Recovery"
+                  Icon="SessionRecoveryIcon"
+                  Target="[SystemFolder]msiexec.exe"
+                  Arguments="/x [ProductCode]"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Description="Remove Session Recovery." />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+
+  <Fragment>
+    <ComponentGroup Id="StartupComponents">
+      <Component Id="StartupShortcuts" Directory="StartupFolder" Guid="{5B5C4737-FD7B-4014-9FA0-74D049DFBBE5}">
+        <Shortcut Id="StartupBackgroundShortcut"
+                  Directory="StartupFolder"
+                  Name="Session Recovery - Background"
+                  Icon="SessionRecoveryIcon"
+                  Target="[INSTALLFOLDER]SessionRecovery.exe"
+                  Arguments="--tray"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Description="Session Recovery: runs the notification-area app and keeps snapshots while you are logged on." />
+        <Shortcut Id="StartupRestoreShortcut"
+                  Directory="StartupFolder"
+                  Name="Session Recovery - Restore Prompt"
+                  Icon="SessionRecoveryIcon"
+                  Target="[INSTALLFOLDER]SessionRecovery.exe"
+                  Arguments="--restore-prompt"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Description="Session Recovery: shows the restore prompt after logon." />
+        <RemoveFile Id="RemoveLegacyWatcherShortcut" Name="Session Recovery - Snapshot Watcher.lnk" On="install" />
+        <RegistryValue Root="HKCU" Key="Software\SessionRecovery\Components" Name="StartupShortcuts" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+
+  <Fragment>
+    <ComponentGroup Id="DesktopShortcutComponents">
+      <Component Id="DesktopShortcut" Directory="DesktopFolder" Guid="{D8A2B4C1-6E3F-4A2B-9C7D-5E1F2A3B4C6D}">
+        <Shortcut Id="DesktopStudioShortcut"
+                  Directory="DesktopFolder"
+                  Name="Session Recovery"
+                  Icon="SessionRecoveryIcon"
+                  Target="[INSTALLFOLDER]SessionRecovery.exe"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Description="Open the Session Recovery Studio." />
+        <RemoveFile Id="RemoveLegacyRestoreDesktop" Name="Restore Session.lnk" On="install" />
+        <RegistryValue Root="HKCU" Key="Software\SessionRecovery\Components" Name="DesktopShortcut" Type="integer" Value="1" KeyPath="yes" />
       </Component>
     </ComponentGroup>
   </Fragment>

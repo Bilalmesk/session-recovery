@@ -2,32 +2,43 @@
 
 **Reopen the apps, Explorer folders and browser tabs that were open before a crash, power cut or unexpected restart.**
 
-Session Recovery is a local Windows utility. It snapshots your desktop every few minutes and offers to restore it after an unexpected shutdown. No external modules, no browser extension, no telemetry.
+Session Recovery is a local Windows utility with a native desktop Studio. It snapshots your desktop every few minutes and offers to restore it after an unexpected shutdown. No external modules, no browser extension, no telemetry.
 
 > **Important:** It reopens applications and tabs. It cannot recover unsaved document contents, passwords or form data.
 
 - Windows 10/11 with Windows PowerShell 5.1.
 - Chrome, Edge, Brave, Vivaldi, Opera and Firefox.
-- Uses a background notification-area app (no administrator rights) or Task Scheduler.
+- Native `SessionRecovery.exe` host: no visible `cmd` or PowerShell windows.
 - Everything stays on your PC.
 
 ## Features
 
+- Modern **Session Recovery Studio** with Dashboard, Snapshots, Exclusions, Settings, Diagnostics and About pages.
 - Automatic snapshots every 3 minutes, plus one at logon.
-- Background tray app with restore, snapshot-now, pause, folders, settings, diagnostics and exit actions.
+- Native tray app with Studio, restore, snapshot-now, pause, folders, settings, diagnostics and exit actions.
+- Snapshot timeline with previews and one-click restore.
 - Crash-aware restore prompt, manual restore window, and unattended command-line restore.
 - Apps, File Explorer folders and grouped browser tabs are restored together, with app icons in the restore list.
+- Chrome/Chromium capture uses structured session files first, then UI Automation and local browser history as a safe fallback. Approximate tabs are marked in the snapshot and in the Studio.
 - Duplicate tabs and browser window groups are preserved.
 - Capture exclusions keep chosen apps, folders and URLs out of new snapshots.
 - Selective restore by app, folder or browser, with wildcard include/exclude filters.
-- Snapshot listing, age-based cleanup and a diagnostics report.
+- Snapshot listing, age-based cleanup, health checks and a diagnostics report.
+- Optional desktop shortcut, startup protection and notification controls.
 - Local snapshots, logs and settings only; nothing is uploaded.
 
 ## Quick start
 
 ### Install from the MSI
 
-Download `SessionRecovery-<version>.msi` from the GitHub **Releases** page and run it. The MSI installs per-user into `%LOCALAPPDATA%\SessionRecovery\app` without a UAC prompt. It creates the Start Menu shortcuts, the desktop **Restore Session** shortcut, a Startup entry that launches the background tray app after the next sign-in, and a Startup entry for the crash restore prompt.
+Download `SessionRecovery-<version>.msi` from the GitHub **Releases** page and run it. The MSI installs per-user without a UAC prompt and keeps your snapshots and settings when you upgrade.
+
+The setup wizard includes a **Custom Setup** page where you can:
+
+- choose the install folder (the default is `%LOCALAPPDATA%\SessionRecovery\app`);
+- keep or clear the optional **Desktop shortcut** feature.
+
+By default it creates a **Session Recovery** desktop icon, Start Menu shortcuts, a Startup entry that launches the native background app after the next sign-in, and a Startup entry for the crash restore prompt. The desktop icon and **Session Recovery** Start Menu item open the Studio directly.
 
 The MSI is not code-signed. If Windows SmartScreen appears, choose **More info → Run anyway** after verifying the SHA256 published with the release.
 
@@ -42,7 +53,7 @@ Windows shows a UAC prompt once and registers two scheduled tasks:
 - `SessionRecovery-Snapshot` — snapshots at logon and every 3 minutes.
 - `SessionRecovery-RestorePrompt` — checks for a crash at logon.
 
-The tray app also starts at sign-in in monitor-only mode, so you still get the notification-area controls.
+Both tasks run the native `SessionRecovery.exe`, so no console windows appear. The tray app also starts at sign-in in monitor-only mode, so you still get the notification-area controls.
 
 To install without administrator rights:
 
@@ -56,13 +67,13 @@ The installer creates:
 
 - Program files in `%LOCALAPPDATA%\SessionRecovery\app`.
 - Data in `%LOCALAPPDATA%\SessionRecovery` (`snapshots`, `logs`, `config.json`).
-- Start Menu shortcuts: **Restore Session**, **Take Snapshot Now**, **Run in Background**, **Run Diagnostics** and **Uninstall Session Recovery**.
-- A desktop **Restore Session** shortcut.
+- Start Menu shortcuts: **Session Recovery**, **Restore Session**, **Take Snapshot Now**, **Run in Background**, **Run Diagnostics** and **Uninstall Session Recovery**.
+- A desktop **Session Recovery** shortcut.
 - A **Session Recovery - Background** Startup entry. The MSI and `-NoTasks` mode also add a **Session Recovery - Restore Prompt** Startup entry.
 
 ### Check that it works
 
-Open **Start Menu → Session Recovery → Take Snapshot Now**, then check the log:
+Open **Session Recovery** from the desktop or Start Menu, then click **Capture now** on the Dashboard. The Snapshots page should show the new snapshot immediately. You can also check the log:
 
 ```powershell
 Get-Content "$env:LOCALAPPDATA\SessionRecovery\logs\session-recovery.log" -Tail 10
@@ -74,7 +85,7 @@ You should see `Snapshot saved`. Snapshots are stored in:
 %LOCALAPPDATA%\SessionRecovery\snapshots
 ```
 
-Open **Restore Session** to confirm the window lists your current apps and folders. If something looks wrong, open **Run Diagnostics**.
+Use **Restore Session** in the Studio or Start Menu to confirm the window lists your current apps and folders. If something looks wrong, open **Diagnostics** in the Studio.
 
 ## Installation options
 
@@ -107,13 +118,14 @@ Re-running the installer replaces program files, stops the old background app an
 
 ## Background tray
 
-The notification-area app makes the background state visible and gives you quick controls:
+The native notification-area app makes the background state visible and gives you quick controls:
 
-- **Left-click** the icon to open the restore window.
-- **Right-click** for the menu: restore, take a snapshot now, pause or resume automatic snapshots, open the snapshots folder, edit settings, run diagnostics, or exit.
+- **Left-click** the icon to open the Session Recovery Studio.
+- **Right-click** for the menu: Open Session Recovery, restore, take a snapshot now, pause or resume automatic snapshots, open the snapshots folder, settings, diagnostics, or exit.
 - The tooltip and menu show the latest snapshot time and the current background mode.
 - **Pause** is available when the tray app owns the snapshot timer. When Windows scheduled tasks are driving snapshots, the tray runs in monitor-only mode so snapshots are never duplicated.
 - The tray app starts from the Startup folder. The MSI and `-NoTasks` installer use it as the only background process; the scheduled-task installer uses it as a status and control surface.
+- The tray app is the native `SessionRecovery.exe --tray`, so it never opens a console window.
 
 If the tray icon is hidden by Windows, open the notification-area overflow (the `^` chevron) and drag **Session Recovery** onto the taskbar to keep it visible.
 
@@ -138,7 +150,9 @@ The prompt does not appear after a clean shutdown, when `promptOnLogon` is `Neve
 
 ### Manual restore window
 
-Use **Start Menu → Session Recovery → Restore Session** or the desktop shortcut. Manual restore:
+Use **Start Menu → Session Recovery → Restore Session**, or open the Studio, select a snapshot on the **Snapshots** page and click **Restore selected**. The desktop **Session Recovery** icon opens the Studio, where the same restore action is one click away.
+
+Manual restore:
 
 - Always opens, even after a clean shutdown.
 - Lets you pick any saved snapshot.
@@ -146,10 +160,16 @@ Use **Start Menu → Session Recovery → Restore Session** or the desktop short
 
 ### Command line
 
-All scripts are in `%LOCALAPPDATA%\SessionRecovery\app`.
+The native host and the scripts are in `%LOCALAPPDATA%\SessionRecovery\app`.
 
 ```powershell
 $app = "$env:LOCALAPPDATA\SessionRecovery\app"
+
+# Native host: take a snapshot without a console window
+& "$app\SessionRecovery.exe" --snapshot
+
+# Native host: open the manual restore window
+& "$app\SessionRecovery.exe" --restore-manual
 
 # List snapshots with age, counts and paths
 powershell -NoProfile -ExecutionPolicy Bypass -File "$app\Restore-Session.ps1" -ListSnapshots
@@ -200,7 +220,7 @@ Filters apply to `-NoUI` and `-DryRun`; the interactive window uses its checkbox
 
 ## Configuration
 
-Settings live in `%LOCALAPPDATA%\SessionRecovery\config.json`.
+Settings live in `%LOCALAPPDATA%\SessionRecovery\config.json`. The Studio **Settings** page edits the common options, applies the startup/desktop shortcuts immediately and saves the file; advanced users can edit the JSON directly.
 
 ```json
 {
@@ -211,6 +231,13 @@ Settings live in `%LOCALAPPDATA%\SessionRecovery\config.json`.
   "maxRestoreAgeHours": 72,
   "restoreBrowsers": true,
   "defaultTabMode": "Smart",
+  "captureBrowserTabs": true,
+  "captureApproximateTabs": true,
+  "tabHistoryLookbackHours": 24,
+  "showNotifications": true,
+  "startWithWindows": true,
+  "desktopShortcut": true,
+  "theme": "Aurora",
   "excludeApps": [],
   "excludeFolders": [],
   "excludeUrls": []
@@ -226,6 +253,13 @@ Settings live in `%LOCALAPPDATA%\SessionRecovery\config.json`.
 | `maxRestoreAgeHours` | `72` | Ignore older snapshots in the automatic prompt. Manual restore still lists them. |
 | `restoreBrowsers` | `true` | Set `false` to remove browsers entirely from restore. |
 | `defaultTabMode` | `Smart` | Initial tab mode: `Smart`, `Captured`, `Native` or `None`. |
+| `captureBrowserTabs` | `true` | Capture browser tabs while taking snapshots. |
+| `captureApproximateTabs` | `true` | Allow the UI Automation/history fallback when a Chromium session file has no tabs. Approximate tabs are marked in the snapshot. |
+| `tabHistoryLookbackHours` | `24` | How far back the Chromium history fallback may look. |
+| `showNotifications` | `true` | Show tray balloons and snapshot toasts. |
+| `startWithWindows` | `true` | Create the **Session Recovery - Background** Startup shortcut. |
+| `desktopShortcut` | `true` | Create the **Session Recovery** desktop shortcut. |
+| `theme` | `Aurora` | Studio theme. `Aurora` is the current dark palette. |
 | `excludeApps` | `[]` | Wildcards matched against app display name and executable path. |
 | `excludeFolders` | `[]` | Wildcards matched against full Explorer folder paths. |
 | `excludeUrls` | `[]` | Wildcards matched against captured browser URLs. |
@@ -264,7 +298,9 @@ Get-ChildItem "$env:LOCALAPPDATA\SessionRecovery\snapshots" -Filter 'session-*.j
 
 ## Diagnostics
 
-Open **Start Menu → Session Recovery → Run Diagnostics**, or run:
+Open **Session Recovery → Diagnostics** in the Studio, or **Start Menu → Session Recovery → Run Diagnostics**. The Studio shows snapshot freshness, background mode, browser detection and recent errors in one place.
+
+For a scripted report, run:
 
 ```powershell
 $diagnostics = "$env:LOCALAPPDATA\SessionRecovery\app\Diagnostics.ps1"
@@ -311,24 +347,24 @@ $root = Join-Path $env:LOCALAPPDATA 'SessionRecovery'
 Get-Content (Join-Path $root 'logs\session-recovery.log') -Tail 50
 Get-ChildItem (Join-Path $root 'snapshots') -File | Sort-Object LastWriteTime -Descending | Select-Object -First 5 Name, Length, LastWriteTime
 Get-ScheduledTask -TaskName 'SessionRecovery-*' -ErrorAction SilentlyContinue | Format-Table TaskName, State
-Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.CommandLine -match 'Tray-SessionRecovery.ps1|Watch-Session.ps1' } | Select-Object ProcessId, CommandLine
+Get-CimInstance Win32_Process -Filter "Name='SessionRecovery.exe'" | Select-Object ProcessId, CommandLine
 ```
 
 | Problem | What to check |
 | --- | --- |
 | Installer blocked | Run it with `powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-SessionRecovery.ps1`; unblock downloaded files with `Unblock-File`. |
 | No UAC or tasks missing | Install with `-NoTasks`, or re-run and approve UAC. Check Task Scheduler and Task Manager → Startup. |
-| No snapshots | Run `Save-Session.ps1`; check the log, snapshot folder permissions, free space, and whether the tray app or task is running. |
+| No snapshots | Open the Studio and click **Capture now**; check the log, snapshot folder permissions, free space, and whether the tray app or task is running. |
 | No restore prompt after a crash | Check `promptOnLogon`, `maxRestoreAgeHours`, crash detection and whether the prompt was already skipped. Use **Restore Session**. |
 | Prompt appears after a normal restart | Crash detection is heuristic. Set `promptOnLogon` to `Never` or click **Skip**. |
 | Apps missing from a snapshot | Only visible top-level windows are captured. UWP apps, elevated apps, tray-only apps and apps that exited are skipped. |
 | Excluded item still appears | Exclusions only affect new snapshots. Check the display name/path/URL pattern, then take a fresh snapshot. |
-| Browser tabs missing or wrong | Use **Captured tabs**. Chromium session files can lag a few minutes; internal and extension URLs are skipped. |
+| Browser tabs missing or wrong | Use **Captured tabs**. Chromium session files can lag; when the fallback is used the Studio marks those tabs as approximate. Internal and extension URLs are skipped. |
 | Extra blank browser window | Some Chromium builds do this. Close it, or use **Captured tabs** after starting the browser. |
 | Apps do not start | The executable may have moved, need elevation, require a custom launcher, or already be running. |
 | Apps start twice | Leave **Force** off and uncheck apps Windows already starts at logon. |
 | Selective restore does nothing | Filters apply only to `-NoUI` and `-DryRun`; check `restoreBrowsers`, run with `-DryRun`, and confirm the snapshot contains the items. |
-| Uninstall leaves files | Sign out and back in, then delete `%LOCALAPPDATA%\SessionRecovery`. Run the uninstaller elevated if tasks remain. |
+| Uninstall leaves files | MSI uninstall now remembers a custom install folder. If files remain from an older build, sign out and back in, then delete `%LOCALAPPDATA%\SessionRecovery`. Run the uninstaller elevated if tasks remain. |
 
 Crash detection is a heuristic. Inspect recent events with:
 
@@ -351,6 +387,7 @@ Get-WinEvent -FilterHashtable @{
 - Pinned tabs reopen as normal tabs; browser internal/extension URLs are skipped.
 - Private/incognito windows are not guaranteed to be captured.
 - Chromium session files can lag; a readable current browser session can win over the snapshot.
+- When a Chromium session file has no usable tabs, the fallback combines UI Automation titles and local history. Those tabs are marked approximate and may miss or add a tab.
 - Exclusions do not rewrite existing snapshots.
 - Selective filters are command-line only; the interactive window uses checkboxes.
 - Age-based retention can delete history permanently.
@@ -374,18 +411,38 @@ Add `-RemoveData` to delete snapshots, logs and config as well. Removing schedul
 Prerequisites: .NET SDK 6 or newer and internet access for the WiX NuGet restore.
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\Build-MSI.ps1 -Version 1.0.0
+powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\Build-MSI.ps1
 ```
 
-The build writes `dist\SessionRecovery-1.0.0.msi`, its `.sha256` file and a short release README. `dist\` is intentionally ignored by Git; publish the MSI as a GitHub Release asset rather than committing it.
+The build compiles the native host first, then writes `dist\SessionRecovery-2.0.0.msi`, its `.sha256` file and a short release README. Use `-Version 2.0.1` for a later build. `dist\` is intentionally ignored by Git; publish the MSI as a GitHub Release asset rather than committing it.
+
+The WiX package uses the per-user model (`ALLUSERS=2`, `MSIINSTALLPERUSER=1`), `WixUI_FeatureTree` for install-folder browsing and optional features, and a **Desktop shortcut** feature that is selected by default but can be cleared in Custom Setup. A registry search remembers a custom install folder so uninstall removes the same files.
 
 ## Running from source
 
 ```powershell
+# Open the Studio without an installed copy
+.\dist\SessionRecovery.exe
+
+# Take a snapshot through the native host
+.\dist\SessionRecovery.exe --snapshot
+
+# Open the restore window, diagnostics or settings directly
+.\dist\SessionRecovery.exe --restore-manual
+.\dist\SessionRecovery.exe --diagnostics
+.\dist\SessionRecovery.exe --settings
+
+# Script-level equivalents
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Import-Module '.\src\SessionRecovery.psm1' -Force; Save-SRSnapshot"
 powershell -NoProfile -ExecutionPolicy Bypass -File .\src\Restore-Session.ps1 -Manual
 powershell -NoProfile -ExecutionPolicy Bypass -File .\src\Tray-SessionRecovery.ps1 -MonitorOnly
 powershell -NoProfile -ExecutionPolicy Bypass -File .\src\Diagnostics.ps1
+```
+
+Build the host with:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\Build-Launcher.ps1 -Force
 ```
 
 To keep test data separate:
@@ -405,13 +462,16 @@ session-recovery/
 ├── Uninstall-SessionRecovery.ps1    Uninstaller
 ├── README.md                        This guide
 ├── assets/                          Brand icon and installer artwork
-├── installer/                       WiX MSI project and build script
+├── installer/                       WiX MSI project, launcher and MSI build scripts
 └── src/
+    ├── SessionRecoveryLauncher.cs   Native winexe host (no console windows)
+    ├── Studio-SessionRecovery.ps1   Studio UI and off-screen render mode
+    ├── StudioControls.cs            Custom WinForms controls for the Studio
     ├── SessionRecovery.psm1         Capture, exclusions, browsers, diagnostics, restore engine
     ├── Save-Session.ps1             One-shot snapshot
     ├── Restore-Session.ps1          Restore UI, selective CLI restore, snapshot listing
     ├── Tray-SessionRecovery.ps1     Notification-area app and background snapshot timer
     ├── Diagnostics.ps1              Health report
     ├── Watch-Session.ps1            Legacy hidden watcher (compatibility)
-    └── RunHidden.vbs                Hidden launcher
+    └── RunHidden.vbs                Legacy hidden launcher (compatibility)
 ```

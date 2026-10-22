@@ -52,6 +52,11 @@ $script:taskMode = $false
 $script:watcherMode = $false
 $script:snapshotFailures = 0
 $script:intervalMinutes = 3
+$script:hostExe = Join-Path $PSScriptRoot 'SessionRecovery.exe'
+if (-not (Test-Path -LiteralPath $script:hostExe)) {
+    $candidate = Join-Path (Split-Path $PSScriptRoot -Parent) 'dist\SessionRecovery.exe'
+    if (Test-Path -LiteralPath $candidate) { $script:hostExe = $candidate }
+}
 
 function Get-SRTrayIntervalMinutes {
     try {
@@ -146,8 +151,15 @@ function Show-SRTrayBalloon {
         [Parameter(Mandatory = $true)][string]$Text,
         [string]$Title = 'Session Recovery',
         [System.Windows.Forms.ToolTipIcon]$Icon = [System.Windows.Forms.ToolTipIcon]::Info,
-        [int]$Timeout = 3000
+        [int]$Timeout = 3000,
+        [switch]$Force
     )
+    if (-not $Force) {
+        try {
+            $config = Get-SRConfig
+            if (-not [bool]$config.showNotifications) { return }
+        } catch { }
+    }
     if ($null -eq $script:notify -or -not $script:notify.Visible) { return }
     try {
         $script:notify.BalloonTipTitle = $Title
@@ -232,40 +244,26 @@ function Open-SRSnapshotsFolder {
     }
 }
 
-function Open-SRSettingsFile {
+function Start-SRStudio {
+    param([string]$Mode = '--studio')
     try {
-        $configPath = Get-SRConfigPath
-        if (-not (Test-Path -LiteralPath $configPath)) {
-            Save-SRConfig -Config (Get-SRConfig)
-        }
-        Start-Process -FilePath 'notepad.exe' -ArgumentList ('"{0}"' -f $configPath) | Out-Null
+        if (-not (Test-Path -LiteralPath $script:hostExe)) { throw 'SessionRecovery.exe is missing.' }
+        Start-Process -FilePath $script:hostExe -ArgumentList $Mode -WorkingDirectory $PSScriptRoot -WindowStyle Normal | Out-Null
     } catch {
-        Show-SRTrayBalloon -Text ('Could not open settings: ' + $_.Exception.Message) -Icon Error
+        Show-SRTrayBalloon -Text ('Could not open Session Recovery: ' + $_.Exception.Message) -Icon Error
     }
+}
+
+function Open-SRSettingsFile {
+    Start-SRStudio -Mode '--settings'
 }
 
 function Start-SRRestoreWindow {
-    try {
-        $scriptPath = Join-Path $PSScriptRoot 'Restore-Session.ps1'
-        if (-not (Test-Path -LiteralPath $scriptPath)) { throw 'Restore-Session.ps1 is missing.' }
-        $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        $arguments = '-NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Manual' -f $scriptPath
-        Start-Process -FilePath $powershell -ArgumentList $arguments -WorkingDirectory $PSScriptRoot | Out-Null
-    } catch {
-        Show-SRTrayBalloon -Text ('Could not open the restore window: ' + $_.Exception.Message) -Icon Error
-    }
+    Start-SRStudio -Mode '--restore-manual'
 }
 
 function Start-SRDiagnosticsWindow {
-    try {
-        $scriptPath = Join-Path $PSScriptRoot 'Diagnostics.ps1'
-        if (-not (Test-Path -LiteralPath $scriptPath)) { throw 'Diagnostics.ps1 is missing.' }
-        $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        $arguments = '-NoProfile -ExecutionPolicy Bypass -NoExit -File "{0}"' -f $scriptPath
-        Start-Process -FilePath $powershell -ArgumentList $arguments -WorkingDirectory $PSScriptRoot | Out-Null
-    } catch {
-        Show-SRTrayBalloon -Text ('Could not open diagnostics: ' + $_.Exception.Message) -Icon Error
-    }
+    Start-SRStudio -Mode '--diagnostics'
 }
 
 function Exit-SRTray {
@@ -396,6 +394,11 @@ $script:lastLabel.Padding = New-Object System.Windows.Forms.Padding(2, 0, 2, 2)
 
 [void]$script:menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 
+$studioItem = New-Object System.Windows.Forms.ToolStripMenuItem('Open Session Recovery')
+$studioItem.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 9)
+[void]$studioItem.Add_Click({ Start-SRStudio })
+[void]$script:menu.Items.Add($studioItem)
+
 $restoreItem = New-Object System.Windows.Forms.ToolStripMenuItem('Restore last session...')
 $restoreItem.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 9)
 [void]$restoreItem.Add_Click({ Start-SRRestoreWindow })
@@ -424,7 +427,7 @@ $folderItem = New-Object System.Windows.Forms.ToolStripMenuItem('Open snapshots 
 [void]$folderItem.Add_Click({ Open-SRSnapshotsFolder })
 [void]$script:menu.Items.Add($folderItem)
 
-$settingsItem = New-Object System.Windows.Forms.ToolStripMenuItem('Edit settings')
+$settingsItem = New-Object System.Windows.Forms.ToolStripMenuItem('Settings')
 [void]$settingsItem.Add_Click({ Open-SRSettingsFile })
 [void]$script:menu.Items.Add($settingsItem)
 
@@ -444,7 +447,7 @@ $exitItem = New-Object System.Windows.Forms.ToolStripMenuItem('Exit Session Reco
 })
 $script:notify.Add_MouseClick({
     param($sender, $e)
-    if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) { Start-SRRestoreWindow }
+    if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) { Start-SRStudio }
 })
 
 # ---------------------------------------------------------------------------
@@ -477,7 +480,7 @@ $script:healthTimer.Interval = 10000
     if ($script:exiting) { return }
     $trayScript = Join-Path $script:installRoot 'Tray-SessionRecovery.ps1'
     $module = Join-Path $script:installRoot 'SessionRecovery.psm1'
-    if (-not (Test-Path -LiteralPath $trayScript) -or -not (Test-Path -LiteralPath $module)) {
+    if (-not (Test-Path -LiteralPath $trayScript) -or -not (Test-Path -LiteralPath $module) -or -not (Test-Path -LiteralPath $script:hostExe)) {
         Exit-SRTray
     }
 })

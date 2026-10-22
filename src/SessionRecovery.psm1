@@ -568,6 +568,313 @@ namespace SessionRecovery
 '@ -ErrorAction Stop
 }
 
+# Modern Chromium browsers keep their session files locked, lazily flushed,
+# or completely empty while the browser is running. Read the live tab strip
+# through UI Automation and combine it with the local History database when
+# the structured session file has nothing useful. This is deliberately a
+# fallback: session files remain the exact source whenever they are available.
+if (-not ('SessionRecovery.BrowserUiAutomation' -as [type])) {
+    try {
+        Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
+        Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop
+        $uiaReferences = @(
+            [System.Windows.Automation.AutomationElement].Assembly.Location,
+            [System.Windows.Automation.ControlType].Assembly.Location,
+            'System.Core'
+        )
+        Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading.Tasks;
+using System.Windows.Automation;
+
+namespace SessionRecovery
+{
+    public sealed class BrowserUiTab
+    {
+        public string Title;
+        public bool Selected;
+    }
+
+    public sealed class BrowserUiInfo
+    {
+        public BrowserUiTab[] Tabs = new BrowserUiTab[0];
+        public string CurrentUrl = "";
+        public bool HasTabStrip;
+        public string Error = "";
+    }
+
+    public static class BrowserUiAutomation
+    {
+        public static BrowserUiInfo Read(IntPtr hwnd, int timeoutMs)
+        {
+            if (hwnd == IntPtr.Zero) return new BrowserUiInfo();
+            try
+            {
+                Task<BrowserUiInfo> task = Task.Factory.StartNew<BrowserUiInfo>(delegate { return ReadCore(hwnd); });
+                if (!task.Wait(timeoutMs))
+                {
+                    BrowserUiInfo timedOut = new BrowserUiInfo();
+                    timedOut.Error = "timeout";
+                    return timedOut;
+                }
+                return task.Result;
+            }
+            catch (Exception ex)
+            {
+                BrowserUiInfo failed = new BrowserUiInfo();
+                failed.Error = ex.Message;
+                return failed;
+            }
+        }
+
+        private static BrowserUiInfo ReadCore(IntPtr hwnd)
+        {
+            BrowserUiInfo info = new BrowserUiInfo();
+            AutomationElement root = AutomationElement.FromHandle(hwnd);
+            if (root == null) return info;
+
+            List<BrowserUiTab> tabs = new List<BrowserUiTab>();
+            Condition tabCondition = new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.TabItem);
+            AutomationElementCollection foundTabs = root.FindAll(TreeScope.Descendants, tabCondition);
+            foreach (AutomationElement tab in foundTabs)
+            {
+                try
+                {
+                    string name = tab.Current.Name ?? "";
+                    if (name.Length == 0) continue;
+
+                    // Chrome appends live memory/audio status to the accessible
+                    // tab name. It is not part of the page title.
+                    int suffix = name.IndexOf(" - Memory usage", StringComparison.OrdinalIgnoreCase);
+                    if (suffix > 0) name = name.Substring(0, suffix).Trim();
+                    suffix = name.IndexOf(" - Audio playing", StringComparison.OrdinalIgnoreCase);
+                    if (suffix > 0) name = name.Substring(0, suffix).Trim();
+                    suffix = name.IndexOf(" - Muted", StringComparison.OrdinalIgnoreCase);
+                    if (suffix > 0) name = name.Substring(0, suffix).Trim();
+
+                    bool selected = false;
+                    try
+                    {
+                        SelectionItemPattern selection = (SelectionItemPattern)tab.GetCurrentPattern(SelectionItemPattern.Pattern);
+                        if (selection != null) selected = selection.Current.IsSelected;
+                    }
+                    catch { }
+
+                    BrowserUiTab item = new BrowserUiTab();
+                    item.Title = name;
+                    item.Selected = selected;
+                    tabs.Add(item);
+                }
+                catch { }
+            }
+
+            info.Tabs = tabs.ToArray();
+            info.HasTabStrip = tabs.Count > 0;
+
+            try
+            {
+                Condition editCondition = new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit);
+                AutomationElementCollection edits = root.FindAll(TreeScope.Descendants, editCondition);
+                foreach (AutomationElement edit in edits)
+                {
+                    try
+                    {
+                        string name = edit.Current.Name ?? "";
+                        if (name.IndexOf("address", StringComparison.OrdinalIgnoreCase) < 0 &&
+                            name.IndexOf("search", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                        ValuePattern value = (ValuePattern)edit.GetCurrentPattern(ValuePattern.Pattern);
+                        if (value == null) continue;
+                        string current = value.Current.Value ?? "";
+                        if (!String.IsNullOrWhiteSpace(current))
+                        {
+                            info.CurrentUrl = current.Trim();
+                            break;
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+
+            return info;
+        }
+    }
+
+    public sealed class ChromiumHistoryEntry
+    {
+        public string Url;
+        public string Title;
+        public DateTime LastVisit;
+    }
+
+    public static class ChromiumHistory
+    {
+        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int sqlite3_open_v2(byte[] filename, out IntPtr db, int flags, IntPtr vfs);
+        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int sqlite3_prepare_v2(IntPtr db, byte[] sql, int nByte, out IntPtr stmt, IntPtr tail);
+        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int sqlite3_step(IntPtr stmt);
+        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr sqlite3_column_text(IntPtr stmt, int col);
+        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int sqlite3_column_bytes(IntPtr stmt, int col);
+        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern long sqlite3_column_int64(IntPtr stmt, int col);
+        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int sqlite3_finalize(IntPtr stmt);
+        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int sqlite3_close(IntPtr db);
+
+        public static ChromiumHistoryEntry[] ReadRecent(string profileDirectory, DateTime notBefore, int max)
+        {
+            if (max < 1) max = 40;
+            if (notBefore == DateTime.MinValue) notBefore = DateTime.UtcNow.AddHours(-24);
+
+            string historyPath = System.IO.Path.Combine(profileDirectory, "History");
+            if (!System.IO.File.Exists(historyPath)) return new ChromiumHistoryEntry[0];
+
+            List<ChromiumHistoryEntry> entries = new List<ChromiumHistoryEntry>();
+            string tempDir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "SessionRecovery", "history-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                System.IO.Directory.CreateDirectory(tempDir);
+                string copyPath = System.IO.Path.Combine(tempDir, "History");
+                CopyShared(historyPath, copyPath);
+                foreach (string suffix in new string[] { "-wal", "-shm" })
+                {
+                    string sidecar = historyPath + suffix;
+                    if (System.IO.File.Exists(sidecar)) CopyShared(sidecar, copyPath + suffix);
+                }
+                entries = Query(copyPath, notBefore, max);
+            }
+            catch { }
+            finally
+            {
+                try { System.IO.Directory.Delete(tempDir, true); } catch { }
+            }
+
+            if (entries.Count == 0)
+            {
+                try { entries = RawScan(historyPath, max); } catch { }
+            }
+            return entries.ToArray();
+        }
+
+        private static void CopyShared(string source, string destination)
+        {
+            using (System.IO.FileStream input = new System.IO.FileStream(source, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite | System.IO.FileShare.Delete))
+            using (System.IO.FileStream output = new System.IO.FileStream(destination, System.IO.FileMode.Create, System.IO.FileAccess.Write, System.IO.FileShare.None))
+            {
+                input.CopyTo(output);
+            }
+        }
+
+        private static List<ChromiumHistoryEntry> Query(string path, DateTime notBefore, int max)
+        {
+            List<ChromiumHistoryEntry> result = new List<ChromiumHistoryEntry>();
+            IntPtr db;
+            IntPtr stmt;
+            int rc = sqlite3_open_v2(Encoding.UTF8.GetBytes(path + "\0"), out db, 1, IntPtr.Zero);
+            if (rc != 0) return result;
+            try
+            {
+                string sql = "SELECT url, title, last_visit_time FROM urls ORDER BY last_visit_time DESC LIMIT 1200";
+                rc = sqlite3_prepare_v2(db, Encoding.UTF8.GetBytes(sql + "\0"), -1, out stmt, IntPtr.Zero);
+                if (rc != 0) return result;
+                try
+                {
+                    HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    while (sqlite3_step(stmt) == 100 && result.Count < max)
+                    {
+                        string url = ColumnText(stmt, 0).Trim();
+                        string title = ColumnText(stmt, 1).Trim();
+                        long raw = sqlite3_column_int64(stmt, 2);
+                        if (raw <= 0) continue;
+
+                        DateTime visited;
+                        try { visited = DateTime.FromFileTimeUtc(raw * 10); }
+                        catch { continue; }
+                        if (visited < notBefore) continue;
+                        if (!IsRestorableUrl(url)) continue;
+                        if (!seen.Add(url)) continue;
+
+                        ChromiumHistoryEntry entry = new ChromiumHistoryEntry();
+                        entry.Url = url;
+                        entry.Title = title;
+                        entry.LastVisit = visited;
+                        result.Add(entry);
+                    }
+                }
+                finally { sqlite3_finalize(stmt); }
+            }
+            finally { sqlite3_close(db); }
+            return result;
+        }
+
+        private static List<ChromiumHistoryEntry> RawScan(string path, int max)
+        {
+            List<ChromiumHistoryEntry> result = new List<ChromiumHistoryEntry>();
+            byte[] bytes;
+            using (System.IO.FileStream input = new System.IO.FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite | System.IO.FileShare.Delete))
+            using (System.IO.MemoryStream memory = new System.IO.MemoryStream())
+            {
+                input.CopyTo(memory);
+                bytes = memory.ToArray();
+            }
+
+            string text = Encoding.UTF8.GetString(bytes);
+            MatchCollection matches = Regex.Matches(text, @"(?i)(?:https?|file)://[^\x00-\x20\x7f""'<>]+");
+            HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (Match match in matches)
+            {
+                string url = match.Value.TrimEnd(')', ']', '}', '.', ',', ';');
+                if (!IsRestorableUrl(url)) continue;
+                if (url.Length > 2048) continue;
+                if (!seen.Add(url)) continue;
+                ChromiumHistoryEntry entry = new ChromiumHistoryEntry();
+                entry.Url = url;
+                entry.Title = "";
+                entry.LastVisit = DateTime.UtcNow;
+                result.Add(entry);
+                if (result.Count >= max) break;
+            }
+            return result;
+        }
+
+        private static string ColumnText(IntPtr stmt, int column)
+        {
+            IntPtr pointer = sqlite3_column_text(stmt, column);
+            if (pointer == IntPtr.Zero) return "";
+            int length = sqlite3_column_bytes(stmt, column);
+            if (length <= 0) return "";
+            byte[] bytes = new byte[length];
+            Marshal.Copy(pointer, bytes, 0, length);
+            return Encoding.UTF8.GetString(bytes);
+        }
+
+        private static bool IsRestorableUrl(string url)
+        {
+            if (String.IsNullOrWhiteSpace(url)) return false;
+            if (!(url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                  url.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
+                  url.StartsWith("file://", StringComparison.OrdinalIgnoreCase))) return false;
+            if (url.StartsWith("http://localhost", StringComparison.OrdinalIgnoreCase) && url.Length < 24) return false;
+            return true;
+        }
+    }
+}
+'@ -ReferencedAssemblies $uiaReferences -ErrorAction Stop
+    } catch {
+        # UI Automation or winsqlite3 is unavailable. Session files remain the
+        # primary source and the rest of Session Recovery keeps working.
+    }
+}
+
 # ---------------------------------------------------------------------------
 # Paths, configuration and logging
 # ---------------------------------------------------------------------------
@@ -596,6 +903,13 @@ function Get-SRDefaultConfig {
         maxRestoreAgeHours      = 72
         restoreBrowsers         = $true
         defaultTabMode          = 'Smart'
+        captureBrowserTabs      = $true
+        captureApproximateTabs  = $true
+        tabHistoryLookbackHours = 24
+        showNotifications       = $true
+        startWithWindows        = $true
+        desktopShortcut         = $true
+        theme                   = 'Aurora'
         excludeApps             = @()
         excludeFolders          = @()
         excludeUrls             = @()
@@ -1129,8 +1443,152 @@ function Get-SRChromiumRestoreOnStartup {
     return $null
 }
 
+function Get-SRTitleKey {
+    param([string]$Title)
+    if ([string]::IsNullOrWhiteSpace($Title)) { return '' }
+    $value = $Title.Trim()
+    $value = $value -replace '\s+-\s+(Google Chrome|Microsoft Edge|Brave|Opera|Vivaldi|Mozilla Firefox)$', ''
+    $value = $value -replace '\s+-\s+(Memory usage|Audio playing|Muted).*$', ''
+    return $value.Trim().ToLowerInvariant()
+}
+
+function Get-SRChromiumHistoryTabs {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProfileDirectory,
+        [IntPtr]$WindowHandle = [IntPtr]::Zero,
+        [datetime]$BrowserStartTime = [datetime]::MinValue,
+        [int]$LookbackHours = 24,
+        [bool]$AllowApproximate = $true
+    )
+
+    if (-not $AllowApproximate) {
+        return [pscustomobject]@{ tabs = @(); source = 'none'; file = $null; fileAt = $null; approximate = $false }
+    }
+    if (-not ('SessionRecovery.ChromiumHistory' -as [type])) {
+        return [pscustomobject]@{ tabs = @(); source = 'none'; file = $null; fileAt = $null; approximate = $false }
+    }
+
+    $lookback = [Math]::Max(1, $LookbackHours)
+    $since = (Get-Date).AddHours(-$lookback)
+    if ($BrowserStartTime -and $BrowserStartTime -ne [datetime]::MinValue) {
+        $started = $BrowserStartTime.AddMinutes(-10)
+        if ($started -gt $since) { $since = $started }
+    }
+
+    $history = @([SessionRecovery.ChromiumHistory]::ReadRecent($ProfileDirectory, $since, 100))
+    if ($history.Count -eq 0) {
+        return [pscustomobject]@{ tabs = @(); source = 'none'; file = $null; fileAt = $null; approximate = $false }
+    }
+
+    $ui = $null
+    if ($WindowHandle -ne [IntPtr]::Zero -and ('SessionRecovery.BrowserUiAutomation' -as [type])) {
+        try {
+            $ui = [SessionRecovery.BrowserUiAutomation]::Read($WindowHandle, 1500)
+        } catch {
+            Write-SRLog -Level DEBUG -Message "UI Automation tab read failed: $($_.Exception.Message)"
+        }
+    }
+
+    $uiTabs = @()
+    if ($null -ne $ui) { $uiTabs = @($ui.Tabs) }
+    $result = New-Object System.Collections.Generic.List[object]
+    $used = New-Object 'System.Collections.Generic.HashSet[int]'
+    $seenUrls = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+
+    function Add-SRHistoryTab {
+        param($HistoryEntry, [string]$FallbackTitle)
+        if ($null -eq $HistoryEntry) { return $false }
+        $url = [string]$HistoryEntry.Url
+        if (-not (Test-SRRestorableUrl -Url $url)) { return $false }
+        if (-not $seenUrls.Add($url)) { return $false }
+        $title = [string]$HistoryEntry.Title
+        if ([string]::IsNullOrWhiteSpace($title)) { $title = $FallbackTitle }
+        $result.Add([pscustomobject]@{
+            url      = $url
+            title    = $title
+            pinned   = $false
+            windowId = 0
+        })
+        return $true
+    }
+
+    for ($i = 0; $i -lt $uiTabs.Count; $i++) {
+        $uiTab = $uiTabs[$i]
+        $key = Get-SRTitleKey -Title ([string]$uiTab.Title)
+        $matchIndex = -1
+        if (-not [string]::IsNullOrWhiteSpace($key)) {
+            for ($j = 0; $j -lt $history.Count; $j++) {
+                if ($used.Contains($j)) { continue }
+                $historyKey = Get-SRTitleKey -Title ([string]$history[$j].Title)
+                if ([string]::IsNullOrWhiteSpace($historyKey)) { continue }
+                if ($historyKey -eq $key -or $historyKey.Contains($key) -or $key.Contains($historyKey)) {
+                    $matchIndex = $j
+                    break
+                }
+            }
+        }
+        if ($matchIndex -ge 0) {
+            [void]$used.Add($matchIndex)
+            [void](Add-SRHistoryTab -HistoryEntry $history[$matchIndex] -FallbackTitle ([string]$uiTab.Title))
+            continue
+        }
+
+        if ($uiTab.Selected -and $null -ne $ui -and (Test-SRRestorableUrl -Url ([string]$ui.CurrentUrl))) {
+            $current = [string]$ui.CurrentUrl
+            for ($j = 0; $j -lt $history.Count; $j++) {
+                if ($used.Contains($j)) { continue }
+                if ([string]::Equals([string]$history[$j].Url, $current, [StringComparison]::OrdinalIgnoreCase)) {
+                    [void]$used.Add($j)
+                    [void](Add-SRHistoryTab -HistoryEntry $history[$j] -FallbackTitle ([string]$uiTab.Title))
+                    break
+                }
+            }
+        }
+    }
+
+    $target = if ($uiTabs.Count -gt 0) { $uiTabs.Count } else { [Math]::Min(12, $history.Count) }
+    if ($target -lt 1) { $target = [Math]::Min(12, $history.Count) }
+    if ($target -gt 40) { $target = 40 }
+    for ($j = 0; $j -lt $history.Count -and $result.Count -lt $target; $j++) {
+        if ($used.Contains($j)) { continue }
+        [void]$used.Add($j)
+        [void](Add-SRHistoryTab -HistoryEntry $history[$j] -FallbackTitle '')
+    }
+
+    if ($result.Count -eq 0) {
+        for ($j = 0; $j -lt $history.Count -and $result.Count -lt 20; $j++) {
+            [void](Add-SRHistoryTab -HistoryEntry $history[$j] -FallbackTitle '')
+        }
+    }
+
+    if ($result.Count -eq 0) {
+        return [pscustomobject]@{ tabs = @(); source = 'none'; file = $null; fileAt = $null; approximate = $false }
+    }
+
+    $historyPath = Join-Path $ProfileDirectory 'History'
+    $historyAt = $null
+    if (Test-Path -LiteralPath $historyPath) {
+        $historyAt = (Get-Item -LiteralPath $historyPath).LastWriteTime
+    }
+    $source = if ($uiTabs.Count -gt 0) { 'uia-history' } else { 'history-fallback' }
+    Write-SRLog -Level DEBUG -Message ("Chromium tab fallback for {0}: {1} tab(s) from {2}" -f $ProfileDirectory, $result.Count, $source)
+    return [pscustomobject]@{
+        tabs        = $result.ToArray()
+        source      = $source
+        file        = $historyPath
+        fileAt      = $historyAt
+        approximate = $true
+    }
+}
+
 function Get-SRChromiumTabs {
-    param([Parameter(Mandatory = $true)][string]$ProfileDirectory)
+    param(
+        [Parameter(Mandatory = $true)][string]$ProfileDirectory,
+        [IntPtr]$WindowHandle = [IntPtr]::Zero,
+        [datetime]$BrowserStartTime = [datetime]::MinValue,
+        [int]$HistoryLookbackHours = 24,
+        [bool]$AllowApproximate = $true
+    )
 
     $candidates = New-Object System.Collections.Generic.List[object]
 
@@ -1170,10 +1628,11 @@ function Get-SRChromiumTabs {
             }
             if ($clean.Count -gt 0) {
                 return [pscustomobject]@{
-                    tabs   = $clean.ToArray()
-                    source = 'session-file'
-                    file   = $file.FullName
-                    fileAt = $file.LastWriteTime
+                    tabs        = $clean.ToArray()
+                    source      = 'session-file'
+                    file        = $file.FullName
+                    fileAt      = $file.LastWriteTime
+                    approximate = $false
                 }
             }
         } catch {
@@ -1205,10 +1664,11 @@ function Get-SRChromiumTabs {
             }
             if ($clean.Count -gt 0) {
                 return [pscustomobject]@{
-                    tabs   = $clean.ToArray()
-                    source = 'regex-fallback'
-                    file   = $fallback.File.FullName
-                    fileAt = $fallback.File.LastWriteTime
+                    tabs        = $clean.ToArray()
+                    source      = 'regex-fallback'
+                    file        = $fallback.File.FullName
+                    fileAt      = $fallback.File.LastWriteTime
+                    approximate = $false
                 }
             }
         } catch {
@@ -1216,7 +1676,12 @@ function Get-SRChromiumTabs {
         }
     }
 
-    return [pscustomobject]@{ tabs = @(); source = 'none'; file = $null; fileAt = $null }
+    # New Chromium session files can be zero bytes while the browser is
+    # running. Keep the exact-session-file path above as the primary source;
+    # only use live UI Automation + local History when that produced nothing.
+    return Get-SRChromiumHistoryTabs -ProfileDirectory $ProfileDirectory `
+        -WindowHandle $WindowHandle -BrowserStartTime $BrowserStartTime `
+        -LookbackHours $HistoryLookbackHours -AllowApproximate $AllowApproximate
 }
 
 function Get-SRFirefoxDefaultProfiles {
@@ -1348,8 +1813,19 @@ function Get-SRFirefoxRestoreOnStartup {
 function Get-SRBrowsers {
     param(
         [Parameter(Mandatory = $true)]$Windows,
-        [Parameter(Mandatory = $true)]$ProcessMap
+        [Parameter(Mandatory = $true)]$ProcessMap,
+        $Config = $null
     )
+
+    if ($null -eq $Config) { $Config = Get-SRConfig }
+    $lookbackHours = 24
+    $allowApproximate = $true
+    if ($null -ne $Config.PSObject.Properties['tabHistoryLookbackHours']) {
+        $lookbackHours = [Math]::Max(1, [int]$Config.tabHistoryLookbackHours)
+    }
+    if ($null -ne $Config.PSObject.Properties['captureApproximateTabs']) {
+        $allowApproximate = [bool]$Config.captureApproximateTabs
+    }
 
     $definitions = Get-SRBrowserDefinitions
     $browsers = New-Object System.Collections.Generic.List[object]
@@ -1363,6 +1839,13 @@ function Get-SRBrowsers {
 
         $exe = Resolve-SRBrowserExe -Definition $definition -ProcessMap $ProcessMap
         if ([string]::IsNullOrWhiteSpace($exe)) { continue }
+
+        $primaryWindow = $matchingWindows | Where-Object { -not $_.Minimized } | Select-Object -First 1
+        if ($null -eq $primaryWindow) { $primaryWindow = $matchingWindows[0] }
+        $browserStarted = [datetime]::MinValue
+        try {
+            $browserStarted = (Get-Process -Id ([int]$primaryWindow.ProcessId) -ErrorAction Stop).StartTime
+        } catch { }
 
         $profiles = New-Object System.Collections.Generic.List[object]
         if ($definition.kind -eq 'chromium') {
@@ -1418,7 +1901,9 @@ function Get-SRBrowsers {
                     continue
                 }
 
-                $tabData = Get-SRChromiumTabs -ProfileDirectory $directory.FullName
+                $tabData = Get-SRChromiumTabs -ProfileDirectory $directory.FullName `
+                    -WindowHandle $primaryWindow.Handle -BrowserStartTime $browserStarted `
+                    -HistoryLookbackHours $lookbackHours -AllowApproximate $allowApproximate
                 $restoreOnStartup = Get-SRChromiumRestoreOnStartup -ProfileDirectory $directory.FullName
                 $displayName = $displayNames[$directory.Name]
                 if ([string]::IsNullOrWhiteSpace($displayName)) { $displayName = $directory.Name }
@@ -1430,6 +1915,7 @@ function Get-SRBrowsers {
                     restoreOnStartup = $restoreOnStartup
                     tabs             = @($tabData.tabs)
                     tabsSource       = $tabData.source
+                    tabsApproximate  = [bool]$tabData.approximate
                     tabsFile         = $tabData.file
                     tabsFileAt       = $tabData.fileAt
                 })
@@ -1446,6 +1932,7 @@ function Get-SRBrowsers {
                     restoreOnStartup = $restoreOnStartup
                     tabs             = @($tabData.tabs)
                     tabsSource       = $tabData.source
+                    tabsApproximate  = $false
                     tabsFile         = $tabData.file
                     tabsFileAt       = $tabData.fileAt
                 })
@@ -1474,13 +1961,16 @@ function Get-SRBrowsers {
 function New-SRSnapshot {
     $windows = @([SessionRecovery.WindowEnumerator]::GetVisibleWindows())
     $processMap = Get-SRProcessMap
+    $config = Get-SRConfig
     $apps = @(Get-SRApplications -Windows $windows -ProcessMap $processMap)
     $folders = @(Get-SRExplorerFolders -Windows $windows)
-    $browsers = @(Get-SRBrowsers -Windows $windows -ProcessMap $processMap)
+    $browsers = @()
+    if ($null -eq $config.PSObject.Properties['captureBrowserTabs'] -or [bool]$config.captureBrowserTabs) {
+        $browsers = @(Get-SRBrowsers -Windows $windows -ProcessMap $processMap -Config $config)
+    }
 
     # Apply the user's capture exclusions before the snapshot is written, so
     # excluded names, folders and URLs never reach the JSON files on disk.
-    $config = Get-SRConfig
 
     $excludeApps = @($config.excludeApps)
     if ($excludeApps.Count -gt 0) {

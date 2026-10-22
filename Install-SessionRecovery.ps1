@@ -13,7 +13,7 @@
 
     Scheduled tasks require administrator rights, so the installer asks for
     elevation once. Use -NoTasks to install without a UAC prompt; in that mode
-    a hidden watcher process takes the periodic snapshots instead.
+    the native background tray app takes the periodic snapshots instead.
 
     Examples
       powershell -ExecutionPolicy Bypass -File Install-SessionRecovery.ps1
@@ -120,6 +120,9 @@ try {
     $oldBackground = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object {
         $_.CommandLine -and ($_.CommandLine -match '(?i)Watch-Session\.ps1|Tray-SessionRecovery\.ps1')
     })
+    $oldBackground += @(Get-CimInstance Win32_Process -Filter "Name='SessionRecovery.exe'" -ErrorAction SilentlyContinue | Where-Object {
+        $_.CommandLine -and ($_.CommandLine -match '(?i)--tray')
+    })
     foreach ($process in $oldBackground) {
         try { Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction Stop } catch { }
     }
@@ -142,12 +145,21 @@ $moduleFiles = @(
     'Tray-SessionRecovery.ps1',
     'Watch-Session.ps1',
     'Diagnostics.ps1',
-    'RunHidden.vbs'
+    'RunHidden.vbs',
+    'Studio-SessionRecovery.ps1',
+    'StudioControls.cs'
 )
 
 foreach ($file in $moduleFiles) {
     $path = Join-Path $sourceDirectory $file
     if (-not (Test-Path -LiteralPath $path)) { throw "Missing source file: $path" }
+}
+$hostSource = Join-Path $sourceRoot 'dist\SessionRecovery.exe'
+if (-not (Test-Path -LiteralPath $hostSource)) {
+    $launcherBuilder = Join-Path $sourceRoot 'installer\Build-Launcher.ps1'
+    if (-not (Test-Path -LiteralPath $launcherBuilder)) { throw "Missing launcher build script: $launcherBuilder" }
+    & $launcherBuilder -Force
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $hostSource)) { throw "Could not build $hostSource" }
 }
 $uninstallerSource = Join-Path $sourceRoot 'Uninstall-SessionRecovery.ps1'
 if (-not (Test-Path -LiteralPath $uninstallerSource)) { throw "Missing source file: $uninstallerSource" }
@@ -164,6 +176,8 @@ foreach ($file in $moduleFiles) {
     Copy-Item -LiteralPath (Join-Path $sourceDirectory $file) -Destination $destination -Force
     Unblock-File -LiteralPath $destination -ErrorAction SilentlyContinue
 }
+Copy-Item -LiteralPath $hostSource -Destination (Join-Path $InstallDirectory 'SessionRecovery.exe') -Force
+Unblock-File -LiteralPath (Join-Path $InstallDirectory 'SessionRecovery.exe') -ErrorAction SilentlyContinue
 Copy-Item -LiteralPath $uninstallerSource -Destination (Join-Path $InstallDirectory 'Uninstall-SessionRecovery.ps1') -Force
 Unblock-File -LiteralPath (Join-Path $InstallDirectory 'Uninstall-SessionRecovery.ps1') -ErrorAction SilentlyContinue
 Copy-Item -LiteralPath $brandIconSource -Destination (Join-Path $InstallDirectory 'SessionRecovery.ico') -Force
@@ -218,8 +232,7 @@ try {
 # ---------------------------------------------------------------------------
 
 $powershellPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-$wscriptPath = Join-Path $env:SystemRoot 'System32\wscript.exe'
-$runHiddenPath = Join-Path $InstallDirectory 'RunHidden.vbs'
+$hostPath = Join-Path $InstallDirectory 'SessionRecovery.exe'
 $brandIconPath = Join-Path $InstallDirectory 'SessionRecovery.ico'
 
 $startMenuFolder = Join-Path ([Environment]::GetFolderPath('Programs')) 'Session Recovery'
@@ -227,30 +240,32 @@ if (-not (Test-Path -LiteralPath $startMenuFolder)) {
     New-Item -ItemType Directory -Path $startMenuFolder -Force | Out-Null
 }
 
-$manualArguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Manual' -f (Join-Path $InstallDirectory 'Restore-Session.ps1')
+New-SRShortcut -Path (Join-Path $startMenuFolder 'Session Recovery.lnk') `
+    -TargetPath $hostPath -WorkingDirectory $InstallDirectory `
+    -IconLocation "$brandIconPath,0" `
+    -Description 'Open the Session Recovery Studio.'
+Write-Step "Created Start Menu shortcut: Session Recovery"
+
 New-SRShortcut -Path (Join-Path $startMenuFolder 'Restore Session.lnk') `
-    -TargetPath $powershellPath -Arguments $manualArguments -WorkingDirectory $InstallDirectory `
+    -TargetPath $hostPath -Arguments '--restore-manual' -WorkingDirectory $InstallDirectory `
     -IconLocation "$brandIconPath,0" `
     -Description 'Reopen the windows and tabs from a saved session.'
 Write-Step "Created Start Menu shortcut: Restore Session"
 
-$snapshotArguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Quiet' -f (Join-Path $InstallDirectory 'Save-Session.ps1')
 New-SRShortcut -Path (Join-Path $startMenuFolder 'Take Snapshot Now.lnk') `
-    -TargetPath $powershellPath -Arguments $snapshotArguments -WorkingDirectory $InstallDirectory `
+    -TargetPath $hostPath -Arguments '--snapshot' -WorkingDirectory $InstallDirectory `
     -IconLocation "$brandIconPath,0" `
     -Description 'Save a snapshot of the current windows and tabs right now.'
 Write-Step "Created Start Menu shortcut: Take Snapshot Now"
 
-$backgroundArguments = ('"{0}" tray' -f $runHiddenPath)
 New-SRShortcut -Path (Join-Path $startMenuFolder 'Run in Background.lnk') `
-    -TargetPath $wscriptPath -Arguments $backgroundArguments -WorkingDirectory $InstallDirectory `
+    -TargetPath $hostPath -Arguments '--tray' -WorkingDirectory $InstallDirectory `
     -IconLocation "$brandIconPath,0" `
     -Description 'Start the Session Recovery notification-area app.'
 Write-Step "Created Start Menu shortcut: Run in Background"
 
-$diagnosticsArguments = '-NoProfile -ExecutionPolicy Bypass -NoExit -File "{0}"' -f (Join-Path $InstallDirectory 'Diagnostics.ps1')
 New-SRShortcut -Path (Join-Path $startMenuFolder 'Run Diagnostics.lnk') `
-    -TargetPath $powershellPath -Arguments $diagnosticsArguments -WorkingDirectory $InstallDirectory `
+    -TargetPath $hostPath -Arguments '--diagnostics' -WorkingDirectory $InstallDirectory `
     -IconLocation "$brandIconPath,0" `
     -Description 'Show a Session Recovery health report.'
 Write-Step "Created Start Menu shortcut: Run Diagnostics"
@@ -261,13 +276,19 @@ New-SRShortcut -Path (Join-Path $startMenuFolder 'Uninstall Session Recovery.lnk
     -IconLocation "$brandIconPath,0" `
     -Description 'Remove Session Recovery.'
 
+$desktop = [Environment]::GetFolderPath('Desktop')
+$legacyDesktopShortcut = Join-Path $desktop 'Restore Session.lnk'
+if (Test-Path -LiteralPath $legacyDesktopShortcut) {
+    Remove-Item -LiteralPath $legacyDesktopShortcut -Force -ErrorAction SilentlyContinue
+}
 if (-not $NoDesktopShortcut) {
-    $desktop = [Environment]::GetFolderPath('Desktop')
-    New-SRShortcut -Path (Join-Path $desktop 'Restore Session.lnk') `
-        -TargetPath $powershellPath -Arguments $manualArguments -WorkingDirectory $InstallDirectory `
+    New-SRShortcut -Path (Join-Path $desktop 'Session Recovery.lnk') `
+        -TargetPath $hostPath -WorkingDirectory $InstallDirectory `
         -IconLocation "$brandIconPath,0" `
-        -Description 'Reopen the windows and tabs from a saved session.'
-    Write-Step "Created desktop shortcut: Restore Session"
+        -Description 'Open the Session Recovery Studio.'
+    Write-Step "Created desktop shortcut: Session Recovery"
+} else {
+    Remove-Item -LiteralPath (Join-Path $desktop 'Session Recovery.lnk') -Force -ErrorAction SilentlyContinue
 }
 
 # ---------------------------------------------------------------------------
@@ -296,11 +317,10 @@ function Unregister-SRTasks {
 function Register-SRTasks {
     param([int]$Minutes)
 
-    $snapshotAction = New-ScheduledTaskAction -Execute $wscriptPath `
-        -Argument ('"{0}" save' -f $runHiddenPath) -WorkingDirectory $InstallDirectory
-    $restoreAction = New-ScheduledTaskAction -Execute $powershellPath `
-        -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}"' -f (Join-Path $InstallDirectory 'Restore-Session.ps1')) `
-        -WorkingDirectory $InstallDirectory
+    $snapshotAction = New-ScheduledTaskAction -Execute $hostPath `
+        -Argument '--snapshot' -WorkingDirectory $InstallDirectory
+    $restoreAction = New-ScheduledTaskAction -Execute $hostPath `
+        -Argument '--restore-prompt' -WorkingDirectory $InstallDirectory
 
     $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $currentUser
     $repeatTrigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) `
@@ -341,8 +361,8 @@ if ($tasksReady) {
     Remove-Item -LiteralPath $startupBackgroundPath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $startupRestorePath -Force -ErrorAction SilentlyContinue
 
-    New-SRShortcut -Path $startupBackgroundPath -TargetPath $wscriptPath `
-        -Arguments ('"{0}" tray-monitor' -f $runHiddenPath) -WorkingDirectory $InstallDirectory `
+    New-SRShortcut -Path $startupBackgroundPath -TargetPath $hostPath `
+        -Arguments '--tray-monitor' -WorkingDirectory $InstallDirectory `
         -IconLocation "$brandIconPath,0" `
         -Description 'Session Recovery: background status and controls. Snapshots run as a scheduled task.'
     Write-Step 'Created Startup folder entry: background tray (scheduled-task mode).'
@@ -352,12 +372,12 @@ if ($tasksReady) {
     Remove-Item -LiteralPath $startupWatcherPath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $startupBackgroundPath -Force -ErrorAction SilentlyContinue
 
-    New-SRShortcut -Path $startupBackgroundPath -TargetPath $wscriptPath `
-        -Arguments ('"{0}" tray' -f $runHiddenPath) -WorkingDirectory $InstallDirectory `
+    New-SRShortcut -Path $startupBackgroundPath -TargetPath $hostPath `
+        -Arguments '--tray' -WorkingDirectory $InstallDirectory `
         -IconLocation "$brandIconPath,0" `
         -Description 'Session Recovery: keeps taking snapshots while you are logged on.'
-    New-SRShortcut -Path $startupRestorePath -TargetPath $wscriptPath `
-        -Arguments ('"{0}" restore' -f $runHiddenPath) -WorkingDirectory $InstallDirectory `
+    New-SRShortcut -Path $startupRestorePath -TargetPath $hostPath `
+        -Arguments '--restore-prompt' -WorkingDirectory $InstallDirectory `
         -IconLocation "$brandIconPath,0" `
         -Description 'Session Recovery: shows the restore prompt after logon.'
     Write-Step 'Created Startup folder entries: background tray and restore prompt.'
@@ -368,8 +388,8 @@ if ($tasksReady) {
 # normal user token after the next sign-in.
 if (-not $isAdmin) {
     try {
-        $trayMode = if ($tasksReady) { 'tray-monitor' } else { 'tray' }
-        Start-Process -FilePath $wscriptPath -ArgumentList ('"{0}" {1}' -f $runHiddenPath, $trayMode) -WorkingDirectory $InstallDirectory | Out-Null
+        $trayMode = if ($tasksReady) { '--tray-monitor' } else { '--tray' }
+        Start-Process -FilePath $hostPath -ArgumentList $trayMode -WorkingDirectory $InstallDirectory | Out-Null
         Write-Step 'Started the background tray app.'
     } catch { }
 }
