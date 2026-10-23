@@ -12,6 +12,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 
 namespace SessionRecovery
 {
@@ -141,6 +142,160 @@ namespace SessionRecovery
             }, IntPtr.Zero);
 
             return result.ToArray();
+        }
+    }
+
+    // Restores captured window bounds. Placement happens on one background
+    // thread so a slow-starting application never blocks the restore loop.
+    public static class WindowPlacer
+    {
+        private sealed class Placement
+        {
+            public int ProcessId;
+            public int X;
+            public int Y;
+            public int Width;
+            public int Height;
+            public bool Maximized;
+            public DateTime Deadline;
+        }
+
+        private static readonly Queue<Placement> Queue = new Queue<Placement>();
+        private static readonly object Lock = new object();
+        private static Thread worker;
+
+        [DllImport("user32.dll")]
+        private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+        [DllImport("user32.dll")]
+        private static extern bool IsIconic(IntPtr hWnd);
+        [DllImport("user32.dll")]
+        private static extern int GetSystemMetrics(int nIndex);
+
+        private const uint SWP_NOZORDER = 0x0004;
+        private const uint SWP_NOACTIVATE = 0x0010;
+        private const int SW_MAXIMIZE = 3;
+        private const int SW_RESTORE = 9;
+        private const int SM_XVIRTUALSCREEN = 76;
+        private const int SM_YVIRTUALSCREEN = 77;
+        private const int SM_CXVIRTUALSCREEN = 78;
+        private const int SM_CYVIRTUALSCREEN = 79;
+
+        public static void QueueProcessWindow(int processId, int timeoutMs, int x, int y, int width, int height, bool maximized)
+        {
+            if (width <= 0 || height <= 0) return;
+            Placement placement = new Placement();
+            placement.ProcessId = processId;
+            placement.X = x;
+            placement.Y = y;
+            placement.Width = width;
+            placement.Height = height;
+            placement.Maximized = maximized;
+            placement.Deadline = DateTime.UtcNow.AddMilliseconds(Math.Max(500, timeoutMs));
+            lock (Lock)
+            {
+                Queue.Enqueue(placement);
+                if (worker == null)
+                {
+                    worker = new Thread(new ThreadStart(ProcessQueue));
+                    worker.IsBackground = true;
+                    worker.Start();
+                }
+            }
+        }
+
+        private static void ProcessQueue()
+        {
+            while (true)
+            {
+                Placement placement;
+                lock (Lock)
+                {
+                    if (Queue.Count == 0)
+                    {
+                        // Clear the worker while still holding the lock so an
+                        // enqueue cannot slip in between the empty check and
+                        // the thread exiting, leaving an item stranded.
+                        worker = null;
+                        return;
+                    }
+                    placement = Queue.Dequeue();
+                }
+
+                IntPtr handle = IntPtr.Zero;
+                while (DateTime.UtcNow < placement.Deadline)
+                {
+                    try
+                    {
+                        System.Diagnostics.Process process = System.Diagnostics.Process.GetProcessById(placement.ProcessId);
+                        process.Refresh();
+                        if (process.MainWindowHandle != IntPtr.Zero)
+                        {
+                            handle = process.MainWindowHandle;
+                            break;
+                        }
+                    }
+                    catch
+                    {
+                        // The launcher process exited (for example a stub that
+                        // hands off to an already-running instance).
+                        break;
+                    }
+                    System.Threading.Thread.Sleep(150);
+                }
+
+                if (handle != IntPtr.Zero)
+                {
+                    // Give the window a moment to finish its own initial
+                    // layout before moving it, and re-read the handle because
+                    // some apps swap main windows while starting.
+                    System.Threading.Thread.Sleep(250);
+                    try
+                    {
+                        System.Diagnostics.Process process = System.Diagnostics.Process.GetProcessById(placement.ProcessId);
+                        process.Refresh();
+                        if (process.MainWindowHandle != IntPtr.Zero) handle = process.MainWindowHandle;
+                    }
+                    catch { }
+                    Apply(handle, placement.X, placement.Y, placement.Width, placement.Height, placement.Maximized);
+                }
+            }
+        }
+
+        private static void Apply(IntPtr hWnd, int x, int y, int width, int height, bool maximized)
+        {
+            if (hWnd == IntPtr.Zero) return;
+            try
+            {
+                // Clamp into the current virtual screen so a window captured
+                // on a monitor that no longer exists stays reachable.
+                int screenLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
+                int screenTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
+                int screenWidth = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+                int screenHeight = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+                if (screenWidth > 0 && screenHeight > 0)
+                {
+                    // Keep the whole window on the virtual desktop. If the
+                    // capture came from a larger monitor layout, shrink it
+                    // before clamping its origin.
+                    int maxWidth = screenWidth;
+                    int maxHeight = screenHeight;
+                    if (width > maxWidth) width = maxWidth;
+                    if (height > maxHeight) height = maxHeight;
+                    if (x < screenLeft) x = screenLeft;
+                    if (y < screenTop) y = screenTop;
+                    if (x > screenLeft + screenWidth - width) x = screenLeft + screenWidth - width;
+                    if (y > screenTop + screenHeight - height) y = screenTop + screenHeight - height;
+                }
+                if (IsIconic(hWnd)) ShowWindow(hWnd, SW_RESTORE);
+                SetWindowPos(hWnd, IntPtr.Zero, x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+                if (maximized) ShowWindow(hWnd, SW_MAXIMIZE);
+            }
+            catch
+            {
+                // Positioning is best-effort; the app still opened.
+            }
         }
     }
 
@@ -902,9 +1057,11 @@ function Get-SRDefaultConfig {
         promptOnLogon           = 'CrashOnly'
         maxRestoreAgeHours      = 72
         restoreBrowsers         = $true
+        restoreWindowPositions  = $true
         defaultTabMode          = 'Smart'
         captureBrowserTabs      = $true
         captureApproximateTabs  = $true
+        captureMediaPlayers     = $true
         tabHistoryLookbackHours = 24
         showNotifications       = $true
         startWithWindows        = $true
@@ -913,6 +1070,7 @@ function Get-SRDefaultConfig {
         excludeApps             = @()
         excludeFolders          = @()
         excludeUrls             = @()
+        pinnedSnapshots         = @()
     }
 }
 
@@ -1091,7 +1249,25 @@ function Start-SRDetached {
     $info.Arguments = ($quoted -join ' ')
     $info.UseShellExecute = $true
     $info.WindowStyle = $styleValue
-    [void][System.Diagnostics.Process]::Start($info)
+    return [System.Diagnostics.Process]::Start($info)
+}
+
+function Get-SRWindowPlacement {
+    param([Parameter(Mandatory = $true)]$App)
+    # Snapshots from releases before 2.2 have no restore block; treat those
+    # as "no known position" rather than failing under StrictMode.
+    $property = $App.PSObject.Properties['restore']
+    if ($null -eq $property -or $null -eq $property.Value) { return $null }
+    $value = $property.Value
+    $x = 0; $y = 0; $width = 0; $height = 0
+    try { $x = [int]$value.x } catch { return $null }
+    try { $y = [int]$value.y } catch { return $null }
+    try { $width = [int]$value.width } catch { return $null }
+    try { $height = [int]$value.height } catch { return $null }
+    $maximized = $false
+    try { $maximized = [bool]$value.maximized } catch { }
+    if ($width -lt 80 -or $height -lt 40) { return $null }
+    return [pscustomobject]@{ X = $x; Y = $y; Width = $width; Height = $height; Maximized = $maximized }
 }
 
 function Start-SRApplication {
@@ -1123,7 +1299,28 @@ function Start-SRApplication {
 
     $windowStyle = if ($App.startMinimized) { 'Minimized' } else { 'Normal' }
     try {
-        Start-SRDetached -FilePath $App.exe -Arguments @($App.args) -WindowStyle $windowStyle
+        # A captured media entry (playing video) replaces the plain command
+        # line so the player reopens the same file at the saved position.
+        $launchArguments = @($App.args)
+        $mediaProperty = $App.PSObject.Properties['media']
+        if ($null -ne $mediaProperty -and $null -ne $mediaProperty.Value) {
+            $mediaArguments = Get-SRMediaLaunchArguments -ExePath $App.exe -Media $mediaProperty.Value
+            if ($null -ne $mediaArguments) { $launchArguments = $mediaArguments }
+        }
+        $process = Start-SRDetached -FilePath $App.exe -Arguments $launchArguments -WindowStyle $windowStyle
+        $placeWindows = $true
+        try {
+            $config = Get-SRConfig
+            $placeProperty = $config.PSObject.Properties['restoreWindowPositions']
+            if ($null -ne $placeProperty) { $placeWindows = [bool]$placeProperty.Value }
+        } catch { }
+        if ($placeWindows -and -not $App.startMinimized -and $null -ne $process -and ('SessionRecovery.WindowPlacer' -as [type])) {
+            $placement = Get-SRWindowPlacement -App $App
+            if ($null -ne $placement) {
+                [void][SessionRecovery.WindowPlacer]::QueueProcessWindow(
+                    $process.Id, 6000, $placement.X, $placement.Y, $placement.Width, $placement.Height, $placement.Maximized)
+            }
+        }
         return [pscustomobject]@{ Started = $true; Message = "Started: $($App.name)"; App = $App }
     } catch {
         return [pscustomobject]@{ Started = $false; Message = "Failed to start $($App.name): $($_.Exception.Message)"; App = $App }
@@ -1136,7 +1333,9 @@ function Open-SRFolder {
         return [pscustomobject]@{ Started = $false; Message = "Missing folder: $Path" }
     }
     try {
-        Start-SRDetached -FilePath (Join-Path $env:SystemRoot 'explorer.exe') -Arguments @($Path)
+        # The returned Process is only needed by Start-SRApplication; every
+        # other caller must discard it or it leaks into the pipeline output.
+        [void](Start-SRDetached -FilePath (Join-Path $env:SystemRoot 'explorer.exe') -Arguments @($Path))
         return [pscustomobject]@{ Started = $true; Message = "Opened: $Path" }
     } catch {
         return [pscustomobject]@{ Started = $false; Message = "Failed to open ${Path}: $($_.Exception.Message)" }
@@ -1170,7 +1369,7 @@ function Get-SRApplications {
         '\Windows\System32\TextInputHost.exe',
         '\Windows\System32\LockApp.exe'
     )
-    $browserNames = @('chrome', 'msedge', 'brave', 'vivaldi', 'opera', 'firefox')
+    $browserNames = @('chrome', 'msedge', 'brave', 'vivaldi', 'opera', 'chromium', 'firefox')
 
     $groups = @{}
 
@@ -1216,6 +1415,10 @@ function Get-SRApplications {
             title     = [string]$window.Title
             minimized = [bool]$window.Minimized
             maximized = [bool]$window.Maximized
+            x         = [int]$window.X
+            y         = [int]$window.Y
+            width     = [int]$window.Width
+            height    = [int]$window.Height
         })
         if (-not $window.Minimized) { $entry.startMinimized = $false }
     }
@@ -1225,6 +1428,26 @@ function Get-SRApplications {
         # Store a plain array. PowerShell 5.1's @() can throw an
         # "Argument types do not match" error for generic List<object> values.
         $entry.windows = $entry.windows.ToArray()
+
+        # Remember where this application's main window lived. Prefer a
+        # restored (non-minimized) window: minimized windows report the
+        # -32000 placeholder position.
+        $restoreSource = @($entry.windows | Where-Object {
+            -not $_.minimized -and $_.width -gt 0 -and $_.height -gt 0
+        } | Select-Object -First 1)
+        if ($restoreSource.Count -eq 0) {
+            $restoreSource = @($entry.windows | Where-Object { $_.width -gt 0 -and $_.height -gt 0 } | Select-Object -First 1)
+        }
+        if ($restoreSource.Count -gt 0) {
+            $source = $restoreSource[0]
+            $entry | Add-Member -NotePropertyName restore -NotePropertyValue ([pscustomobject]@{
+                x         = [int]$source.x
+                y         = [int]$source.y
+                width     = [int]$source.width
+                height    = [int]$source.height
+                maximized = [bool]$source.maximized
+            })
+        }
     }
 
     return @($groups.Values | Sort-Object -Property name, exe)
@@ -1339,15 +1562,41 @@ function Get-SRBrowserDefinitions {
             )
         },
         [pscustomobject]@{
-            key          = 'opera'
-            name         = 'Opera'
-            processNames = @('opera')
-            kind         = 'chromium'
-            userDataDir  = (Join-Path $roaming 'Opera Software\Opera Stable')
+            key                 = 'opera'
+            name                = 'Opera'
+            processNames        = @('opera')
+            processPathPatterns = @('*\Opera\opera.exe')
+            kind                = 'chromium'
+            userDataDir         = (Join-Path $roaming 'Opera Software\Opera Stable')
             candidates   = @(
                 (Join-Path $localAppData 'Programs\Opera\opera.exe'),
                 (Join-Path $programFiles 'Opera\opera.exe'),
                 (Join-Path $programFilesX86 'Opera\opera.exe')
+            )
+        },
+        [pscustomobject]@{
+            key                 = 'opera-gx'
+            name                = 'Opera GX'
+            processNames        = @('opera')
+            processPathPatterns = @('*\Opera GX\opera.exe')
+            kind                = 'chromium'
+            userDataDir         = (Join-Path $roaming 'Opera Software\Opera GX Stable')
+            candidates   = @(
+                (Join-Path $localAppData 'Programs\Opera GX\opera.exe'),
+                (Join-Path $programFiles 'Opera GX\opera.exe'),
+                (Join-Path $programFilesX86 'Opera GX\opera.exe')
+            )
+        },
+        [pscustomobject]@{
+            key          = 'chromium'
+            name         = 'Chromium'
+            processNames = @('chromium')
+            kind         = 'chromium'
+            userDataDir  = (Join-Path $localAppData 'Chromium\User Data')
+            candidates   = @(
+                (Join-Path $localAppData 'Chromium\Application\chromium.exe'),
+                (Join-Path $programFiles 'Chromium\Application\chromium.exe'),
+                (Join-Path $programFilesX86 'Chromium\Application\chromium.exe')
             )
         },
         [pscustomobject]@{
@@ -1365,6 +1614,31 @@ function Get-SRBrowserDefinitions {
     )
 }
 
+function Test-SRBrowserProcess {
+    param(
+        [Parameter(Mandatory = $true)]$Definition,
+        $Process
+    )
+    if ($null -eq $Process) { return $false }
+
+    $processName = (([string]$Process.Name) -replace '\.exe$', '').ToLowerInvariant()
+    if (@($Definition.processNames) -notcontains $processName) { return $false }
+
+    # Opera and Opera GX both run as opera.exe. Their installation paths are
+    # the only reliable way to tell two simultaneously running browsers apart.
+    $patterns = @()
+    $patternProperty = $Definition.PSObject.Properties['processPathPatterns']
+    if ($null -ne $patternProperty) { $patterns = @($patternProperty.Value) }
+    if ($patterns.Count -eq 0) { return $true }
+
+    $path = [string]$Process.ExecutablePath
+    if ([string]::IsNullOrWhiteSpace($path)) { return $true }
+    foreach ($pattern in $patterns) {
+        if ($path -like [string]$pattern) { return $true }
+    }
+    return $false
+}
+
 function Resolve-SRBrowserExe {
     param(
         [Parameter(Mandatory = $true)]$Definition,
@@ -1373,8 +1647,7 @@ function Resolve-SRBrowserExe {
 
     if ($null -ne $ProcessMap) {
         foreach ($process in $ProcessMap.Values) {
-            $processName = ([string]$process.Name) -replace '\.exe$', ''
-            if ($Definition.processNames -contains $processName.ToLowerInvariant()) {
+            if (Test-SRBrowserProcess -Definition $Definition -Process $process) {
                 $path = [string]$process.ExecutablePath
                 if (-not [string]::IsNullOrWhiteSpace($path) -and (Test-Path -LiteralPath $path)) {
                     return $path
@@ -1406,8 +1679,7 @@ function Get-SRChromiumProfileNamesInUse {
 
     $names = New-Object System.Collections.Generic.List[string]
     foreach ($process in $ProcessMap.Values) {
-        $processName = ([string]$process.Name) -replace '\.exe$', ''
-        if ($Definition.processNames -notcontains $processName.ToLowerInvariant()) { continue }
+        if (-not (Test-SRBrowserProcess -Definition $Definition -Process $process)) { continue }
         $commandLine = [string]$process.CommandLine
         if ($commandLine -match '--profile-directory=(?:"([^"]+)"|([^\s]+))') {
             $value = if ($Matches[1]) { $Matches[1] } else { $Matches[2] }
@@ -1424,8 +1696,7 @@ function Get-SRChromiumUserDataDir {
     )
 
     foreach ($process in $ProcessMap.Values) {
-        $processName = ([string]$process.Name) -replace '\.exe$', ''
-        if ($Definition.processNames -notcontains $processName.ToLowerInvariant()) { continue }
+        if (-not (Test-SRBrowserProcess -Definition $Definition -Process $process)) { continue }
         $commandLine = [string]$process.CommandLine
         if ($commandLine -match '--user-data-dir=(?:"([^"]+)"|([^\s]+))') {
             $value = if ($Matches[1]) { $Matches[1] } else { $Matches[2] }
@@ -1457,7 +1728,7 @@ function Get-SRTitleKey {
     param([string]$Title)
     if ([string]::IsNullOrWhiteSpace($Title)) { return '' }
     $value = $Title.Trim()
-    $value = $value -replace '\s+-\s+(Google Chrome|Microsoft Edge|Brave|Opera|Vivaldi|Mozilla Firefox)$', ''
+    $value = $value -replace '\s+-\s+(Google Chrome|Microsoft Edge|Brave|Opera GX|Opera|Vivaldi|Mozilla Firefox|Chromium)$', ''
     $value = $value -replace '\s+-\s+(Memory usage|Audio playing|Muted).*$', ''
     return $value.Trim().ToLowerInvariant()
 }
@@ -1842,8 +2113,9 @@ function Get-SRBrowsers {
 
     foreach ($definition in $definitions) {
         $matchingWindows = @($Windows | Where-Object {
-            $name = ([string]$_.ProcessName).ToLowerInvariant()
-            $definition.processNames -contains $name
+            $process = $ProcessMap[[int]$_.ProcessId]
+            if ($null -eq $process) { return $false }
+            Test-SRBrowserProcess -Definition $definition -Process $process
         })
         if ($matchingWindows.Count -eq 0) { continue }
 
@@ -1965,6 +2237,359 @@ function Get-SRBrowsers {
 }
 
 # ---------------------------------------------------------------------------
+# Media players (VLC first: file resolution + playback position tracking)
+# ---------------------------------------------------------------------------
+
+# VLC keeps its recent files and resume positions in vlc-qt-interface.ini.
+# The flat format is:  list=<uri>, <uri>, ...   times=<ms>, <ms>, ...
+# (parallel arrays; index 0 is the most recent). Older builds used numbered
+# groups (1\size=n, 1\1=uri). VLC writes a resume time only when an input is
+# stopped or the player closes cleanly, so a crash loses the current
+# position. The estimator below reconstructs it between snapshots.
+$script:SRVlcConfigPath = Join-Path $env:APPDATA 'vlc\vlc-qt-interface.ini'
+
+function Get-SRVlcRecentMedia {
+    $result = [pscustomobject]@{
+        Paths   = New-Object System.Collections.Generic.List[string]
+        TimesMs = @{}
+    }
+    if (-not (Test-Path -LiteralPath $script:SRVlcConfigPath)) { return $result }
+
+    $lines = @()
+    try {
+        $lines = @(Get-Content -LiteralPath $script:SRVlcConfigPath -ErrorAction Stop)
+    } catch {
+        return $result
+    }
+
+    $inRecents = $false
+    $flatUris = @()
+    $flatTimes = @()
+    $numbered = @{}
+    foreach ($line in $lines) {
+        if ($line -match '^\[(.+)\]\s*$') {
+            $inRecents = ($Matches[1] -eq 'RecentsMRL')
+            continue
+        }
+        if (-not $inRecents) { continue }
+        if ($line -match '^list=(.*)$') {
+            $flatUris = @($Matches[1] -split ', ')
+        } elseif ($line -match '^times=(.*)$') {
+            $flatTimes = @(($Matches[1] -split ',') | ForEach-Object { $_.Trim() })
+        } elseif ($line -match '^(\d+)\\(\d+)=(.*)$') {
+            $numbered[('{0}\{1}' -f $Matches[1], $Matches[2])] = $Matches[3]
+        }
+    }
+
+    $uris = @()
+    if ($flatUris.Count -gt 0) {
+        $uris = $flatUris
+    } else {
+        for ($group = 1; $group -le 20; $group++) {
+            $groupUris = @()
+            for ($item = 1; $item -le 50; $item++) {
+                $key = '{0}\{1}' -f $group, $item
+                if (-not $numbered.ContainsKey($key)) { break }
+                $groupUris += $numbered[$key]
+            }
+            if ($groupUris.Count -eq 0) { break }
+            $uris += $groupUris
+        }
+    }
+
+    # Heal URIs that contain a literal comma (the list separator).
+    $healed = New-Object System.Collections.Generic.List[string]
+    foreach ($part in $uris) {
+        $trimmed = ([string]$part).Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+        if ($healed.Count -gt 0 -and $trimmed -notmatch '^[a-z][a-z0-9+.\-]*:') {
+            $healed[$healed.Count - 1] = $healed[$healed.Count - 1] + ', ' + $trimmed
+        } else {
+            $healed.Add($trimmed)
+        }
+    }
+
+    for ($i = 0; $i -lt $healed.Count; $i++) {
+        $uri = $healed[$i]
+        if ($uri -notlike 'file:///*') { continue }
+        $path = $null
+        try { $path = ([uri]$uri).LocalPath } catch { continue }
+        if ([string]::IsNullOrWhiteSpace($path)) { continue }
+        $result.Paths.Add($path)
+        if ($i -lt $flatTimes.Count) {
+            $ms = [long]0
+            try { $ms = [long][double]::Parse($flatTimes[$i], [System.Globalization.CultureInfo]::InvariantCulture) } catch { $ms = 0 }
+            if ($ms -gt 0 -and -not $result.TimesMs.ContainsKey($path)) { $result.TimesMs[$path] = $ms }
+        }
+    }
+    return $result
+}
+
+function Get-SRMediaDurationSeconds {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) { return $null }
+    $shell = $null
+    try {
+        $shell = New-Object -ComObject Shell.Application
+        $folder = $shell.Namespace((Split-Path -Parent $Path))
+        if ($null -eq $folder) { return $null }
+        $item = $folder.ParseName((Split-Path -Leaf $Path))
+        if ($null -eq $item) { return $null }
+        # "Length" is detail index 27 on Windows 10/11.
+        $text = [string]$folder.GetDetailsOf($item, 27)
+        if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+        $parts = @($text -split ':')
+        if ($parts.Count -lt 2) { return $null }
+        $seconds = [double]0
+        for ($i = 0; $i -lt $parts.Count; $i++) {
+            $value = 0.0
+            if (-not [double]::TryParse($parts[$i], [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$value)) { return $null }
+            $seconds = $seconds * 60 + $value
+        }
+        if ($seconds -le 0) { return $null }
+        return [Math]::Round($seconds, 1)
+    } catch {
+        return $null
+    } finally {
+        if ($null -ne $shell) {
+            try { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell) } catch { }
+        }
+    }
+}
+
+$script:SRMediaStatePath = Join-Path $script:SRRoot 'media-state.json'
+
+function Get-SRMediaState {
+    $empty = [pscustomobject]@{ players = @{} }
+    if (-not (Test-Path -LiteralPath $script:SRMediaStatePath)) { return $empty }
+    try {
+        $saved = Get-Content -LiteralPath $script:SRMediaStatePath -Raw -ErrorAction Stop | ConvertFrom-Json
+        if ($null -eq $saved -or $null -eq $saved.PSObject.Properties['players']) { return $empty }
+        $map = @{}
+        foreach ($property in $saved.players.PSObject.Properties) { $map[$property.Name] = $property.Value }
+        return [pscustomobject]@{ players = $map }
+    } catch {
+        return $empty
+    }
+}
+
+function Save-SRMediaState {
+    param([Parameter(Mandatory = $true)]$State)
+    try {
+        $parent = Split-Path -Parent $script:SRMediaStatePath
+        if (-not (Test-Path -LiteralPath $parent)) {
+            New-Item -ItemType Directory -Path $parent -Force | Out-Null
+        }
+        $json = $State | ConvertTo-Json -Depth 6
+        [System.IO.File]::WriteAllText($script:SRMediaStatePath, $json, (New-Object System.Text.UTF8Encoding($false)))
+    } catch {
+        Write-SRLog -Level DEBUG -Message "Could not save media state: $($_.Exception.Message)"
+    }
+}
+
+function ConvertTo-SRMediaTitle {
+    param([string]$Title)
+    # "<filename> - VLC media player" (also used while fullscreen).
+    $name = [string]$Title
+    $name = $name -replace '(?i)\s*-\s*VLC media player\s*$', ''
+    return $name.Trim()
+}
+
+function Get-SRVlcResumeMode {
+    # qt-continue in vlcrc: 0 = ask, 1 = always resume, 2 = never.
+    # Only mode 1 guarantees VLC itself restarts from the saved position;
+    # otherwise a reopened file starts at 0 and the saved time is stale.
+    $vlcrc = Join-Path $env:APPDATA 'vlc\vlcrc'
+    if (-not (Test-Path -LiteralPath $vlcrc)) { return 2 }
+    try {
+        foreach ($line in @(Get-Content -LiteralPath $vlcrc -ErrorAction Stop)) {
+            if ($line -match '^qt-continue(?:-playback)?=(\d+)') { return [int]$Matches[1] }
+        }
+    } catch { }
+    return 0
+}
+
+function Get-SRMediaPlayerMedia {
+    param(
+        [Parameter(Mandatory = $true)]$Apps,
+        [Parameter(Mandatory = $true)]$Config
+    )
+
+    $state = Get-SRMediaState
+    $stateDirty = $false
+    $now = Get-Date
+    $seenPlayer = $false
+
+    # Earliest start time among running VLC processes. A newly started VLC
+    # usually begins playing its file immediately, so this anchors the very
+    # first snapshot after the player launches.
+    $vlcStart = [datetime]::MinValue
+    try {
+        foreach ($process in @(Get-Process -Name vlc -ErrorAction SilentlyContinue)) {
+            try {
+                if ($process.StartTime -gt [datetime]::MinValue -and ($vlcStart -eq [datetime]::MinValue -or $process.StartTime -lt $vlcStart)) {
+                    $vlcStart = $process.StartTime
+                }
+            } catch { }
+        }
+    } catch { }
+
+    $recents = Get-SRVlcRecentMedia
+
+    foreach ($app in @($Apps)) {
+        if ($null -eq $app) { continue }
+        $leaf = ([string]$app.name).ToLowerInvariant()
+        if ($leaf -ne 'vlc') { continue }
+        $seenPlayer = $true
+
+        # Find the window actually playing something. Some files leave the
+        # VLC title empty ("VLC media player"); those resolve through the
+        # recents list below.
+        $title = $null
+        foreach ($window in @($app.windows)) {
+            $candidate = ConvertTo-SRMediaTitle -Title ([string]$window.title)
+            if (-not [string]::IsNullOrWhiteSpace($candidate) -and $candidate -notmatch '(?i)^vlc( media player)?$') {
+                $title = $candidate
+                break
+            }
+        }
+        if ($null -eq $title -and $recents.Paths.Count -eq 0) { continue }
+
+        $file = $null
+        if ($null -ne $title) {
+            foreach ($path in $recents.Paths) {
+                if ((Split-Path -Leaf $path) -ieq $title) { $file = $path; break }
+            }
+        }
+        if ($null -eq $file -or -not (Test-Path -LiteralPath $file)) {
+            # VLC moves the opened file to the front of its recents while the
+            # session runs, so the newest on-disk entry is the playing file
+            # when the title is empty or shows metadata.
+            foreach ($path in $recents.Paths) {
+                if (Test-Path -LiteralPath $path) { $file = $path; break }
+            }
+        }
+        if ($null -eq $file -or -not (Test-Path -LiteralPath $file)) { continue }
+        if ($null -eq $title) { $title = Split-Path -Leaf $file }
+
+        $savedMs = [long]0
+        if ($recents.TimesMs.ContainsKey($file)) { $savedMs = [long]$recents.TimesMs[$file] }
+
+        # Dead reckoning: advance the last known position by the time the same
+        # file has stayed open between snapshots. VLC never writes the current
+        # position during playback, so this is what survives a crash.
+        $resumeMode = Get-SRVlcResumeMode
+        $entry = $null
+        if ($state.players.ContainsKey('vlc')) { $entry = $state.players['vlc'] }
+        $anchoredFromVlc = $false
+        $anchorMs = [long]0
+        $anchorAt = $now
+        $durationSeconds = $null
+
+        $lastSeen = [datetime]::MinValue
+        if ($null -ne $entry) {
+            try { $lastSeen = [datetime]::Parse([string]$entry.lastSeenAt, [System.Globalization.CultureInfo]::InvariantCulture) } catch { }
+            try { $durationSeconds = [double]$entry.durationSeconds } catch { $durationSeconds = $null }
+        }
+
+        $sameSession = ($null -ne $entry -and
+            [string]$entry.file -eq $file -and
+            $lastSeen -gt [datetime]::MinValue -and $lastSeen -lt $now -and
+            ($vlcStart -eq [datetime]::MinValue -or $vlcStart -le $lastSeen))
+
+        if ($sameSession) {
+            # Continue from the previous snapshot's estimate.
+            try {
+                $anchorMs = [long][double]$entry.anchorPositionMs
+                $anchorAt = [datetime]::Parse([string]$entry.anchorAt, [System.Globalization.CultureInfo]::InvariantCulture)
+            } catch {
+                $anchorMs = [long]0
+                $anchorAt = $lastSeen
+            }
+            if ($resumeMode -eq 1 -and $savedMs -gt $anchorMs) {
+                # VLC auto-resumes and knows a newer exact position.
+                $anchorMs = $savedMs
+                $anchorAt = $lastSeen
+            }
+            if ($resumeMode -eq 1 -and $savedMs -gt 0) { $anchoredFromVlc = $true }
+        } else {
+            # First sighting, or VLC restarted since the last snapshot: anchor
+            # to the player's own start time. With VLC auto-resume enabled the
+            # saved position is where playback actually continued from.
+            if ($vlcStart -gt [datetime]::MinValue -and $vlcStart -lt $now) { $anchorAt = $vlcStart }
+            if ($resumeMode -eq 1 -and $savedMs -gt 0) {
+                $anchorMs = $savedMs
+                $anchoredFromVlc = $true
+            }
+        }
+
+        if ($null -eq $durationSeconds) { $durationSeconds = Get-SRMediaDurationSeconds -Path $file }
+
+        $positionMs = $anchorMs + [int64](($now - $anchorAt).TotalMilliseconds)
+        if ($positionMs -lt 0) { $positionMs = 0 }
+        if ($null -ne $durationSeconds -and $durationSeconds -gt 0) {
+            $capMs = [int64]($durationSeconds * 1000) - 5000
+            if ($capMs -lt 0) { $capMs = 0 }
+            if ($positionMs -gt $capMs) { $positionMs = $capMs }
+        }
+
+        $media = [pscustomobject]@{
+            file            = $file
+            title           = $title
+            positionSeconds = [Math]::Round($positionMs / 1000.0, 1)
+            durationSeconds = $durationSeconds
+            estimated       = (-not $anchoredFromVlc)
+        }
+        $app | Add-Member -NotePropertyName media -NotePropertyValue $media -Force
+
+        $state.players['vlc'] = [pscustomobject]@{
+            file             = $file
+            savedPositionMs  = $savedMs
+            anchorPositionMs = $positionMs
+            anchorAt         = $now.ToString('o')
+            lastSeenAt       = $now.ToString('o')
+            durationSeconds  = $durationSeconds
+        }
+        $stateDirty = $true
+        Write-SRLog -Level DEBUG -Message ("VLC media captured: {0} at {1}s" -f $file, $media.positionSeconds)
+    }
+
+    # A player that is not running (or has nothing open) ends its session;
+    # VLC will have written the exact position if it closed cleanly.
+    if (-not $seenPlayer -and $state.players.ContainsKey('vlc')) {
+        $state.players.Remove('vlc')
+        $stateDirty = $true
+    }
+    if ($stateDirty) { Save-SRMediaState -State $state }
+}
+
+function Get-SRMediaLaunchArguments {
+    param(
+        [Parameter(Mandatory = $true)][string]$ExePath,
+        $Media
+    )
+    if ($null -eq $Media) { return $null }
+    $file = [string]$Media.file
+    if ([string]::IsNullOrWhiteSpace($file) -or -not (Test-Path -LiteralPath $file)) { return $null }
+
+    $leaf = [System.IO.Path]::GetFileNameWithoutExtension($ExePath).ToLowerInvariant()
+    $position = 0.0
+    try { $position = [double]$Media.positionSeconds } catch { $position = 0.0 }
+
+    if ($leaf -eq 'vlc') {
+        $arguments = New-Object System.Collections.Generic.List[string]
+        if ($position -ge 10) {
+            # Suppress VLC's own (stale) resume prompt so our position wins.
+            $arguments.Add('--qt-continue=2')
+            $arguments.Add(('--start-time={0}' -f [int][Math]::Floor($position)))
+        }
+        $arguments.Add($file)
+        return $arguments.ToArray()
+    }
+    return @($file)
+}
+
+# ---------------------------------------------------------------------------
 # Snapshot creation
 # ---------------------------------------------------------------------------
 
@@ -1978,6 +2603,11 @@ function New-SRSnapshot {
     if ($null -eq $config.PSObject.Properties['captureBrowserTabs'] -or [bool]$config.captureBrowserTabs) {
         $browsers = @(Get-SRBrowsers -Windows $windows -ProcessMap $processMap -Config $config)
     }
+    if ($null -eq $config.PSObject.Properties['captureMediaPlayers'] -or [bool]$config.captureMediaPlayers) {
+        # Attaches the playing media file and an estimated position to media
+        # player entries (currently VLC).
+        Get-SRMediaPlayerMedia -Apps $apps -Config $config
+    }
 
     # Apply the user's capture exclusions before the snapshot is written, so
     # excluded names, folders and URLs never reach the JSON files on disk.
@@ -1987,6 +2617,19 @@ function New-SRSnapshot {
         $apps = @($apps | Where-Object {
             -not (Test-SRPatternMatch -Patterns $excludeApps -Values @([string]$_.name, [string]$_.exe))
         })
+    }
+
+    $excludeFolders = @($config.excludeFolders)
+    if ($excludeFolders.Count -gt 0) {
+        # Media files inside excluded folders must not reach the snapshot.
+        foreach ($app in $apps) {
+            $mediaProperty = $app.PSObject.Properties['media']
+            if ($null -eq $mediaProperty -or $null -eq $mediaProperty.Value) { continue }
+            $mediaFile = [string]$mediaProperty.Value.file
+            if (Test-SRPatternMatch -Patterns $excludeFolders -Values @($mediaFile)) {
+                $app.PSObject.Properties.Remove('media')
+            }
+        }
     }
 
     $excludeFolders = @($config.excludeFolders)
@@ -2049,9 +2692,17 @@ function New-SRSnapshot {
 function Remove-OldSRSnapshots {
     param(
         [int]$Keep = 48,
-        [int]$MaxAgeDays = 0
+        [int]$MaxAgeDays = 0,
+        [string[]]$Pinned = @()
     )
     if ($Keep -lt 1) { $Keep = 1 }
+
+    # Pinned snapshots are never deleted by retention, and they do not
+    # consume the keep-count budget.
+    $pinnedNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($name in @($Pinned)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$name)) { [void]$pinnedNames.Add([string]$name) }
+    }
 
     $files = @(Get-ChildItem -LiteralPath $script:SRSnapshotDir -Filter 'session-*.json' -File -ErrorAction SilentlyContinue |
         Sort-Object -Property LastWriteTime -Descending)
@@ -2059,6 +2710,7 @@ function Remove-OldSRSnapshots {
     if ($MaxAgeDays -gt 0) {
         $cutoff = (Get-Date).AddDays(-1 * [Math]::Abs($MaxAgeDays))
         foreach ($file in $files) {
+            if ($pinnedNames.Contains($file.Name)) { continue }
             if ($file.LastWriteTime -lt $cutoff) {
                 try { Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop } catch { }
             }
@@ -2067,8 +2719,9 @@ function Remove-OldSRSnapshots {
             Sort-Object -Property LastWriteTime -Descending)
     }
 
-    if ($files.Count -le $Keep) { return }
-    foreach ($file in $files[$Keep..($files.Count - 1)]) {
+    $removable = @($files | Where-Object { -not $pinnedNames.Contains($_.Name) })
+    if ($removable.Count -le $Keep) { return }
+    foreach ($file in $removable[$Keep..($removable.Count - 1)]) {
         try { Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop } catch { }
     }
 }
@@ -2101,7 +2754,7 @@ function Save-SRSnapshot {
         $path = Join-Path $script:SRSnapshotDir $fileName
         $json = $snapshot | ConvertTo-Json -Depth 12
         [System.IO.File]::WriteAllText($path, $json, (New-Object System.Text.UTF8Encoding($false)))
-        Remove-OldSRSnapshots -Keep ([int]$config.keepSnapshots) -MaxAgeDays ([int]$config.keepSnapshotDays)
+        Remove-OldSRSnapshots -Keep ([int]$config.keepSnapshots) -MaxAgeDays ([int]$config.keepSnapshotDays) -Pinned @($config.pinnedSnapshots)
         Write-SRLog -Message ("Snapshot saved: {0} ({1} apps, {2} folders, {3} browsers, {4} tabs)" -f $path, $snapshot.stats.apps, $snapshot.stats.folders, $snapshot.stats.browsers, $snapshot.stats.tabs)
         return $path
     } catch {
@@ -2340,7 +2993,7 @@ function Restore-SRBrowser {
             }
             try {
                 $args = if ($nativePreferred) { @() } else { @('-restore') }
-                Start-SRDetached -FilePath $exe -Arguments $args
+                [void](Start-SRDetached -FilePath $exe -Arguments $args)
                 $results.Add([pscustomobject]@{ Started = $true; Message = 'Firefox: asked to restore the previous session.' })
             } catch {
                 $results.Add([pscustomobject]@{ Started = $false; Message = "Firefox restore failed: $($_.Exception.Message)" })
@@ -2358,11 +3011,11 @@ function Restore-SRBrowser {
                 if (-not (Test-SRRestorableUrl -Url $tab.url)) { continue }
                 try {
                     if ($first) {
-                        Start-SRDetached -FilePath $exe -Arguments @('-new-window', $tab.url)
+                        [void](Start-SRDetached -FilePath $exe -Arguments @('-new-window', $tab.url))
                         $first = $false
                         Start-Sleep -Milliseconds 600
                     } else {
-                        Start-SRDetached -FilePath $exe -Arguments @('-new-tab', $tab.url)
+                        [void](Start-SRDetached -FilePath $exe -Arguments @('-new-tab', $tab.url))
                         Start-Sleep -Milliseconds 120
                     }
                     $opened++
@@ -2373,7 +3026,7 @@ function Restore-SRBrowser {
         }
         if ($opened -eq 0) {
             try {
-                Start-SRDetached -FilePath $exe
+                [void](Start-SRDetached -FilePath $exe)
                 $results.Add([pscustomobject]@{ Started = $true; Message = 'Firefox: started with no recoverable URLs.' })
             } catch {
                 $results.Add([pscustomobject]@{ Started = $false; Message = "Firefox start failed: $($_.Exception.Message)" })
@@ -2410,7 +3063,7 @@ function Restore-SRBrowser {
             }
             if (-not $nativePreferred) { $args.Add('--restore-last-session') }
             try {
-                Start-SRDetached -FilePath $exe -Arguments $args.ToArray()
+                [void](Start-SRDetached -FilePath $exe -Arguments $args.ToArray())
                 $results.Add([pscustomobject]@{ Started = $true; Message = "$($Browser.name): asked to restore profile '$($profile.displayName)'." })
             } catch {
                 $results.Add([pscustomobject]@{ Started = $false; Message = "$($Browser.name) restore failed: $($_.Exception.Message)" })
@@ -2451,7 +3104,7 @@ function Restore-SRBrowser {
                 $args.Add('--new-window')
                 foreach ($url in $urls) { $args.Add($url) }
                 try {
-                    Start-SRDetached -FilePath $exe -Arguments $args.ToArray()
+                    [void](Start-SRDetached -FilePath $exe -Arguments $args.ToArray())
                     $opened += $urls.Count
                     $windowCount++
                     Start-Sleep -Milliseconds 250
@@ -2473,26 +3126,50 @@ function Restore-SRBrowser {
 function Invoke-SRRestore {
     param(
         [Parameter(Mandatory = $true)]$Plan,
-        [switch]$Force
+        [switch]$Force,
+        [scriptblock]$Progress
     )
 
     $results = New-Object System.Collections.Generic.List[object]
 
+    $total = 0
+    foreach ($app in @($Plan.apps)) { if ($null -ne $app) { $total++ } }
+    foreach ($folder in @($Plan.explorer)) { if (-not [string]::IsNullOrWhiteSpace([string]$folder)) { $total++ } }
+    foreach ($browser in @($Plan.browsers)) { if ($null -ne $browser) { $total++ } }
+    $index = 0
+
     foreach ($app in @($Plan.apps)) {
         if ($null -eq $app) { continue }
-        $results.Add((Start-SRApplication -App $app -Force:$Force))
+        $index++
+        if ($null -ne $Progress) {
+            try { & $Progress $index $total ([string]$app.name) } catch { }
+        }
+        $appResult = Start-SRApplication -App $app -Force:$Force
+        $appResult | Add-Member -NotePropertyName Target -NotePropertyValue ([string]$app.name) -Force
+        $results.Add($appResult)
     }
 
     foreach ($folder in @($Plan.explorer)) {
         if ([string]::IsNullOrWhiteSpace([string]$folder)) { continue }
-        $results.Add((Open-SRFolder -Path ([string]$folder)))
+        $index++
+        if ($null -ne $Progress) {
+            try { & $Progress $index $total ([string]$folder) } catch { }
+        }
+        $folderResult = Open-SRFolder -Path ([string]$folder)
+        $folderResult | Add-Member -NotePropertyName Target -NotePropertyValue ([string]$folder) -Force
+        $results.Add($folderResult)
     }
 
     $tabMode = 'Smart'
     if ($Plan.tabMode) { $tabMode = [string]$Plan.tabMode }
     foreach ($browser in @($Plan.browsers)) {
         if ($null -eq $browser) { continue }
+        $index++
+        if ($null -ne $Progress) {
+            try { & $Progress $index $total ([string]$browser.name) } catch { }
+        }
         foreach ($result in @(Restore-SRBrowser -Browser $browser -TabMode $tabMode -Force:$Force)) {
+            $result | Add-Member -NotePropertyName Target -NotePropertyValue ([string]$browser.name) -Force
             $results.Add($result)
         }
     }
@@ -2547,6 +3224,100 @@ function Get-SRSnapshotByPath {
     if (-not (Test-Path -LiteralPath $Path)) { throw "Snapshot not found: $Path" }
     $snapshot = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json
     return $snapshot
+}
+
+# ---------------------------------------------------------------------------
+# Snapshot pinning, import and export
+# ---------------------------------------------------------------------------
+
+function Test-SRSnapshotPinned {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    try {
+        $config = Get-SRConfig
+        $name = Split-Path -Leaf $Path
+        return (@($config.pinnedSnapshots) -contains $name)
+    } catch {
+        return $false
+    }
+}
+
+function Set-SRSnapshotPinned {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][bool]$Pinned
+    )
+    $config = Get-SRConfig
+    $current = @($config.pinnedSnapshots | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+    $name = Split-Path -Leaf $Path
+    if ($Pinned) {
+        if ($current -notcontains $name) { $current = @($current + $name) }
+    } else {
+        $current = @($current | Where-Object { [string]$_ -ne $name })
+    }
+    $config.pinnedSnapshots = @($current)
+    Save-SRConfig -Config $config
+    return $config
+}
+
+function Export-SRSnapshotFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Snapshot not found: $Path" }
+    $destinationFolder = Split-Path -Parent $Destination
+    if (-not [string]::IsNullOrWhiteSpace($destinationFolder) -and -not (Test-Path -LiteralPath $destinationFolder)) {
+        New-Item -ItemType Directory -Path $destinationFolder -Force | Out-Null
+    }
+    Copy-Item -LiteralPath $Path -Destination $Destination -Force -ErrorAction Stop
+    return $Destination
+}
+
+function Import-SRSnapshotFile {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Snapshot file not found: $Path" }
+
+    # Validate before copying so a random JSON file cannot enter the timeline.
+    $snapshot = $null
+    try {
+        $snapshot = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json
+    } catch {
+        throw "The file is not a valid snapshot: $($_.Exception.Message)"
+    }
+    if ($null -eq $snapshot) {
+        throw 'The file does not look like a Session Recovery snapshot.'
+    }
+    foreach ($requiredProperty in @('capturedAt', 'apps', 'explorer', 'browsers')) {
+        if ($null -eq $snapshot.PSObject.Properties[$requiredProperty]) {
+            throw ("The file is missing the '{0}' snapshot field." -f $requiredProperty)
+        }
+    }
+    $capturedAt = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse(
+            [string]$snapshot.capturedAt,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::None,
+            [ref]$capturedAt)) {
+        throw 'The snapshot has an invalid capturedAt value.'
+    }
+
+    if (-not (Test-Path -LiteralPath $script:SRSnapshotDir)) {
+        New-Item -ItemType Directory -Path $script:SRSnapshotDir -Force | Out-Null
+    }
+
+    $leaf = Split-Path -Leaf $Path
+    if ($leaf -notlike 'session-*') { $leaf = '' }
+    $targetName = $leaf
+    if ([string]::IsNullOrWhiteSpace($targetName) -or (Test-Path -LiteralPath (Join-Path $script:SRSnapshotDir $targetName))) {
+        $targetName = 'session-imported-{0}.json' -f (Get-Date).ToString('yyyyMMdd-HHmmss-fff')
+        while (Test-Path -LiteralPath (Join-Path $script:SRSnapshotDir $targetName)) {
+            $targetName = 'session-imported-{0}.json' -f (Get-Date).ToString('yyyyMMdd-HHmmss-fff')
+        }
+    }
+    $targetPath = Join-Path $script:SRSnapshotDir $targetName
+    Copy-Item -LiteralPath $Path -Destination $targetPath -Force -ErrorAction Stop
+    Write-SRLog -Message "Snapshot imported from $Path as $targetName"
+    return $targetPath
 }
 
 # ---------------------------------------------------------------------------

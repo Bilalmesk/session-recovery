@@ -108,6 +108,7 @@ namespace SessionRecovery.Studio
         private string _metaText = "";
         private string _ageText = "";
         private bool _approximate;
+        private bool _pinned;
         private bool _selected;
         private Color _textColor = Color.FromArgb(238, 244, 252);
         private Color _mutedColor = Color.FromArgb(151, 164, 181);
@@ -115,11 +116,13 @@ namespace SessionRecovery.Studio
         private Color _accentColor = Color.FromArgb(108, 99, 255);
         private Color _amberColor = Color.FromArgb(245, 184, 78);
         private Color _amberSoft = Color.FromArgb(55, 45, 26);
+        private Color _pinnedSoft = Color.FromArgb(31, 31, 61);
 
         public string TimeText { get { return _timeText; } set { _timeText = value ?? ""; Invalidate(); } }
         public string MetaText { get { return _metaText; } set { _metaText = value ?? ""; Invalidate(); } }
         public string AgeText { get { return _ageText; } set { _ageText = value ?? ""; Invalidate(); } }
         public bool Approximate { get { return _approximate; } set { _approximate = value; Invalidate(); } }
+        public bool Pinned { get { return _pinned; } set { _pinned = value; Invalidate(); } }
         public bool Selected { get { return _selected; } set { _selected = value; Invalidate(); } }
         public Color TextColor { get { return _textColor; } set { _textColor = value; Invalidate(); } }
         public Color MutedColor { get { return _mutedColor; } set { _mutedColor = value; Invalidate(); } }
@@ -127,6 +130,7 @@ namespace SessionRecovery.Studio
         public Color AccentColor { get { return _accentColor; } set { _accentColor = value; Invalidate(); } }
         public Color AmberColor { get { return _amberColor; } set { _amberColor = value; Invalidate(); } }
         public Color AmberSoft { get { return _amberSoft; } set { _amberSoft = value; Invalidate(); } }
+        public Color PinnedSoft { get { return _pinnedSoft; } set { _pinnedSoft = value; Invalidate(); } }
 
         public StudioSnapshotRow()
         {
@@ -162,6 +166,12 @@ namespace SessionRecovery.Studio
                 Draw.FillRoundRect(e.Graphics, badge, 5, _amberSoft);
                 TextRenderer.DrawText(e.Graphics, "APPROX", MetaFont, badge, _amberColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
             }
+            if (_pinned)
+            {
+                Rectangle badge = new Rectangle(Math.Max(82, Width - 96), 43, 60, 18);
+                Draw.FillRoundRect(e.Graphics, badge, 5, _pinnedSoft);
+                TextRenderer.DrawText(e.Graphics, "PINNED", MetaFont, badge, _accentColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            }
             Rectangle chevron = new Rectangle(Width - 34, 22, 20, 20);
             TextRenderer.DrawText(e.Graphics, "\uE76C", GlyphFont, chevron, _subtleColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
             if (_selected)
@@ -191,6 +201,8 @@ namespace SessionRecovery.Studio
         private Color _pressedColor = Color.FromArgb(76, 74, 200);
         private Color _outlineColor = Color.Empty;
         private Color _textColor = Color.White;
+        private Color _disabledFillColor = Color.FromArgb(44, 52, 65);
+        private Color _disabledTextColor = Color.FromArgb(131, 143, 160);
         private int _cornerRadius = 10;
 
         public Color FillColor { get { return _fillColor; } set { _fillColor = value; Invalidate(); } }
@@ -199,6 +211,8 @@ namespace SessionRecovery.Studio
         public Color PressedColor { get { return _pressedColor; } set { _pressedColor = value; Invalidate(); } }
         public Color OutlineColor { get { return _outlineColor; } set { _outlineColor = value; Invalidate(); } }
         public Color TextColor { get { return _textColor; } set { _textColor = value; Invalidate(); } }
+        public Color DisabledFillColor { get { return _disabledFillColor; } set { _disabledFillColor = value; Invalidate(); } }
+        public Color DisabledTextColor { get { return _disabledTextColor; } set { _disabledTextColor = value; Invalidate(); } }
         public int CornerRadius { get { return _cornerRadius; } set { _cornerRadius = value; Invalidate(); } }
         public string Glyph { get; set; }
         public float GlyphSize { get; set; }
@@ -222,7 +236,7 @@ namespace SessionRecovery.Studio
             Color canvas = Parent != null ? Parent.BackColor : Color.FromArgb(8, 12, 18);
             e.Graphics.Clear(canvas);
             Rectangle rect = new Rectangle(0, 0, Width - 1, Height - 1);
-            Color fill = !Enabled ? Color.FromArgb(44, 52, 65) : (_pressed ? _pressedColor : (_hover ? _hoverColor : _fillColor));
+            Color fill = !Enabled ? _disabledFillColor : (_pressed ? _pressedColor : (_hover ? _hoverColor : _fillColor));
             using (GraphicsPath path = Draw.RoundRect(rect, _cornerRadius))
             {
                 if (Enabled && !_gradientEndColor.IsEmpty && _gradientEndColor != _fillColor)
@@ -248,7 +262,7 @@ namespace SessionRecovery.Studio
                 }
             }
 
-            Color text = Enabled ? _textColor : Color.FromArgb(131, 143, 160);
+            Color text = Enabled ? _textColor : _disabledTextColor;
             int left = 0;
             if (!String.IsNullOrEmpty(Glyph))
             {
@@ -390,6 +404,9 @@ namespace SessionRecovery.Studio
         private string _detail = "";
         private string _glyph = "";
         private Color _accentColor = Color.FromArgb(108, 99, 255);
+        private Color _titleColor = Color.FromArgb(130, 145, 165);
+        private Color _valueColor = Color.FromArgb(238, 244, 252);
+        private Color _detailColor = Color.FromArgb(116, 132, 151);
         private Font _titleFont = new Font("Segoe UI", 8.5f, FontStyle.Regular, GraphicsUnit.Point);
         private Font _valueFont = new Font("Segoe UI Semibold", 20f, FontStyle.Regular, GraphicsUnit.Point);
         private Font _detailFont = new Font("Segoe UI", 8.25f, FontStyle.Regular, GraphicsUnit.Point);
@@ -400,6 +417,9 @@ namespace SessionRecovery.Studio
         public string Detail { get { return _detail; } set { _detail = value; Invalidate(); } }
         public string Glyph { get { return _glyph; } set { _glyph = value; Invalidate(); } }
         public Color AccentColor { get { return _accentColor; } set { _accentColor = value; Invalidate(); } }
+        public Color TitleColor { get { return _titleColor; } set { _titleColor = value; Invalidate(); } }
+        public Color ValueColor { get { return _valueColor; } set { _valueColor = value; Invalidate(); } }
+        public Color DetailColor { get { return _detailColor; } set { _detailColor = value; Invalidate(); } }
 
         public StudioStatCard()
         {
@@ -417,9 +437,9 @@ namespace SessionRecovery.Studio
                 e.Graphics.FillPath(brush, path);
             }
             TextRenderer.DrawText(e.Graphics, _glyph, _glyphFont, iconRect, _accentColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
-            TextRenderer.DrawText(e.Graphics, _title.ToUpperInvariant(), _titleFont, new Rectangle(64, 14, Width - 80, 18), Color.FromArgb(130, 145, 165), TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-            TextRenderer.DrawText(e.Graphics, _value, _valueFont, new Rectangle(64, 30, Width - 80, 34), Color.FromArgb(238, 244, 252), TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-            TextRenderer.DrawText(e.Graphics, _detail, _detailFont, new Rectangle(18, Height - 29, Width - 36, 18), Color.FromArgb(116, 132, 151), TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            TextRenderer.DrawText(e.Graphics, _title.ToUpperInvariant(), _titleFont, new Rectangle(64, 14, Width - 80, 18), _titleColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            TextRenderer.DrawText(e.Graphics, _value, _valueFont, new Rectangle(64, 30, Width - 80, 34), _valueColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            TextRenderer.DrawText(e.Graphics, _detail, _detailFont, new Rectangle(18, Height - 29, Width - 36, 18), _detailColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
         }
 
         protected override void Dispose(bool disposing)
@@ -438,6 +458,8 @@ namespace SessionRecovery.Studio
         private Color _trackColor = Color.FromArgb(34, 45, 61);
         private Color _progressColor = Color.FromArgb(108, 99, 255);
         private Color _progressEndColor = Color.FromArgb(51, 181, 229);
+        private Color _centerTextColor = Color.FromArgb(238, 244, 252);
+        private Color _captionColor = Color.FromArgb(126, 143, 164);
         private string _centerText = "";
         private string _caption = "";
         private int _thickness = 8;
@@ -448,6 +470,8 @@ namespace SessionRecovery.Studio
         public Color TrackColor { get { return _trackColor; } set { _trackColor = value; Invalidate(); } }
         public Color ProgressColor { get { return _progressColor; } set { _progressColor = value; Invalidate(); } }
         public Color ProgressEndColor { get { return _progressEndColor; } set { _progressEndColor = value; Invalidate(); } }
+        public Color CenterTextColor { get { return _centerTextColor; } set { _centerTextColor = value; Invalidate(); } }
+        public Color CaptionColor { get { return _captionColor; } set { _captionColor = value; Invalidate(); } }
         public string CenterText { get { return _centerText; } set { _centerText = value; Invalidate(); } }
         public string Caption { get { return _caption; } set { _caption = value; Invalidate(); } }
         public int Thickness { get { return _thickness; } set { _thickness = value; Invalidate(); } }
@@ -481,11 +505,11 @@ namespace SessionRecovery.Studio
                     e.Graphics.DrawArc(progress, rect, -90, sweep);
                 }
             }
-            TextRenderer.DrawText(e.Graphics, _centerText, _centerFont, rect, Color.FromArgb(238, 244, 252), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(e.Graphics, _centerText, _centerFont, rect, _centerTextColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
             if (!String.IsNullOrEmpty(_caption))
             {
                 Rectangle captionRect = new Rectangle(rect.Left, rect.Top + (rect.Height / 2) + 18, rect.Width, 16);
-                TextRenderer.DrawText(e.Graphics, _caption.ToUpperInvariant(), _captionFont, captionRect, Color.FromArgb(126, 143, 164), TextFormatFlags.HorizontalCenter | TextFormatFlags.Top | TextFormatFlags.NoPadding);
+                TextRenderer.DrawText(e.Graphics, _caption.ToUpperInvariant(), _captionFont, captionRect, _captionColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.Top | TextFormatFlags.NoPadding);
             }
         }
 
@@ -537,6 +561,10 @@ namespace SessionRecovery.Studio
 
     public class StudioComboBox : ComboBox
     {
+        private Color _selectionBackColor = Color.FromArgb(40, 52, 72);
+
+        public Color SelectionBackColor { get { return _selectionBackColor; } set { _selectionBackColor = value; Invalidate(); } }
+
         public StudioComboBox()
         {
             DrawMode = DrawMode.OwnerDrawFixed;
@@ -550,7 +578,7 @@ namespace SessionRecovery.Studio
         protected override void OnDrawItem(DrawItemEventArgs e)
         {
             if (e.Index < 0) return;
-            Color background = (e.State & DrawItemState.Selected) == DrawItemState.Selected ? Color.FromArgb(40, 52, 72) : BackColor;
+            Color background = (e.State & DrawItemState.Selected) == DrawItemState.Selected ? _selectionBackColor : BackColor;
             using (SolidBrush brush = new SolidBrush(background)) e.Graphics.FillRectangle(brush, e.Bounds);
             TextRenderer.DrawText(e.Graphics, Items[e.Index].ToString(), Font, e.Bounds, ForeColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
         }

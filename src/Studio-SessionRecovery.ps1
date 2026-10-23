@@ -1,7 +1,7 @@
 #requires -Version 5.1
 <#
     Studio-SessionRecovery.ps1
-    Session Recovery 2.1 control center.
+    Session Recovery 2.2 control center.
 
     This script is normally launched by SessionRecovery.exe, the native GUI
     host. The host runs this file in-process on an STA thread, so there is no
@@ -17,7 +17,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-$script:AppVersion = '2.1.0'
+$script:AppVersion = '2.2.0'
 $script:ScriptDir = $PSScriptRoot
 $script:AppDir = if ($env:SESSIONRECOVERY_HOST_EXE) { Split-Path -Parent $env:SESSIONRECOVERY_HOST_EXE } else { $PSScriptRoot }
 $script:HostExe = $null
@@ -53,29 +53,9 @@ $script:UpdateAction = ''
 $script:AvailableUpdate = $null
 $script:DownloadedUpdate = $null
 $script:UpdateInstalling = $false
-
-$script:P = @{
-    Bg          = [System.Drawing.Color]::FromArgb(8, 12, 18)
-    Sidebar     = [System.Drawing.Color]::FromArgb(11, 16, 24)
-    Card        = [System.Drawing.Color]::FromArgb(18, 25, 36)
-    CardAlt     = [System.Drawing.Color]::FromArgb(14, 20, 30)
-    CardHover   = [System.Drawing.Color]::FromArgb(26, 36, 51)
-    Border      = [System.Drawing.Color]::FromArgb(34, 45, 61)
-    BorderSoft  = [System.Drawing.Color]::FromArgb(26, 35, 48)
-    Text        = [System.Drawing.Color]::FromArgb(238, 244, 252)
-    Muted       = [System.Drawing.Color]::FromArgb(130, 145, 165)
-    Subtle      = [System.Drawing.Color]::FromArgb(96, 112, 133)
-    Accent      = [System.Drawing.Color]::FromArgb(108, 99, 255)
-    Accent2     = [System.Drawing.Color]::FromArgb(51, 181, 229)
-    AccentSoft  = [System.Drawing.Color]::FromArgb(31, 31, 61)
-    Green       = [System.Drawing.Color]::FromArgb(83, 221, 151)
-    GreenSoft   = [System.Drawing.Color]::FromArgb(25, 51, 42)
-    Amber       = [System.Drawing.Color]::FromArgb(244, 184, 96)
-    AmberSoft   = [System.Drawing.Color]::FromArgb(56, 43, 25)
-    Red         = [System.Drawing.Color]::FromArgb(255, 107, 129)
-    RedSoft     = [System.Drawing.Color]::FromArgb(61, 29, 38)
-    White       = [System.Drawing.Color]::White
-}
+$script:CaptureBusy = $false
+$script:CapturePollTimer = $null
+$script:CaptureState = $null
 
 $modulePath = Join-Path $PSScriptRoot 'SessionRecovery.psm1'
 if (-not (Test-Path -LiteralPath $modulePath)) {
@@ -122,6 +102,90 @@ if ($script:HostExe) {
         }
     } catch { }
 }
+
+function Get-StudioPalette {
+    param([string]$Theme = 'Aurora')
+    if ($Theme -eq 'Daylight') {
+        return @{
+            Bg          = [System.Drawing.Color]::FromArgb(243, 246, 250)
+            Sidebar     = [System.Drawing.Color]::FromArgb(235, 240, 246)
+            Card        = [System.Drawing.Color]::FromArgb(255, 255, 255)
+            CardAlt     = [System.Drawing.Color]::FromArgb(244, 247, 251)
+            CardHover   = [System.Drawing.Color]::FromArgb(231, 238, 247)
+            Border      = [System.Drawing.Color]::FromArgb(205, 216, 229)
+            BorderSoft  = [System.Drawing.Color]::FromArgb(220, 228, 238)
+            Text        = [System.Drawing.Color]::FromArgb(26, 34, 46)
+            Muted       = [System.Drawing.Color]::FromArgb(92, 105, 122)
+            Subtle      = [System.Drawing.Color]::FromArgb(128, 141, 158)
+            Accent      = [System.Drawing.Color]::FromArgb(108, 99, 255)
+            Accent2     = [System.Drawing.Color]::FromArgb(38, 160, 205)
+            AccentSoft  = [System.Drawing.Color]::FromArgb(232, 230, 255)
+            Green       = [System.Drawing.Color]::FromArgb(23, 142, 86)
+            GreenSoft   = [System.Drawing.Color]::FromArgb(222, 242, 232)
+            Amber       = [System.Drawing.Color]::FromArgb(168, 116, 22)
+            AmberSoft   = [System.Drawing.Color]::FromArgb(250, 240, 220)
+            Red         = [System.Drawing.Color]::FromArgb(200, 58, 79)
+            RedSoft     = [System.Drawing.Color]::FromArgb(250, 228, 232)
+            White       = [System.Drawing.Color]::White
+            NavSelected = [System.Drawing.Color]::FromArgb(226, 233, 244)
+            NavHover    = [System.Drawing.Color]::FromArgb(238, 243, 250)
+            Pressed     = [System.Drawing.Color]::FromArgb(222, 229, 240)
+            ToggleOff   = [System.Drawing.Color]::FromArgb(201, 210, 223)
+            SparkFill   = [System.Drawing.Color]::FromArgb(214, 210, 254)
+            ComboSelection = [System.Drawing.Color]::FromArgb(226, 233, 244)
+            DisabledFill   = [System.Drawing.Color]::FromArgb(232, 237, 243)
+            DisabledText   = [System.Drawing.Color]::FromArgb(145, 156, 170)
+            DangerHover    = [System.Drawing.Color]::FromArgb(248, 218, 223)
+            DangerPressed  = [System.Drawing.Color]::FromArgb(242, 206, 213)
+            DangerOutline  = [System.Drawing.Color]::FromArgb(228, 180, 190)
+        }
+    }
+    return @{
+        Bg          = [System.Drawing.Color]::FromArgb(8, 12, 18)
+        Sidebar     = [System.Drawing.Color]::FromArgb(11, 16, 24)
+        Card        = [System.Drawing.Color]::FromArgb(18, 25, 36)
+        CardAlt     = [System.Drawing.Color]::FromArgb(14, 20, 30)
+        CardHover   = [System.Drawing.Color]::FromArgb(26, 36, 51)
+        Border      = [System.Drawing.Color]::FromArgb(34, 45, 61)
+        BorderSoft  = [System.Drawing.Color]::FromArgb(26, 35, 48)
+        Text        = [System.Drawing.Color]::FromArgb(238, 244, 252)
+        Muted       = [System.Drawing.Color]::FromArgb(130, 145, 165)
+        Subtle      = [System.Drawing.Color]::FromArgb(96, 112, 133)
+        Accent      = [System.Drawing.Color]::FromArgb(108, 99, 255)
+        Accent2     = [System.Drawing.Color]::FromArgb(51, 181, 229)
+        AccentSoft  = [System.Drawing.Color]::FromArgb(31, 31, 61)
+        Green       = [System.Drawing.Color]::FromArgb(83, 221, 151)
+        GreenSoft   = [System.Drawing.Color]::FromArgb(25, 51, 42)
+        Amber       = [System.Drawing.Color]::FromArgb(244, 184, 96)
+        AmberSoft   = [System.Drawing.Color]::FromArgb(56, 43, 25)
+        Red         = [System.Drawing.Color]::FromArgb(255, 107, 129)
+        RedSoft     = [System.Drawing.Color]::FromArgb(61, 29, 38)
+        White       = [System.Drawing.Color]::White
+        NavSelected = [System.Drawing.Color]::FromArgb(27, 38, 54)
+        NavHover    = [System.Drawing.Color]::FromArgb(20, 29, 42)
+        Pressed     = [System.Drawing.Color]::FromArgb(22, 30, 43)
+        ToggleOff   = [System.Drawing.Color]::FromArgb(45, 55, 70)
+        SparkFill   = [System.Drawing.Color]::FromArgb(55, 45, 150)
+        ComboSelection = [System.Drawing.Color]::FromArgb(40, 52, 72)
+        DisabledFill   = [System.Drawing.Color]::FromArgb(44, 52, 65)
+        DisabledText   = [System.Drawing.Color]::FromArgb(131, 143, 160)
+        DangerHover    = [System.Drawing.Color]::FromArgb(84, 36, 49)
+        DangerPressed  = [System.Drawing.Color]::FromArgb(70, 30, 41)
+        DangerOutline  = [System.Drawing.Color]::FromArgb(92, 48, 62)
+    }
+}
+
+# The palette is chosen once per Studio session so every control is consistent;
+# changing the theme in Settings applies the next time the Studio opens.
+$studioTheme = 'Aurora'
+try {
+    $themeConfig = Get-SRConfig
+    $themeProperty = $themeConfig.PSObject.Properties['theme']
+    if ($null -ne $themeProperty -and -not [string]::IsNullOrWhiteSpace([string]$themeProperty.Value)) {
+        $studioTheme = [string]$themeProperty.Value
+    }
+} catch { }
+$script:P = Get-StudioPalette -Theme $studioTheme
 
 $script:FontBody = New-Object System.Drawing.Font('Segoe UI', 9)
 $script:FontBodySmall = New-Object System.Drawing.Font('Segoe UI', 8.25)
@@ -199,6 +263,8 @@ function New-StudioButton {
     $button.Size = New-Object System.Drawing.Size($Width, $Height)
     $button.CornerRadius = 9
     $button.Glyph = $Glyph
+    $button.DisabledFillColor = $script:P.DisabledFill
+    $button.DisabledTextColor = $script:P.DisabledText
     if ($Primary) {
         $button.FillColor = $script:P.Accent
         $button.GradientEndColor = $script:P.Accent2
@@ -209,15 +275,15 @@ function New-StudioButton {
     } elseif ($Danger) {
         $button.FillColor = $script:P.RedSoft
         $button.GradientEndColor = $script:P.RedSoft
-        $button.HoverColor = [System.Drawing.Color]::FromArgb(84, 36, 49)
-        $button.PressedColor = [System.Drawing.Color]::FromArgb(70, 30, 41)
+        $button.HoverColor = $script:P.DangerHover
+        $button.PressedColor = $script:P.DangerPressed
         $button.TextColor = $script:P.Red
-        $button.OutlineColor = [System.Drawing.Color]::FromArgb(92, 48, 62)
+        $button.OutlineColor = $script:P.DangerOutline
     } else {
         $button.FillColor = $script:P.CardAlt
         $button.GradientEndColor = [System.Drawing.Color]::Empty
         $button.HoverColor = $script:P.CardHover
-        $button.PressedColor = [System.Drawing.Color]::FromArgb(22, 30, 43)
+        $button.PressedColor = $script:P.Pressed
         $button.TextColor = $script:P.Text
         $button.OutlineColor = $script:P.Border
     }
@@ -230,7 +296,7 @@ function New-StudioToggle {
     $toggle.Location = New-Object System.Drawing.Point($X, $Y)
     $toggle.Checked = $Checked
     $toggle.OnColor = $script:P.Accent
-    $toggle.OffColor = [System.Drawing.Color]::FromArgb(45, 55, 70)
+    $toggle.OffColor = $script:P.ToggleOff
     return $toggle
 }
 
@@ -267,6 +333,9 @@ function New-StudioCombo {
     $combo = New-Object SessionRecovery.Studio.StudioComboBox
     $combo.Location = New-Object System.Drawing.Point($X, $Y)
     $combo.Size = New-Object System.Drawing.Size($Width, 28)
+    $combo.BackColor = $script:P.CardAlt
+    $combo.ForeColor = $script:P.Text
+    $combo.SelectionBackColor = $script:P.ComboSelection
     return $combo
 }
 
@@ -511,27 +580,120 @@ function Open-StudioRestore {
     }
 }
 
+function Reset-StudioCaptureButtons {
+    $script:CaptureBusy = $false
+    if ($script:Ui.CaptureButton) {
+        $script:Ui.CaptureButton.Enabled = $true
+        $script:Ui.CaptureButton.Text = 'Capture now'
+    }
+    if ($script:Ui.QuickCapture) {
+        $script:Ui.QuickCapture.Enabled = $true
+        $script:Ui.QuickCapture.Text = 'Capture now'
+    }
+}
+
+function Complete-StudioCapture {
+    param([bool]$Succeeded, [string]$Message = '')
+    $script:CaptureState = $null
+    Reset-StudioCaptureButtons
+    if ($Succeeded) {
+        Refresh-StudioData
+        if ($script:Snapshots.Count -gt 0) {
+            Show-StudioToast ('Snapshot saved  •  ' + $script:Snapshots[0].CapturedAt.ToString('HH:mm:ss')) $script:P.Green
+        } else {
+            Show-StudioToast 'Snapshot saved.' $script:P.Green
+        }
+    } else {
+        Show-StudioToast $Message $script:P.Amber
+    }
+}
+
 function Invoke-StudioCapture {
     if (-not $script:HostExe -or -not (Test-Path -LiteralPath $script:HostExe)) {
         Show-StudioToast 'SessionRecovery.exe is missing. Reinstall the app.' $script:P.Red
         return
     }
-    if ($script:Ui.CaptureButton) { $script:Ui.CaptureButton.Enabled = $false }
-    Show-StudioToast 'Capturing your current session...' $script:P.Muted
-    try {
-        $process = Start-Process -FilePath $script:HostExe -ArgumentList '--snapshot' -WorkingDirectory $script:ScriptDir -PassThru
-        $process.WaitForExit(30000) | Out-Null
-        Refresh-StudioData
-        if ($script:Snapshots.Count -gt 0) {
-            Show-StudioToast ('Snapshot saved  •  ' + $script:Snapshots[0].CapturedAt.ToString('HH:mm:ss')) $script:P.Green
-        } else {
-            Show-StudioToast 'Snapshot finished, but no snapshot was found.' $script:P.Amber
+    if ($script:CaptureBusy) { return }
+
+    # The snapshot runs in its own process; the Studio polls for the new file
+    # so the window never freezes while capture is working.
+    $script:CaptureBusy = $true
+    foreach ($button in @($script:Ui.CaptureButton, $script:Ui.QuickCapture)) {
+        if ($null -ne $button) {
+            $button.Enabled = $false
+            $button.Text = 'Capturing...'
         }
-    } catch {
-        Show-StudioToast ('Snapshot failed: ' + $_.Exception.Message) $script:P.Red
-    } finally {
-        if ($script:Ui.CaptureButton) { $script:Ui.CaptureButton.Enabled = $true }
     }
+    Show-StudioToast 'Capturing your current session...' $script:P.Muted
+
+    $before = [datetime]::MinValue
+    try {
+        $newest = Get-ChildItem -LiteralPath (Get-SRSnapshotDirectory) -Filter 'session-*.json' -File -ErrorAction SilentlyContinue |
+            Sort-Object -Property LastWriteTime -Descending | Select-Object -First 1
+        if ($newest) { $before = $newest.LastWriteTime }
+    } catch { }
+
+    $captureProcess = $null
+    try {
+        $captureProcess = Start-Process -FilePath $script:HostExe -ArgumentList '--snapshot' -WorkingDirectory $script:ScriptDir -PassThru -ErrorAction Stop
+    } catch {
+        Complete-StudioCapture -Succeeded $false -Message ('Snapshot failed: ' + $_.Exception.Message)
+        return
+    }
+
+    $script:CaptureState = @{
+        Before    = $before
+        StartedAt = Get-Date
+        Process   = $captureProcess
+    }
+    if ($null -eq $script:CapturePollTimer) {
+        $script:CapturePollTimer = New-Object System.Windows.Forms.Timer
+        $script:CapturePollTimer.Interval = 400
+        $script:CapturePollTimer.Add_Tick({
+            $state = $script:CaptureState
+            if ($null -eq $state) {
+                if ($script:CapturePollTimer) { $script:CapturePollTimer.Stop() }
+                return
+            }
+            $processExited = $true
+            if ($null -ne $state.Process) {
+                try {
+                    $state.Process.Refresh()
+                    $processExited = [bool]$state.Process.HasExited
+                } catch {
+                    $processExited = $true
+                }
+            }
+            if ($processExited) {
+                # Wait for the capture process to exit before reading the file,
+                # so a partially written snapshot can never enter the timeline.
+                $newest = Get-ChildItem -LiteralPath (Get-SRSnapshotDirectory) -Filter 'session-*.json' -File -ErrorAction SilentlyContinue |
+                    Sort-Object -Property LastWriteTime -Descending | Select-Object -First 1
+                if ($null -ne $newest -and $newest.LastWriteTime -gt $state.Before) {
+                    $script:CapturePollTimer.Stop()
+                    Complete-StudioCapture -Succeeded $true
+                    return
+                }
+                if ($null -ne $state.Process) {
+                    $exitCode = $null
+                    try { $exitCode = [int]$state.Process.ExitCode } catch { }
+                    $script:CapturePollTimer.Stop()
+                    if ($exitCode -eq 0) {
+                        Complete-StudioCapture -Succeeded $false -Message 'Snapshot was skipped because another capture is still running.'
+                    } else {
+                        Complete-StudioCapture -Succeeded $false -Message ('Snapshot failed (exit code {0}). Check Diagnostics for details.' -f $exitCode)
+                    }
+                    return
+                }
+            }
+            if (((Get-Date) - $state.StartedAt).TotalSeconds -gt 30) {
+                $script:CapturePollTimer.Stop()
+                Complete-StudioCapture -Succeeded $false -Message 'The snapshot did not finish within 30 seconds.'
+            }
+        })
+    }
+    $script:CapturePollTimer.Stop()
+    $script:CapturePollTimer.Start()
 }
 
 # ---------------------------------------------------------------------------
@@ -719,8 +881,10 @@ foreach ($nav in $navDefs) {
     $navButton.Size = New-Object System.Drawing.Size(208, 40)
     $navButton.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
     $navButton.AccentColor = $script:P.Accent
-    $navButton.SelectedFill = [System.Drawing.Color]::FromArgb(27, 38, 54)
-    $navButton.HoverFill = [System.Drawing.Color]::FromArgb(20, 29, 42)
+    $navButton.SelectedFill = $script:P.NavSelected
+    $navButton.HoverFill = $script:P.NavHover
+    $navButton.TextColor = $script:P.Muted
+    $navButton.SelectedTextColor = $script:P.Text
     $navButton.Add_Click({
         param($sender, $eventArgs)
         Show-StudioPage -Name ([string]$sender.Tag)
@@ -868,6 +1032,8 @@ $heroRing.Caption = 'LAST SNAPSHOT'
 $heroRing.ProgressColor = $script:P.Accent
 $heroRing.ProgressEndColor = $script:P.Accent2
 $heroRing.TrackColor = $script:P.Border
+$heroRing.CenterTextColor = $script:P.Text
+$heroRing.CaptionColor = $script:P.Subtle
 $hero.Controls.Add($heroRing)
 $script:Ui.HeroRing = $heroRing
 
@@ -884,6 +1050,12 @@ $statSnapshots.Value = '0'
 $statSnapshots.Detail = 'Saved moments'
 $statSnapshots.Glyph = [string][char]0xE81C
 $statSnapshots.AccentColor = $script:P.Accent
+$statSnapshots.TitleColor = $script:P.Muted
+$statSnapshots.ValueColor = $script:P.Text
+$statSnapshots.DetailColor = $script:P.Subtle
+$statSnapshots.FillColor = $script:P.Card
+$statSnapshots.BorderColor = $script:P.BorderSoft
+$statSnapshots.CanvasColor = $script:P.Bg
 $statSnapshots.Location = New-Object System.Drawing.Point(0, 0)
 $statSnapshots.Size = New-Object System.Drawing.Size(224, 108)
 $statRow.Controls.Add($statSnapshots)
@@ -895,6 +1067,12 @@ $statApps.Value = '0'
 $statApps.Detail = 'In the latest snapshot'
 $statApps.Glyph = [string][char]0xE8F1
 $statApps.AccentColor = $script:P.Green
+$statApps.TitleColor = $script:P.Muted
+$statApps.ValueColor = $script:P.Text
+$statApps.DetailColor = $script:P.Subtle
+$statApps.FillColor = $script:P.Card
+$statApps.BorderColor = $script:P.BorderSoft
+$statApps.CanvasColor = $script:P.Bg
 $statApps.Location = New-Object System.Drawing.Point(238, 0)
 $statApps.Size = New-Object System.Drawing.Size(224, 108)
 $statRow.Controls.Add($statApps)
@@ -906,6 +1084,12 @@ $statTabs.Value = '0'
 $statTabs.Detail = 'Across open browsers'
 $statTabs.Glyph = [string][char]0xE774
 $statTabs.AccentColor = $script:P.Accent2
+$statTabs.TitleColor = $script:P.Muted
+$statTabs.ValueColor = $script:P.Text
+$statTabs.DetailColor = $script:P.Subtle
+$statTabs.FillColor = $script:P.Card
+$statTabs.BorderColor = $script:P.BorderSoft
+$statTabs.CanvasColor = $script:P.Bg
 $statTabs.Location = New-Object System.Drawing.Point(476, 0)
 $statTabs.Size = New-Object System.Drawing.Size(224, 108)
 $statRow.Controls.Add($statTabs)
@@ -917,6 +1101,12 @@ $statStorage.Value = '0 B'
 $statStorage.Detail = 'Snapshots on disk'
 $statStorage.Glyph = [string][char]0xE7B8
 $statStorage.AccentColor = $script:P.Amber
+$statStorage.TitleColor = $script:P.Muted
+$statStorage.ValueColor = $script:P.Text
+$statStorage.DetailColor = $script:P.Subtle
+$statStorage.FillColor = $script:P.Card
+$statStorage.BorderColor = $script:P.BorderSoft
+$statStorage.CanvasColor = $script:P.Bg
 $statStorage.Location = New-Object System.Drawing.Point(714, 0)
 $statStorage.Size = New-Object System.Drawing.Size(222, 108)
 $statRow.Controls.Add($statStorage)
@@ -946,7 +1136,7 @@ $recentSpark.Location = New-Object System.Drawing.Point(16, 242)
 $recentSpark.Size = New-Object System.Drawing.Size(588, 32)
 $recentSpark.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
 $recentSpark.LineColor = $script:P.Accent
-$recentSpark.FillColor = [System.Drawing.Color]::FromArgb(55, 45, 150)
+$recentSpark.FillColor = $script:P.SparkFill
 $recentCard.Controls.Add($recentSpark)
 $script:Ui.RecentSpark = $recentSpark
 $recentEmpty = New-StudioLabel -Text 'No snapshots yet. Capture one to get started.' -X 18 -Y 54 -Width 400 -Height 30 -Font $script:FontBody -Color $script:P.Muted
@@ -963,6 +1153,7 @@ $quickCapture = New-StudioButton -Text 'Capture now' -X 16 -Y 44 -Width 268 -Hei
 $quickCapture.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
 $quickCapture.Add_Click({ Invoke-StudioCapture })
 $quickCard.Controls.Add($quickCapture)
+$script:Ui.QuickCapture = $quickCapture
 $quickRestore = New-StudioButton -Text 'Restore latest snapshot' -X 16 -Y 86 -Width 268 -Height 34 -Glyph ([string][char]0xE777)
 $quickRestore.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
 $quickRestore.Add_Click({
@@ -1102,7 +1293,7 @@ $snapToolbar.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Wind
 $snapshotsPage.Controls.Add($snapToolbar)
 
 $snapSearch = New-StudioTextBox -X 16 -Y 18 -Width 230 -Height 28
-$snapSearch.Text = 'Search snapshots'
+$snapSearch.Text = 'Search apps, folders, tabs'
 $snapSearch.ForeColor = $script:P.Subtle
 $snapSearch.Tag = 'placeholder'
 $snapSearch.Add_GotFocus({
@@ -1114,7 +1305,7 @@ $snapSearch.Add_GotFocus({
 })
 $snapSearch.Add_LostFocus({
     if ([string]::IsNullOrWhiteSpace($script:Ui.SnapSearch.Text)) {
-        $script:Ui.SnapSearch.Text = 'Search snapshots'
+        $script:Ui.SnapSearch.Text = 'Search apps, folders, tabs'
         $script:Ui.SnapSearch.ForeColor = $script:P.Subtle
         $script:Ui.SnapSearch.Tag = 'placeholder'
     }
@@ -1182,6 +1373,53 @@ $snapListCard.Controls.Add($snapListHeading)
 $snapListHint = New-StudioLabel -Text 'Select a moment to preview it.' -X 18 -Y 31 -Width 260 -Height 16 -Font $script:FontBodySmall -Color $script:P.Subtle
 $snapListCard.Controls.Add($snapListHint)
 
+$snapExport = New-StudioButton -Text 'Export' -X 0 -Y 10 -Width 100 -Height 28 -Glyph ([string][char]0xE72D)
+$snapExport.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
+$snapExport.Enabled = $false
+$snapExport.Add_Click({
+    if (-not $script:SelectedSnapshotPath) { return }
+    $dialog = New-Object System.Windows.Forms.SaveFileDialog
+    $dialog.Title = 'Export snapshot'
+    $dialog.Filter = 'Snapshot JSON (*.json)|*.json'
+    $dialog.FileName = Split-Path -Leaf $script:SelectedSnapshotPath
+    try {
+        if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+            [void](Export-SRSnapshotFile -Path $script:SelectedSnapshotPath -Destination $dialog.FileName)
+            Show-StudioToast ('Snapshot exported to ' + $dialog.FileName) $script:P.Green
+        }
+    } catch {
+        Show-StudioToast ('Could not export: ' + $_.Exception.Message) $script:P.Red
+    } finally {
+        $dialog.Dispose()
+    }
+})
+$snapListCard.Controls.Add($snapExport)
+$script:Ui.SnapExport = $snapExport
+
+$snapImport = New-StudioButton -Text 'Import' -X 0 -Y 10 -Width 100 -Height 28 -Glyph ([string][char]0xE896)
+$snapImport.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
+$snapImport.Add_Click({
+    $dialog = New-Object System.Windows.Forms.OpenFileDialog
+    $dialog.Title = 'Import snapshot'
+    $dialog.Filter = 'Snapshot JSON (*.json)|*.json'
+    try {
+        if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+            $path = Import-SRSnapshotFile -Path $dialog.FileName
+            Refresh-StudioData
+            Refresh-StudioSnapshotRows
+            $script:SelectedSnapshotPath = $path
+            Select-StudioSnapshotRow -Path $path -Immediate
+            Show-StudioToast ('Snapshot imported: ' + (Split-Path -Leaf $path)) $script:P.Green
+        }
+    } catch {
+        Show-StudioToast ('Could not import: ' + $_.Exception.Message) $script:P.Red
+    } finally {
+        $dialog.Dispose()
+    }
+})
+$snapListCard.Controls.Add($snapImport)
+$script:Ui.SnapImport = $snapImport
+
 $snapFlow = New-Object System.Windows.Forms.FlowLayoutPanel
 $snapFlow.Location = New-Object System.Drawing.Point(14, 54)
 $snapFlow.Size = New-Object System.Drawing.Size(508, 510)
@@ -1209,6 +1447,13 @@ $detailBadge = New-StudioBadge -Text 'NO SNAPSHOT' -Width 104 -Height 22 -Fill $
 $detailBadge.Location = New-Object System.Drawing.Point(18, 16)
 $detailCard.Controls.Add($detailBadge)
 $script:Ui.DetailBadge = $detailBadge
+
+$detailPin = New-StudioButton -Text 'Pin' -X 0 -Y 13 -Width 94 -Height 28 -Glyph ([string][char]0xE840)
+$detailPin.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
+$detailPin.Enabled = $false
+$detailPin.Add_Click({ Toggle-StudioSnapshotPin })
+$detailCard.Controls.Add($detailPin)
+$script:Ui.DetailPin = $detailPin
 
 $detailTitle = New-StudioLabel -Text 'Select a snapshot' -X 18 -Y 48 -Width 340 -Height 28 -Font $script:FontSemiboldLarge -Color $script:P.Text
 $detailCard.Controls.Add($detailTitle)
@@ -1258,8 +1503,13 @@ $detailDelete.Add_Click({
         "Delete this snapshot?`r`n`r`nThis removes only the saved JSON file. It cannot be undone.",
         'Delete snapshot', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
     if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+    $path = $script:SelectedSnapshotPath
     try {
-        Remove-Item -LiteralPath $script:SelectedSnapshotPath -Force -ErrorAction Stop
+        $wasPinned = Test-SRSnapshotPinned -Path $path
+        Remove-Item -LiteralPath $path -Force -ErrorAction Stop
+        if ($wasPinned) {
+            try { [void](Set-SRSnapshotPinned -Path $path -Pinned $false) } catch { }
+        }
         $script:SelectedSnapshotPath = $null
         Refresh-StudioData
         Refresh-StudioSnapshotRows
@@ -1279,6 +1529,7 @@ $detailCard.Add_Resize({
     $script:Ui.DetailSummary.Width = $card.ClientSize.Width - 36
     $script:Ui.DetailText.Width = $card.ClientSize.Width - 36
     $script:Ui.DetailText.Height = [Math]::Max(120, $card.ClientSize.Height - 250)
+    $script:Ui.DetailPin.Left = $card.ClientSize.Width - 114
     $script:Ui.DetailRestore.Top = $card.ClientSize.Height - 54
     $script:Ui.DetailOpen.Top = $card.ClientSize.Height - 54
     $script:Ui.DetailDelete.Top = $card.ClientSize.Height - 54
@@ -1297,6 +1548,24 @@ function Get-StudioSelectedSnapshotEntry {
     return $null
 }
 
+function Toggle-StudioSnapshotPin {
+    if (-not $script:SelectedSnapshotPath) { return }
+    try {
+        $isPinned = Test-SRSnapshotPinned -Path $script:SelectedSnapshotPath
+        [void](Set-SRSnapshotPinned -Path $script:SelectedSnapshotPath -Pinned (-not $isPinned))
+        $script:Config = Get-SRConfig
+        Refresh-StudioSnapshotRows
+        Update-StudioSnapshotDetails
+        if ($isPinned) {
+            Show-StudioToast 'Snapshot unpinned. Retention may delete it again.' $script:P.Muted
+        } else {
+            Show-StudioToast 'Snapshot pinned. Automatic cleanup will keep it.' $script:P.Green
+        }
+    } catch {
+        Show-StudioToast ('Could not update the pin: ' + $_.Exception.Message) $script:P.Red
+    }
+}
+
 function Update-StudioSnapshotDetails {
     if (-not $script:Ui.DetailTitle) { return }
     $entry = Get-StudioSelectedSnapshotEntry
@@ -1311,23 +1580,57 @@ function Update-StudioSnapshotDetails {
         $script:Ui.DetailRestore.Enabled = $false
         $script:Ui.DetailOpen.Enabled = $false
         $script:Ui.DetailDelete.Enabled = $false
+        if ($script:Ui.DetailPin) {
+            $script:Ui.DetailPin.Enabled = $false
+            $script:Ui.DetailPin.Text = 'Pin'
+        }
+        if ($script:Ui.SnapExport) { $script:Ui.SnapExport.Enabled = $false }
         return
     }
 
     $snapshot = $entry.Snapshot
     $stats = Get-StudioStats -Snapshot $snapshot
     $bytes = Get-StudioSnapshotBytes -Entry $entry
-    $script:Ui.DetailBadge.Text = 'READY TO RESTORE'
-    $script:Ui.DetailBadge.FillColor = $script:P.GreenSoft
-    $script:Ui.DetailBadge.TextColor = $script:P.Green
+    $isPinned = ($script:SnapshotPinnedNames -and $script:SnapshotPinnedNames.Contains((Split-Path -Leaf $entry.Path)))
+    $script:Ui.DetailBadge.Text = if ($isPinned) { 'PINNED' } else { 'READY TO RESTORE' }
+    $script:Ui.DetailBadge.FillColor = if ($isPinned) { $script:P.AccentSoft } else { $script:P.GreenSoft }
+    $script:Ui.DetailBadge.TextColor = if ($isPinned) { $script:P.Accent } else { $script:P.Green }
     $script:Ui.DetailTitle.Text = $entry.CapturedAt.ToString('dddd, MMM d  •  HH:mm:ss')
-    $script:Ui.DetailMeta.Text = ('{0}  •  {1}  •  {2} app(s)  •  {3} folder(s)' -f (Format-StudioAge -CapturedAt $entry.CapturedAt), (Format-StudioBytes -Bytes $bytes), $stats.Apps, $stats.Folders)
+    $pinnedText = if ($isPinned) { '  •  pinned' } else { '' }
+    $script:Ui.DetailMeta.Text = ('{0}  •  {1}  •  {2} app(s)  •  {3} folder(s){4}' -f (Format-StudioAge -CapturedAt $entry.CapturedAt), (Format-StudioBytes -Bytes $bytes), $stats.Apps, $stats.Folders, $pinnedText)
     $script:Ui.DetailSummary.Text = ('Captured {0} browser tab(s) across {1} browser(s). Nothing in this snapshot modifies files.' -f $stats.Tabs, $stats.Browsers)
     $script:Ui.DetailRestore.Enabled = $true
     $script:Ui.DetailOpen.Enabled = $true
     $script:Ui.DetailDelete.Enabled = $true
+    if ($script:Ui.DetailPin) {
+        $script:Ui.DetailPin.Enabled = $true
+        $script:Ui.DetailPin.Text = if ($isPinned) { 'Unpin' } else { 'Pin' }
+    }
+    if ($script:Ui.SnapExport) { $script:Ui.SnapExport.Enabled = $true }
 
     $lines = New-Object System.Collections.Generic.List[string]
+    $mediaApps = @($snapshot.apps | Where-Object {
+        $prop = $_.PSObject.Properties['media']
+        $null -ne $prop -and $null -ne $prop.Value
+    })
+    if ($mediaApps.Count -gt 0) {
+        $lines.Add('PLAYING')
+        foreach ($mediaApp in $mediaApps) {
+            $media = $mediaApp.media
+            $clock = ''
+            try {
+                $total = [int][Math]::Floor([double]$media.positionSeconds)
+                $hours = [int][Math]::Floor($total / 3600)
+                $minutes = [int][Math]::Floor(($total % 3600) / 60)
+                $seconds = $total % 60
+                if ($hours -gt 0) { $clock = ('{0}:{1:00}:{2:00}' -f $hours, $minutes, $seconds) }
+                else { $clock = ('{0}:{1:00}' -f $minutes, $seconds) }
+            } catch { }
+            $mark = if ($media.estimated) { '~' } else { '' }
+            $lines.Add(('  {0}  {1}  at {2}{3}' -f ([string]$mediaApp.name), (Split-Path -Leaf ([string]$media.file)), $mark, $clock))
+        }
+        $lines.Add('')
+    }
     $lines.Add('APPLICATIONS')
     if ($stats.Apps -eq 0) {
         $lines.Add('  (none captured)')
@@ -1441,14 +1744,16 @@ function New-StudioSnapshotRowControl {
     $row.AccentColor = $script:P.Accent
     $row.AmberColor = $script:P.Amber
     $row.AmberSoft = $script:P.AmberSoft
+    $row.PinnedSoft = $script:P.AccentSoft
     $row.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 7)
     $row.Tag = $Entry.Path
     $row.TimeText = $Entry.CapturedAt.ToString('ddd  •  MMM d  •  HH:mm:ss')
     $row.MetaText = ('{0} app(s)  •  {1} tab(s)  •  {2}' -f $stats.Apps, $stats.Tabs, (Format-StudioBytes -Bytes (Get-StudioSnapshotBytes -Entry $Entry)))
     $row.AgeText = Format-StudioAge -CapturedAt $Entry.CapturedAt
     $row.Approximate = $approx
+    $row.Pinned = ($null -ne $script:SnapshotPinnedNames -and $script:SnapshotPinnedNames.Contains((Split-Path -Leaf $Entry.Path)))
     $row.Selected = ([string]$row.Tag -eq [string]$script:SelectedSnapshotPath)
-    $row.AccessibleName = ('{0}. {1}. {2}' -f $row.TimeText, $row.MetaText, $row.AgeText)
+    $row.AccessibleName = ('{0}. {1}. {2}.' -f $row.TimeText, $row.MetaText, $row.AgeText)
     $row.AccessibleDescription = 'Snapshot. Select to preview and restore.'
     $row.Add_Click($ClickHandler)
     return $row
@@ -1491,6 +1796,41 @@ function Add-StudioSnapshotBatch {
     }
 }
 
+function Test-StudioSnapshotContent {
+    param($Entry, [string]$Needle)
+    # Search covers the capture date and file name as before, plus everything
+    # the snapshot recorded: application names and paths, Explorer folders,
+    # browser names, tab titles and URLs.
+    $haystack = ($Entry.Path + ' ' + $Entry.CapturedAt.ToString('yyyy-MM-dd HH:mm') + ' ' + $Entry.CapturedAt.ToString('dddd')).ToLowerInvariant()
+    if ($haystack.Contains($Needle)) { return $true }
+
+    $snapshot = $Entry.Snapshot
+    if ($null -eq $snapshot) { return $false }
+
+    foreach ($app in @($snapshot.apps)) {
+        if ($null -eq $app) { continue }
+        if (([string]$app.name).ToLowerInvariant().Contains($Needle)) { return $true }
+        if (([string]$app.exe).ToLowerInvariant().Contains($Needle)) { return $true }
+    }
+    foreach ($folder in @($snapshot.explorer)) {
+        if (([string]$folder).ToLowerInvariant().Contains($Needle)) { return $true }
+    }
+    foreach ($browser in @($snapshot.browsers)) {
+        if ($null -eq $browser) { continue }
+        if (([string]$browser.name).ToLowerInvariant().Contains($Needle)) { return $true }
+        foreach ($profile in @($browser.profiles)) {
+            if ($null -eq $profile) { continue }
+            if (([string]$profile.displayName).ToLowerInvariant().Contains($Needle)) { return $true }
+            foreach ($tab in @($profile.tabs)) {
+                if ($null -eq $tab) { continue }
+                if (([string]$tab.title).ToLowerInvariant().Contains($Needle)) { return $true }
+                if (([string]$tab.url).ToLowerInvariant().Contains($Needle)) { return $true }
+            }
+        }
+    }
+    return $false
+}
+
 function Refresh-StudioSnapshotRows {
     if (-not $script:Ui.SnapFlow) { return }
     if ($script:SnapshotLayoutTimer) { $script:SnapshotLayoutTimer.Stop() }
@@ -1509,13 +1849,20 @@ function Refresh-StudioSnapshotRows {
     elseif ($mode -eq 'Last 24 hours') { $cutoff = (Get-Date).AddHours(-24) }
     elseif ($mode -eq 'Last 7 days') { $cutoff = (Get-Date).AddDays(-7) }
 
+    $script:SnapshotPinnedNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    try {
+        foreach ($pinned in @($script:Config.pinnedSnapshots)) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$pinned)) { [void]$script:SnapshotPinnedNames.Add([string]$pinned) }
+        }
+    } catch { }
+
+    $needle = ''
+    if (-not [string]::IsNullOrWhiteSpace($search)) { $needle = $search.ToLowerInvariant() }
+
     $filtered = New-Object System.Collections.Generic.List[object]
     foreach ($entry in $script:Snapshots) {
         if ($null -ne $cutoff -and $entry.CapturedAt -lt $cutoff) { continue }
-        if (-not [string]::IsNullOrWhiteSpace($search)) {
-            $haystack = ($entry.Path + ' ' + $entry.CapturedAt.ToString('yyyy-MM-dd HH:mm') + ' ' + $entry.CapturedAt.ToString('dddd')).ToLowerInvariant()
-            if (-not $haystack.Contains($search.ToLowerInvariant())) { continue }
-        }
+        if ($needle -ne '' -and -not (Test-StudioSnapshotContent -Entry $entry -Needle $needle)) { continue }
         $filtered.Add($entry)
     }
 
@@ -1930,6 +2277,18 @@ $browserCard.Controls.Add($lookbackUnit)
 $lookbackHint = New-StudioLabel -Text 'Only used when the exact session file cannot be read.' -X 560 -Y 128 -Width 260 -Height 32 -Font $script:FontBodySmall -Color $script:P.Subtle
 $browserCard.Controls.Add($lookbackHint)
 
+# Card: media playback
+$mediaCard = New-StudioSettingsCard -Title 'Media playback' -Description 'Remember what a media player was playing, and where.' -Height 150
+$settingsFlow.Controls.Add($mediaCard)
+$settingsCards.Add($mediaCard)
+
+$toggleMedia = New-StudioToggle -X 20 -Y 76 -Checked $true
+$mediaCard.Controls.Add($toggleMedia)
+$mediaLabel = New-StudioLabel -Text 'Capture the playing video and its position' -X 76 -Y 80 -Width 380 -Height 20 -Font $script:FontBody -Color $script:P.Text
+$mediaCard.Controls.Add($mediaLabel)
+$mediaHint = New-StudioLabel -Text 'VLC is supported: restore reopens the same file near the moment it was playing. Positions between snapshots are estimated, so restore lands at most one interval early.' -X 76 -Y 100 -Width 580 -Height 32 -Font $script:FontBodySmall -Color $script:P.Subtle
+$mediaCard.Controls.Add($mediaHint)
+
 # Card: background and desktop
 $backgroundCard = New-StudioSettingsCard -Title 'Background & desktop' -Description 'Keep Session Recovery close without leaving windows open.' -Height 240
 $settingsFlow.Controls.Add($backgroundCard)
@@ -1964,6 +2323,21 @@ $openDesktop = New-StudioButton -Text 'Open Desktop folder' -X 470 -Y 158 -Width
 $openDesktop.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
 $openDesktop.Add_Click({ Open-StudioPath ([Environment]::GetFolderPath('Desktop')) })
 $backgroundCard.Controls.Add($openDesktop)
+
+# Card: appearance
+$appearanceCard = New-StudioSettingsCard -Title 'Appearance' -Description 'Choose how the Studio looks.' -Height 128
+$settingsFlow.Controls.Add($appearanceCard)
+$settingsCards.Add($appearanceCard)
+
+$themeLabel = New-StudioLabel -Text 'STUDIO THEME' -X 20 -Y 70 -Width 180 -Height 16 -Font $script:FontMono -Color $script:P.Subtle
+$appearanceCard.Controls.Add($themeLabel)
+$comboTheme = New-StudioCombo -X 20 -Y 90 -Width 210
+[void]$comboTheme.Items.Add('Aurora (dark)')
+[void]$comboTheme.Items.Add('Daylight (light)')
+$comboTheme.SelectedIndex = 0
+$appearanceCard.Controls.Add($comboTheme)
+$themeHint = New-StudioLabel -Text 'Applied the next time the Studio opens. Aurora is the dark palette; Daylight is a light one for bright rooms and screenshots.' -X 270 -Y 94 -Width 460 -Height 20 -Font $script:FontBodySmall -Color $script:P.Muted
+$appearanceCard.Controls.Add($themeHint)
 
 # Card: storage and privacy
 $storageCard = New-StudioSettingsCard -Title 'Storage & privacy' -Description 'Everything Session Recovery saves stays in your local profile.' -Height 260
@@ -2009,9 +2383,12 @@ function Load-StudioSettings {
     $tabMap = @('Smart', 'Captured', 'Native', 'None')
     $tabIndex = [array]::IndexOf($tabMap, [string]$script:Config.defaultTabMode)
     $comboTabMode.SelectedIndex = if ($tabIndex -ge 0) { $tabIndex } else { 0 }
+    $comboTheme.SelectedIndex = if ([string]$script:Config.theme -eq 'Daylight') { 1 } else { 0 }
     $toggleRestoreBrowsers.Checked = [bool]$script:Config.restoreBrowsers
     $toggleCaptureBrowsers.Checked = [bool]$script:Config.captureBrowserTabs
     $toggleApprox.Checked = [bool]$script:Config.captureApproximateTabs
+    $mediaToggleProperty = $script:Config.PSObject.Properties['captureMediaPlayers']
+    $toggleMedia.Checked = if ($null -ne $mediaToggleProperty) { [bool]$mediaToggleProperty.Value } else { $true }
     $toggleNotifications.Checked = [bool]$script:Config.showNotifications
     $toggleStartup.Checked = Test-Path -LiteralPath (Get-StudioStartupShortcutPath)
     $toggleDesktop.Checked = Test-Path -LiteralPath (Get-StudioDesktopShortcutPath)
@@ -2033,9 +2410,11 @@ function Save-StudioSettings {
         $config.promptOnLogon = $promptMap[[Math]::Max(0, $comboPrompt.SelectedIndex)]
         $tabMap = @('Smart', 'Captured', 'Native', 'None')
         $config.defaultTabMode = $tabMap[[Math]::Max(0, $comboTabMode.SelectedIndex)]
+        $config.theme = if ($comboTheme.SelectedIndex -eq 1) { 'Daylight' } else { 'Aurora' }
         $config.restoreBrowsers = [bool]$toggleRestoreBrowsers.Checked
         $config.captureBrowserTabs = [bool]$toggleCaptureBrowsers.Checked
         $config.captureApproximateTabs = [bool]$toggleApprox.Checked
+        $config.captureMediaPlayers = [bool]$toggleMedia.Checked
         $config.showNotifications = [bool]$toggleNotifications.Checked
         $config.startWithWindows = [bool]$toggleStartup.Checked
         $config.desktopShortcut = [bool]$toggleDesktop.Checked
@@ -2135,6 +2514,8 @@ $diagRing.Caption = 'HEALTH'
 $diagRing.ProgressColor = $script:P.Green
 $diagRing.ProgressEndColor = $script:P.Accent2
 $diagRing.TrackColor = $script:P.Border
+$diagRing.CenterTextColor = $script:P.Text
+$diagRing.CaptionColor = $script:P.Subtle
 $diagHealthCard.Controls.Add($diagRing)
 $script:Ui.DiagRing = $diagRing
 
@@ -2457,9 +2838,9 @@ $aboutFlow.Controls.Add($aboutLocal)
 $aboutLocalText = New-StudioLabel -Text "Snapshots are plain JSON files in your Windows profile. Browser tabs are read locally, and restore opens apps and folders without rewriting files.`r`n`r`nThe background app keeps capturing while you work. Everything can be inspected, backed up or deleted from this Studio." -X 20 -Y 64 -Width 740 -Height 80 -Font $script:FontBody -Color $script:P.Muted
 $aboutLocal.Controls.Add($aboutLocalText)
 
-$aboutNew = New-StudioSettingsCard -Title 'What is new in 2.1' -Description 'Faster navigation, in-app updates and a quieter restore.' -Height 214
+$aboutNew = New-StudioSettingsCard -Title 'What is new in 2.2' -Description 'Positions, pinning, a light theme and a smoother Studio.' -Height 214
 $aboutFlow.Controls.Add($aboutNew)
-$aboutNewText = New-StudioLabel -Text "• Check, download and install updates from Application updates.`r`n• Faster page switching and an incrementally built snapshot timeline.`r`n• Shell and console windows are skipped during capture and restore.`r`n• Native SessionRecovery.exe host with no visible cmd or PowerShell window.`r`n• Chrome, Edge and Brave capture, previews, one-click restore and exclusions." -X 20 -Y 64 -Width 740 -Height 130 -Font $script:FontBody -Color $script:P.Muted
+$aboutNewText = New-StudioLabel -Text "• Restored apps return to their captured position, size and maximized state.`r`n• A playing video in VLC reopens at the moment it was playing.`r`n• Pin important snapshots so retention never deletes them.`r`n• Export and import snapshots as JSON files for backup or another PC.`r`n• Daylight light theme and snapshot search across apps, folders and tabs.`r`n• Chromium and Opera GX join the supported browsers.`r`n• Non-blocking capture, live restore progress, and Pause for 1 hour in the tray." -X 20 -Y 64 -Width 740 -Height 150 -Font $script:FontBody -Color $script:P.Muted
 $aboutNew.Controls.Add($aboutNewText)
 
 $aboutUpdates = New-StudioSettingsCard -Title 'Application updates' -Description 'Check the private GitHub release channel for a newer build.' -Height 218
@@ -2775,6 +3156,8 @@ function Layout-StudioSnapshots {
     $snapRefresh.Left = $snapToolbar.Width - 120
     $snapOpenFolder.Left = $snapRefresh.Left - 128
     $snapCount.Width = [Math]::Max(80, $snapOpenFolder.Left - 456)
+    $snapExport.Left = [Math]::Max(220, $snapListCard.ClientSize.Width - 118)
+    $snapImport.Left = [Math]::Max(116, $snapExport.Left - 108)
     $snapSplit.Location = New-Object System.Drawing.Point(24, 90)
     $snapSplit.Size = New-Object System.Drawing.Size(($width - 48), [Math]::Max(260, $height - 110))
     $rowWidth = [Math]::Max(300, $snapFlow.ClientSize.Width - 22)
@@ -2947,6 +3330,7 @@ $form.Add_FormClosing({
     if ($script:SnapshotDetailsTimer) { try { $script:SnapshotDetailsTimer.Stop(); $script:SnapshotDetailsTimer.Dispose() } catch { } }
     if ($script:SnapshotLayoutTimer) { try { $script:SnapshotLayoutTimer.Stop(); $script:SnapshotLayoutTimer.Dispose() } catch { } }
     if ($script:ToastTimer) { try { $script:ToastTimer.Stop(); $script:ToastTimer.Dispose() } catch { } }
+    if ($script:CapturePollTimer) { try { $script:CapturePollTimer.Stop(); $script:CapturePollTimer.Dispose() } catch { } }
 })
 
 if (-not [string]::IsNullOrWhiteSpace($RenderDir)) {

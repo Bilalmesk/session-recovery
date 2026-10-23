@@ -22,6 +22,9 @@
 
     Include/exclude filters apply to -NoUI and -DryRun. Interactive restores
     use the checkboxes in the restore window.
+
+    -RenderScreenshot <path> renders the restore window off-screen to a PNG
+    and exits. It exists so the window can be verified without a live user.
 #>
 [CmdletBinding()]
 param(
@@ -39,7 +42,8 @@ param(
     [string[]]$IncludeBrowsers,
     [string[]]$ExcludeApps,
     [string[]]$ExcludeFolders,
-    [string[]]$ExcludeBrowsers
+    [string[]]$ExcludeBrowsers,
+    [string]$RenderScreenshot
 )
 
 $ErrorActionPreference = 'Stop'
@@ -297,6 +301,17 @@ function Get-RSImageIndex {
     return $index
 }
 
+function Format-RSMediaClock {
+    param([double]$Seconds)
+    if ($Seconds -lt 0) { return '' }
+    $total = [int][Math]::Floor($Seconds)
+    $hours = [int][Math]::Floor($total / 3600)
+    $minutes = [int][Math]::Floor(($total % 3600) / 60)
+    $seconds = $total % 60
+    if ($hours -gt 0) { return ('{0}:{1:00}:{2:00}' -f $hours, $minutes, $seconds) }
+    return ('{0}:{1:00}' -f $minutes, $seconds)
+}
+
 function Populate-RSList {
     param(
         [Parameter(Mandatory = $true)]$List,
@@ -311,6 +326,15 @@ function Populate-RSList {
             if ($null -eq $app) { continue }
             $name = [string]$app.name
             if ([string]::IsNullOrWhiteSpace($name)) { $name = Split-Path -Leaf ([string]$app.exe) }
+            $mediaProperty = $app.PSObject.Properties['media']
+            if ($null -ne $mediaProperty -and $null -ne $mediaProperty.Value) {
+                $media = $mediaProperty.Value
+                $mediaTitle = Split-Path -Leaf ([string]$media.file)
+                $clock = Format-RSMediaClock -Seconds ([double]$media.positionSeconds)
+                $details = ('Playing {0} at {1}' -f $mediaTitle, $clock)
+                Add-RSListItem -List $List -Kind 'app' -Name $name -Details $details -Value $app -IconPath ([string]$app.exe)
+                continue
+            }
             $titles = @($app.windows | ForEach-Object { [string]$_.title } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
             $details = 'Application'
             if ($titles.Count -gt 0) {
@@ -742,6 +766,7 @@ public class SRButton : Button
 
 $script:rsSnapshotEntries = $snapshotEntries
 $script:rsUpdating = $false
+$script:rsRestoring = $false
 
 $rsInk = [System.Drawing.Color]::FromArgb(32, 37, 43)
 $rsMuted = [System.Drawing.Color]::FromArgb(91, 101, 112)
@@ -816,7 +841,7 @@ $brandName.Location = New-Object System.Drawing.Point(80, 18)
 $header.Controls.Add($brandName)
 
 $brandMeta = New-Object System.Windows.Forms.Label
-$brandMeta.Text = 'LOCAL SNAPSHOTS  /  V2.1.0'
+$brandMeta.Text = 'LOCAL SNAPSHOTS  /  V2.2.0'
 $brandMeta.Font = New-Object System.Drawing.Font('Consolas', 7.5)
 $brandMeta.ForeColor = $rsMuted
 $brandMeta.AutoSize = $true
@@ -1048,6 +1073,15 @@ $statusLabel.Location = New-Object System.Drawing.Point(34, 510)
 $statusLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
 $content.Controls.Add($statusLabel)
 
+$progressBar = New-Object System.Windows.Forms.ProgressBar
+$progressBar.Location = New-Object System.Drawing.Point(34, 501)
+$progressBar.Size = New-Object System.Drawing.Size(520, 7)
+$progressBar.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+$progressBar.Minimum = 0
+$progressBar.Maximum = 100
+$progressBar.Visible = $false
+$content.Controls.Add($progressBar)
+
 $skipButton = New-Object SRButton
 $skipButton.Text = 'Skip'
 $skipButton.Size = New-Object System.Drawing.Size(110, 40)
@@ -1075,6 +1109,12 @@ $content.Controls.Add($restoreButton)
 
 $form.AcceptButton = $restoreButton
 $form.CancelButton = $skipButton
+$form.Add_FormClosing({
+    param($sender, $eventArgs)
+    # The restore loop is synchronous but pumps messages from its progress
+    # callback. Do not let the window be disposed underneath that loop.
+    if ($script:rsRestoring) { $eventArgs.Cancel = $true }
+})
 
 function Update-RSSelection {
     param([int]$Index)
@@ -1151,17 +1191,32 @@ $restoreButton.Add_Click({
         tabMode  = $mode
     }
 
+    $script:rsRestoring = $true
     $restoreButton.Enabled = $false
     $skipButton.Enabled = $false
     $snapshotCombo.Enabled = $false
-    $statusLabel.Text = 'Restoring...'
+    $selectAll.Enabled = $false
+    $tabModeCombo.Enabled = $false
+    $forceCheck.Enabled = $false
+    $statusLabel.Text = 'Preparing to restore...'
+    $progressBar.Value = 0
+    $progressBar.Visible = $true
     [System.Windows.Forms.Application]::DoEvents()
+
+    $progressCallback = {
+        param([int]$Step, [int]$StepTotal, [string]$Label)
+        $statusLabel.Text = ('Restoring {0} of {1}: {2}' -f $Step, $StepTotal, $Label)
+        if ($StepTotal -gt 0) {
+            $progressBar.Value = [Math]::Min(100, [int](100 * $Step / $StepTotal))
+        }
+        [System.Windows.Forms.Application]::DoEvents()
+    }
 
     $results = @()
     $failure = $null
     try {
         Write-SRLog -Message ('Interactive restore started from {0} (tab mode {1}).' -f $entry.Path, $mode)
-        $results = @(Invoke-SRRestore -Plan $plan -Force:$forceCheck.Checked)
+        $results = @(Invoke-SRRestore -Plan $plan -Force:$forceCheck.Checked -Progress $progressCallback)
         foreach ($result in $results) {
             $level = if ($result.Started) { 'INFO' } else { 'WARN' }
             Write-SRLog -Level $level -Message ([string]$result.Message)
@@ -1169,28 +1224,78 @@ $restoreButton.Add_Click({
     } catch {
         $failure = $_.Exception.Message
         Write-SRLog -Level ERROR -Message "Interactive restore failed: $failure"
+    } finally {
+        $script:rsRestoring = $false
     }
 
-    $form.Close()
+    # Replace the checklist with the outcome of each item. The window stays
+    # open so the summary is readable for as long as the user wants.
+    $progressBar.Visible = $false
+    $listHeading.Text = 'RESTORE RESULTS'
+    $selectAll.Visible = $false
+    $list.CheckBoxes = $false
+    $list.BeginUpdate()
+    try {
+        $list.Items.Clear()
+        foreach ($result in $results) {
+            $target = [string]$result.Target
+            if ([string]::IsNullOrWhiteSpace($target)) {
+                $target = if ($null -ne $result.App) { [string]$result.App.name } else { 'Item' }
+            }
+            $mark = if ($result.Started) { [string][char]0x2713 } else { [string][char]0x2013 }
+            $item = New-Object System.Windows.Forms.ListViewItem(('{0}  {1}' -f $mark, $target))
+            [void]$item.SubItems.Add([string]$result.Message)
+            $iconIndex = 0
+            if ($null -ne $result.App -and -not [string]::IsNullOrWhiteSpace([string]$result.App.exe)) {
+                $iconIndex = Get-RSImageIndex -Path ([string]$result.App.exe)
+            }
+            if ($iconIndex -ge 0 -and $null -ne $script:rsRowImages) { $item.ImageIndex = $iconIndex }
+            [void]$list.Items.Add($item)
+        }
+        if ($results.Count -eq 0) {
+            $item = New-Object System.Windows.Forms.ListViewItem('Nothing was restored.')
+            [void]$item.SubItems.Add('No results were reported.')
+            [void]$list.Items.Add($item)
+        }
+    } finally {
+        $list.EndUpdate()
+    }
 
+    $started = @($results | Where-Object { $_.Started }).Count
     if ($failure) {
-        Show-RSMessage -Text ("Restore failed:`r`n`r`n" + $failure) -Icon 'Error'
-        return
+        $statusLabel.Text = ('Restore failed: {0}' -f $failure)
+    } else {
+        $statusLabel.Text = ('Restore finished  •  {0} started, {1} skipped' -f $started, ($results.Count - $started))
     }
-
-    $lines = New-Object System.Collections.Generic.List[string]
-    foreach ($result in $results) {
-        $prefix = if ($result.Started) { '[OK]   ' } else { '[SKIP] ' }
-        $lines.Add($prefix + [string]$result.Message)
-    }
-    if ($lines.Count -eq 0) { $lines.Add('Nothing was restored.') }
-    Show-RSMessage -Text ($lines -join "`r`n") -Icon 'Information'
+    $skipButton.Text = 'Close'
+    $skipButton.Enabled = $true
+    $restoreButton.Visible = $false
 })
 
 $skipButton.Add_Click({
     Write-SRLog -Message 'Restore prompt was skipped by the user.'
     $form.Close()
 })
+
+if (-not [string]::IsNullOrWhiteSpace($RenderScreenshot)) {
+    # Off-screen render for visual verification without a live user.
+    $form.ShowInTaskbar = $false
+    $form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+    $form.Location = New-Object System.Drawing.Point(-4000, -4000)
+    $form.Show()
+    for ($pump = 0; $pump -lt 12; $pump++) {
+        [System.Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 40
+    }
+    $bitmap = New-Object System.Drawing.Bitmap($form.ClientSize.Width, $form.ClientSize.Height)
+    $rect = New-Object System.Drawing.Rectangle(0, 0, $bitmap.Width, $bitmap.Height)
+    $form.DrawToBitmap($bitmap, $rect)
+    $bitmap.Save($RenderScreenshot, [System.Drawing.Imaging.ImageFormat]::Png)
+    $bitmap.Dispose()
+    $form.Close()
+    $form.Dispose()
+    exit 0
+}
 
 Write-SRLog -Message ('Restore prompt shown for {0}.' -f $entry.Path)
 [void]$form.ShowDialog()

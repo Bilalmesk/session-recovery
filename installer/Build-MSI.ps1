@@ -8,12 +8,12 @@
 
     Examples
       powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\Build-MSI.ps1
-      powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\Build-MSI.ps1 -Version 2.1.1
+      powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\Build-MSI.ps1 -Version 2.2.1
 #>
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string]$Version = '2.1.0',
+    [string]$Version = '2.2.0',
     [switch]$NoRestore
 )
 
@@ -75,17 +75,20 @@ Session Recovery {0}
 Reopen the apps, File Explorer folders and browser tabs that were open before
 a crash, power cut or unexpected restart.
 
-What's new in 2.1
+What's new in 2.2
 -----------------
-- Application updates in the Studio: check the GitHub release, download the
-  MSI, verify its SHA256, and install it without leaving About.
-- Faster page switching with cached pages and incremental snapshot rows.
-- Console and shell windows (cmd, PowerShell, Windows Terminal and WSL) are
-  skipped during capture and restore, so no suspicious command windows flash.
-- Existing logon tasks from older releases are handed to the native host.
-- Native SessionRecovery.exe host: no visible cmd or PowerShell windows.
-- Snapshot timeline with previews, one-click restore, exclusions and browser
-  capture improvements from 2.0.
+- Restored apps return to their captured position, size and maximized state,
+  clamped to the current monitors. Turn it off with restoreWindowPositions.
+- VLC playback restore: the playing video reopens at (or within one snapshot
+  interval of) the moment it was playing.
+- Pin important snapshots so retention never deletes them.
+- Export and import snapshots as JSON files for backup or another PC.
+- Daylight light theme for the Studio, and snapshot search across app names,
+  folders, tab titles and URLs.
+- Chromium and Opera GX join the supported browsers.
+- Smoother Studio: capture runs without freezing the window, and the restore
+  window shows live progress plus per-item results instead of a pop-up.
+- Tray: Pause for 1 hour resumes snapshots automatically.
 
 Install
 -------

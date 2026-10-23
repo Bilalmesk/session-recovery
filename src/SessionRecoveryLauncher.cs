@@ -15,8 +15,8 @@ using WinFormsTimer = System.Windows.Forms.Timer;
 [assembly: AssemblyDescription("Session Recovery desktop host")]
 [assembly: AssemblyProduct("Session Recovery")]
 [assembly: AssemblyCompany("Bilalmesk")]
-[assembly: AssemblyVersion("2.1.0.0")]
-[assembly: AssemblyFileVersion("2.1.0.0")]
+[assembly: AssemblyVersion("2.2.0.0")]
+[assembly: AssemblyFileVersion("2.2.0.0")]
 
 namespace SessionRecoveryLauncher
 {
@@ -205,11 +205,26 @@ namespace SessionRecoveryLauncher
                                 if (record == null) continue;
                                 messages.Add(record.ToString());
                             }
-                            if (messages.Count > 0)
+                            if (messages.Count == 0)
                             {
-                                error = String.Join("\r\n", messages.ToArray());
-                                Log("PowerShell errors:\r\n" + error);
+                                // A script that calls `exit 1` stops the pipeline
+                                // without adding an error record. Surface the exit
+                                // code so callers do not mistake a failure for a
+                                // skipped capture (which exits 0).
+                                object lastExitCode = null;
+                                try { lastExitCode = runspace.SessionStateProxy.GetVariable("LASTEXITCODE"); } catch { }
+                                int numericExitCode = 0;
+                                if (lastExitCode != null && Int32.TryParse(lastExitCode.ToString(), out numericExitCode) && numericExitCode != 0)
+                                {
+                                    messages.Add("The script exited with code " + numericExitCode + ".");
+                                }
+                                else
+                                {
+                                    messages.Add("The script reported an error without details.");
+                                }
                             }
+                            error = String.Join("\r\n", messages.ToArray());
+                            Log("PowerShell errors:\r\n" + error);
                         }
                     }
                 }

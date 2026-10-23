@@ -7,22 +7,28 @@ Session Recovery is a local Windows utility with a native desktop Studio. It sna
 > **Important:** It reopens applications and tabs. It cannot recover unsaved document contents, passwords or form data.
 
 - Windows 10/11 with Windows PowerShell 5.1.
-- Chrome, Edge, Brave, Vivaldi, Opera and Firefox.
+- Chrome, Edge, Brave, Vivaldi, Opera, Opera GX, Chromium and Firefox.
 - Native `SessionRecovery.exe` host: no visible `cmd` or PowerShell windows.
 - Everything stays on your PC.
 
 ## Features
 
-- Modern **Session Recovery Studio** with Dashboard, Snapshots, Exclusions, Settings, Diagnostics and About pages.
+- Modern **Session Recovery Studio** with Dashboard, Snapshots, Exclusions, Settings, Diagnostics and About pages, in a dark **Aurora** and a light **Daylight** theme.
 - Automatic snapshots every 3 minutes, plus one at logon.
-- Native tray app with Studio, restore, snapshot-now, pause, folders, settings, diagnostics and exit actions.
+- Native tray app with Studio, restore, snapshot-now, pause, pause-for-1-hour, folders, settings, diagnostics and exit actions.
 - Snapshot timeline with previews and one-click restore.
+- Restored apps return to their captured **position, size and maximized state**, clamped to the current monitors so nothing lands off-screen.
 - Crash-aware restore prompt, manual restore window, and unattended command-line restore.
+- The restore window shows **live progress** and a per-item results list instead of a pop-up.
 - Apps, File Explorer folders and grouped browser tabs are restored together, with app icons in the restore list.
+- **VLC playback restore**: the playing video reopens at (or within one snapshot interval of) the moment it was playing.
 - Chrome/Chromium capture uses structured session files first, then UI Automation and local browser history as a safe fallback. Approximate tabs are marked in the snapshot and in the Studio.
 - Duplicate tabs and browser window groups are preserved.
 - Capture exclusions keep chosen apps, folders and URLs out of new snapshots.
 - Selective restore by app, folder or browser, with wildcard include/exclude filters.
+- **Pin** snapshots you care about; retention never deletes a pinned file.
+- **Export** any snapshot to a JSON file and **import** snapshots back in, for backup or another PC.
+- Snapshot **search across content**: app names, folder paths, browser names, tab titles and URLs, not just dates.
 - Shell and terminal windows are skipped during capture and restore, so restoration does not flash command prompts.
 - Logon tasks left by older releases are handed to the native host, avoiding their PowerShell windows.
 - In-app update checks with SHA256-verified MSI downloads in **About**.
@@ -132,9 +138,10 @@ Re-running the installer replaces program files, stops the old background app an
 The native notification-area app makes the background state visible and gives you quick controls:
 
 - **Left-click** the icon to open the Session Recovery Studio.
-- **Right-click** for the menu: Open Session Recovery, restore, take a snapshot now, pause or resume automatic snapshots, open the snapshots folder, settings, diagnostics, or exit.
+- **Right-click** for the menu: Open Session Recovery, restore, take a snapshot now, pause or resume automatic snapshots, pause for 1 hour, open the snapshots folder, settings, diagnostics, or exit.
 - The tooltip and menu show the latest snapshot time and the current background mode.
 - **Pause** is available when the tray app owns the snapshot timer. When Windows scheduled tasks are driving snapshots, the tray runs in monitor-only mode so snapshots are never duplicated.
+- **Pause for 1 hour** suspends snapshots and resumes them automatically; the tooltip shows the resume time. Unchecking Pause also cancels a timed pause.
 - The tray app starts from the Startup folder. The MSI and `-NoTasks` installer use it as the only background process; the scheduled-task installer uses it as a status and control surface.
 - The tray app is the native `SessionRecovery.exe --tray`, so it never opens a console window.
 
@@ -142,14 +149,14 @@ If the tray icon is hidden by Windows, open the notification-area overflow (the 
 
 ## How it works
 
-1. **Capture.** Visible top-level windows, executable paths, File Explorer folders and browser session files are read. Configured exclusions are applied before the snapshot is written.
-2. **Rotate.** Snapshots are deleted when they exceed `keepSnapshots` or, if enabled, `keepSnapshotDays`.
+1. **Capture.** Visible top-level windows, executable paths, window bounds, File Explorer folders and browser session files are read. Configured exclusions are applied before the snapshot is written.
+2. **Rotate.** Snapshots are deleted when they exceed `keepSnapshots` or, if enabled, `keepSnapshotDays`. Pinned snapshots are never deleted and do not count against the limit.
 3. **Detect.** At logon, the tool compares recent crash and clean-shutdown events.
-4. **Restore.** After a crash (or when configured), the restore window opens. Selected apps, folders and browser windows are started.
+4. **Restore.** After a crash (or when configured), the restore window opens. Selected apps, folders and browser windows are started, and each app's window is moved back to its captured position and size.
 
-Captured: app executable and simple file arguments, window titles, minimized state, Explorer folder paths, browser profiles and tabs.
+Captured: app executable and simple file arguments, window titles, window position/size/maximized state, minimized state, Explorer folder paths, browser profiles and tabs, and the file a media player (VLC) is playing with an estimated position.
 
-Not captured: unsaved work, passwords, cookies/form data, exact window positions, or Microsoft Store/UWP apps.
+Not captured: unsaved work, passwords, cookies/form data, window z-order, or Microsoft Store/UWP apps.
 
 ## Restoring
 
@@ -168,6 +175,8 @@ Manual restore:
 - Always opens, even after a clean shutdown.
 - Lets you pick any saved snapshot.
 - Uses the same checkboxes, tab mode and force option.
+- Shows live progress while items reopen, then a per-item results list (started or skipped) in place of a pop-up.
+- Restores each application's window to the position, size and maximized state captured in the snapshot. Position restore can be turned off with `restoreWindowPositions`.
 
 ### Command line
 
@@ -241,6 +250,7 @@ Settings live in `%LOCALAPPDATA%\SessionRecovery\config.json`. The Studio **Sett
   "promptOnLogon": "CrashOnly",
   "maxRestoreAgeHours": 72,
   "restoreBrowsers": true,
+  "restoreWindowPositions": true,
   "defaultTabMode": "Smart",
   "captureBrowserTabs": true,
   "captureApproximateTabs": true,
@@ -251,7 +261,8 @@ Settings live in `%LOCALAPPDATA%\SessionRecovery\config.json`. The Studio **Sett
   "theme": "Aurora",
   "excludeApps": [],
   "excludeFolders": [],
-  "excludeUrls": []
+  "excludeUrls": [],
+  "pinnedSnapshots": []
 }
 ```
 
@@ -263,17 +274,42 @@ Settings live in `%LOCALAPPDATA%\SessionRecovery\config.json`. The Studio **Sett
 | `promptOnLogon` | `CrashOnly` | `CrashOnly`, `Always` or `Never`. |
 | `maxRestoreAgeHours` | `72` | Ignore older snapshots in the automatic prompt. Manual restore still lists them. |
 | `restoreBrowsers` | `true` | Set `false` to remove browsers entirely from restore. |
+| `restoreWindowPositions` | `true` | Move restored app windows back to their captured position, size and maximized state. |
 | `defaultTabMode` | `Smart` | Initial tab mode: `Smart`, `Captured`, `Native` or `None`. |
 | `captureBrowserTabs` | `true` | Capture browser tabs while taking snapshots. |
 | `captureApproximateTabs` | `true` | Allow the UI Automation/history fallback when a Chromium session file has no tabs. Approximate tabs are marked in the snapshot. |
+| `captureMediaPlayers` | `true` | Capture the file a media player (VLC) is playing, plus an estimated playback position. |
 | `tabHistoryLookbackHours` | `24` | How far back the Chromium history fallback may look. |
 | `showNotifications` | `true` | Show tray balloons and snapshot toasts. |
 | `startWithWindows` | `true` | Create the **Session Recovery - Background** Startup shortcut. |
 | `desktopShortcut` | `true` | Create the **Session Recovery** desktop shortcut. |
-| `theme` | `Aurora` | Studio theme. `Aurora` is the current dark palette. |
+| `theme` | `Aurora` | Studio theme: `Aurora` (dark) or `Daylight` (light). Applied the next time the Studio opens. |
 | `excludeApps` | `[]` | Wildcards matched against app display name and executable path. |
 | `excludeFolders` | `[]` | Wildcards matched against full Explorer folder paths. |
 | `excludeUrls` | `[]` | Wildcards matched against captured browser URLs. |
+| `pinnedSnapshots` | `[]` | Snapshot file names that retention must never delete. Managed with **Pin** in the Studio. |
+
+### Pinning, exporting and importing snapshots
+
+On the **Snapshots** page:
+
+- **Pin** keeps a snapshot forever. Pinned files are skipped by both count and age retention, and they do not consume the `keepSnapshots` budget. The timeline and the detail panel show a PINNED marker.
+- **Export** copies the selected snapshot to any folder as a plain JSON file.
+- **Import** copies a snapshot JSON file back into the timeline. The file is validated first; a random JSON file is rejected. Imported snapshots restore with `-SnapshotPath` or from the timeline like any other.
+
+The **Search** box matches app names and paths, Explorer folders, browser names, tab titles and URLs, as well as dates — useful for finding the snapshot where a specific page or project was open.
+
+### Media playback (VLC)
+
+When VLC is playing a video, each snapshot records the file and the playback position. A restore reopens VLC with that file and seeks back to the captured moment.
+
+- Positions are **estimated between snapshots**: VLC only writes an exact position when it closes cleanly, so after a crash the restore lands at most one snapshot interval (default 3 minutes) *before* the crash point — you rewatch a little, you never skip ahead.
+- If VLC itself is configured to continue playback automatically, exact positions from clean stops are used to keep the estimate honest.
+- The restore list shows what was playing and where (for example `Playing episode.mp4 at 27:24`); estimated positions are marked with `~` in the Studio.
+- Media files inside excluded folders are never captured.
+- If VLC is already running when a restore starts, it is skipped like any other running app.
+
+Only local files are captured this way; discs, streams and playlists open the player without a seek.
 
 ### Exclusions
 
@@ -339,9 +375,10 @@ Diagnostics are local-only. Reports contain paths, URLs and log messages, so rev
 | `%LOCALAPPDATA%\SessionRecovery\snapshots` | Snapshot JSON files. |
 | `%LOCALAPPDATA%\SessionRecovery\logs\session-recovery.log` | Snapshot, restore and error messages. |
 | `%LOCALAPPDATA%\SessionRecovery\config.json` | Settings. |
+| `%LOCALAPPDATA%\SessionRecovery\media-state.json` | Media player tracking between snapshots (playing file, position anchor). |
 | `%LOCALAPPDATA%\SessionRecovery\app` | Program files. |
 
-- Snapshots contain executable paths, window titles, folder paths and browser URLs.
+- Snapshots contain executable paths, window titles, folder paths and browser URLs. Media snapshots additionally contain the playing video's path and an estimated position.
 - The tool makes no network requests and uses no browser extension or debugging port.
 - Snapshots and logs are not encrypted. Use Windows account permissions or BitLocker on shared devices.
 - Exclusions only affect new snapshots; delete old files if you need to remove existing data today.
@@ -391,7 +428,8 @@ Get-WinEvent -FilterHashtable @{
 ## Known limitations
 
 - Unsaved work is not recovered; only windows, folders and tabs are reopened.
-- Exact window positions and monitor layout are not restored.
+- VLC playback positions are estimates between snapshots; after a crash the video resumes up to one snapshot interval early. Streams, discs and playlists reopen without a seek.
+- Window position restore is best-effort: apps that hand off to an already-running instance, swap their main window while starting, or manage their own placement may not move. Windows are clamped to the current monitors.
 - One launch per executable/argument group; multiple document windows may not be recreated individually.
 - Microsoft Store/UWP apps, elevated apps, tray-only apps and hidden windows are skipped.
 - Command-line switches are generally dropped; simple file paths and URLs may be kept.
@@ -401,7 +439,7 @@ Get-WinEvent -FilterHashtable @{
 - When a Chromium session file has no usable tabs, the fallback combines UI Automation titles and local history. Those tabs are marked approximate and may miss or add a tab.
 - Exclusions do not rewrite existing snapshots.
 - Selective filters are command-line only; the interactive window uses checkboxes.
-- Age-based retention can delete history permanently.
+- Age-based retention can delete history permanently, except for pinned snapshots.
 - Snapshots and logs are not encrypted.
 - The tool is per-user.
 
@@ -425,7 +463,7 @@ Prerequisites: .NET SDK 6 or newer and internet access for the WiX NuGet restore
 powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\Build-MSI.ps1
 ```
 
-The build compiles the native host first, then writes `dist\SessionRecovery-2.1.0.msi`, its `.sha256` file and a short release README. Use `-Version 2.1.1` for a later build. `dist\` is intentionally ignored by Git; publish the MSI as a GitHub Release asset rather than committing it.
+The build compiles the native host first, then writes `dist\SessionRecovery-2.2.0.msi`, its `.sha256` file and a short release README. Use `-Version 2.2.1` for a later build. `dist\` is intentionally ignored by Git; publish the MSI as a GitHub Release asset rather than committing it.
 
 The WiX package uses the per-user model (`ALLUSERS=2`, `MSIINSTALLPERUSER=1`), `WixUI_FeatureTree` for install-folder browsing and optional features, and a **Desktop shortcut** feature that is selected by default but can be cleared in Custom Setup. A registry search remembers a custom install folder so uninstall removes the same files.
 

@@ -49,10 +49,13 @@ $script:menu = $null
 $script:snapshotTimer = $null
 $script:firstTimer = $null
 $script:healthTimer = $null
+$script:resumeTimer = $null
 $script:appContext = $null
 $script:installRoot = $PSScriptRoot
 $script:exiting = $false
 $script:paused = $false
+$script:resumeAt = $null
+$script:updatingPauseMenu = $false
 $script:snapshotBusy = $false
 $script:ownsSnapshots = $false
 $script:taskMode = $false
@@ -109,7 +112,10 @@ function Format-SRTrayAge {
 }
 
 function Get-SRTrayModeText {
-    if ($script:paused) { return 'paused' }
+    if ($script:paused) {
+        if ($null -ne $script:resumeAt) { return ('paused until {0}' -f $script:resumeAt.ToString('HH:mm')) }
+        return 'paused'
+    }
     if ($script:ownsSnapshots) { return ('every {0} min' -f $script:intervalMinutes) }
     if ($script:taskMode) { return 'scheduled task' }
     if ($script:watcherMode) { return 'watcher active' }
@@ -148,8 +154,18 @@ function Update-SRTrayStatus {
 
     if ($null -ne $script:pauseItem) {
         $script:pauseItem.Enabled = [bool]$script:ownsSnapshots
-        $script:pauseItem.Checked = [bool]$script:paused
+        # Setting Checked programmatically raises CheckedChanged. Suppress the
+        # handler so a timed pause is not cancelled by its own status update.
+        $script:updatingPauseMenu = $true
+        try {
+            $script:pauseItem.Checked = [bool]$script:paused
+        } finally {
+            $script:updatingPauseMenu = $false
+        }
         $script:pauseItem.Text = if ($script:paused) { 'Resume snapshots' } else { 'Pause snapshots' }
+    }
+    if ($null -ne $script:pauseHourItem) {
+        $script:pauseHourItem.Enabled = ([bool]$script:ownsSnapshots -and -not $script:paused)
     }
 }
 
@@ -231,6 +247,17 @@ function Start-SRTrayFirstSnapshot {
     $script:firstTimer.Start()
 }
 
+function Resume-SRTraySnapshots {
+    $script:paused = $false
+    $script:resumeAt = $null
+    if ($script:resumeTimer) { $script:resumeTimer.Stop() }
+    Update-SRTrayStatus
+    if ($script:ownsSnapshots -and -not $script:exiting) {
+        Start-SRTrayFirstSnapshot
+        Show-SRTrayBalloon -Text 'Snapshots resumed.'
+    }
+}
+
 function Open-SRDataFolder {
     try {
         $root = Get-SRRoot
@@ -280,6 +307,10 @@ function Exit-SRTray {
     if ($null -ne $script:healthTimer) {
         try { $script:healthTimer.Stop(); $script:healthTimer.Dispose() } catch { }
         $script:healthTimer = $null
+    }
+    if ($null -ne $script:resumeTimer) {
+        try { $script:resumeTimer.Stop(); $script:resumeTimer.Dispose() } catch { }
+        $script:resumeTimer = $null
     }
     try {
         if ($null -ne $script:notify) {
@@ -418,15 +449,41 @@ $snapshotItem = New-Object System.Windows.Forms.ToolStripMenuItem('Take snapshot
 $script:pauseItem = New-Object System.Windows.Forms.ToolStripMenuItem('Pause snapshots')
 $script:pauseItem.CheckOnClick = $true
 [void]$script:pauseItem.Add_CheckedChanged({
+    if ($script:updatingPauseMenu) { return }
     $script:paused = [bool]$script:pauseItem.Checked
     if ($script:paused) {
         Stop-SRTrayTimers
+        $script:resumeAt = $null
+        if ($script:resumeTimer) { $script:resumeTimer.Stop() }
+        Update-SRTrayStatus
     } else {
-        Start-SRTrayFirstSnapshot
+        # Unchecking Pause also cancels a timed pause and its resume timer.
+        Resume-SRTraySnapshots
     }
-    Update-SRTrayStatus
 })
 [void]$script:menu.Items.Add($script:pauseItem)
+
+$script:pauseHourItem = New-Object System.Windows.Forms.ToolStripMenuItem('Pause for 1 hour')
+[void]$script:pauseHourItem.Add_Click({
+    if (-not $script:ownsSnapshots) { return }
+    $script:paused = $true
+    Stop-SRTrayTimers
+    $script:resumeAt = (Get-Date).AddHours(1)
+    if ($null -eq $script:resumeTimer) {
+        $script:resumeTimer = New-Object System.Windows.Forms.Timer
+        [void]$script:resumeTimer.Add_Tick({
+            $script:resumeTimer.Stop()
+            Resume-SRTraySnapshots
+        })
+    }
+    $remaining = [int]($script:resumeAt - (Get-Date)).TotalMilliseconds
+    $script:resumeTimer.Interval = [Math]::Max(1000, $remaining)
+    $script:resumeTimer.Stop()
+    $script:resumeTimer.Start()
+    Update-SRTrayStatus
+    Show-SRTrayBalloon -Text ('Snapshots paused until {0}. They resume automatically.' -f $script:resumeAt.ToString('HH:mm'))
+})
+[void]$script:menu.Items.Add($script:pauseHourItem)
 
 [void]$script:menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 
