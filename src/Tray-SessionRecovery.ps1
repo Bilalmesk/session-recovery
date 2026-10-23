@@ -22,6 +22,13 @@ $ErrorActionPreference = 'Stop'
 $modulePath = Join-Path $PSScriptRoot 'SessionRecovery.psm1'
 Import-Module $modulePath -Force -ErrorAction Stop
 try { Write-SRLog -Message 'Tray app booting.' } catch { }
+try {
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object System.Security.Principal.WindowsPrincipal($identity)
+    if ($principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        Repair-SRLegacyTasks | Out-Null
+    }
+} catch { }
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing

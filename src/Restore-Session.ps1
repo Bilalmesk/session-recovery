@@ -46,6 +46,28 @@ $ErrorActionPreference = 'Stop'
 
 $modulePath = Join-Path $PSScriptRoot 'SessionRecovery.psm1'
 Import-Module $modulePath -Force -ErrorAction Stop
+Hide-SRConsoleWindow
+
+# Pre-2.0 tasks launch this script directly with Windows PowerShell. Hand the
+# logon prompt to the native host so the long-lived restore window never keeps
+# a PowerShell/conhost process around. Calls with explicit options still run
+# in-process for scripts and diagnostics.
+if ($PSBoundParameters.Count -eq 0 -and [string]::IsNullOrWhiteSpace($env:SESSIONRECOVERY_HOST)) {
+    $nativeHost = @(
+        (Join-Path $PSScriptRoot 'SessionRecovery.exe'),
+        (Join-Path (Split-Path $PSScriptRoot -Parent) 'dist\SessionRecovery.exe'),
+        (Join-Path $env:LOCALAPPDATA 'SessionRecovery\app\SessionRecovery.exe')
+    ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if ($nativeHost) {
+        try {
+            Write-SRLog -Message 'Legacy restore invocation handed to the native host.'
+            Start-Process -FilePath $nativeHost -ArgumentList '--restore-prompt' | Out-Null
+            exit 0
+        } catch {
+            Write-SRLog -Level WARN -Message ('Could not hand restore to the native host: ' + $_.Exception.Message)
+        }
+    }
+}
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -794,7 +816,7 @@ $brandName.Location = New-Object System.Drawing.Point(80, 18)
 $header.Controls.Add($brandName)
 
 $brandMeta = New-Object System.Windows.Forms.Label
-$brandMeta.Text = 'LOCAL SNAPSHOTS  /  V2.0.0'
+$brandMeta.Text = 'LOCAL SNAPSHOTS  /  V2.1.0'
 $brandMeta.Font = New-Object System.Drawing.Font('Consolas', 7.5)
 $brandMeta.ForeColor = $rsMuted
 $brandMeta.AutoSize = $true

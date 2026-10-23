@@ -8,12 +8,12 @@
 
     Examples
       powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\Build-MSI.ps1
-      powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\Build-MSI.ps1 -Version 2.0.1
+      powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\Build-MSI.ps1 -Version 2.1.1
 #>
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string]$Version = '2.0.0',
+    [string]$Version = '2.1.0',
     [switch]$NoRestore
 )
 
@@ -75,15 +75,17 @@ Session Recovery {0}
 Reopen the apps, File Explorer folders and browser tabs that were open before
 a crash, power cut or unexpected restart.
 
-What's new in 2.0
+What's new in 2.1
 -----------------
-- Modern Session Recovery Studio with Dashboard, Snapshots, Exclusions,
-  Settings, Diagnostics and About pages.
+- Application updates in the Studio: check the GitHub release, download the
+  MSI, verify its SHA256, and install it without leaving About.
+- Faster page switching with cached pages and incremental snapshot rows.
+- Console and shell windows (cmd, PowerShell, Windows Terminal and WSL) are
+  skipped during capture and restore, so no suspicious command windows flash.
+- Existing logon tasks from older releases are handed to the native host.
 - Native SessionRecovery.exe host: no visible cmd or PowerShell windows.
-- Improved Chrome/Chromium tab capture with structured session files,
-  UI Automation and local history fallback. Approximate tabs are marked.
-- Snapshot timeline with previews and one-click restore.
-- Optional desktop shortcut and a choose-your-folder installer.
+- Snapshot timeline with previews, one-click restore, exclusions and browser
+  capture improvements from 2.0.
 
 Install
 -------

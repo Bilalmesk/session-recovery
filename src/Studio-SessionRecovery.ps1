@@ -1,7 +1,7 @@
 #requires -Version 5.1
 <#
     Studio-SessionRecovery.ps1
-    Session Recovery 2.0 control center.
+    Session Recovery 2.1 control center.
 
     This script is normally launched by SessionRecovery.exe, the native GUI
     host. The host runs this file in-process on an STA thread, so there is no
@@ -17,7 +17,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-$script:AppVersion = '2.0.0'
+$script:AppVersion = '2.1.0'
 $script:ScriptDir = $PSScriptRoot
 $script:AppDir = if ($env:SESSIONRECOVERY_HOST_EXE) { Split-Path -Parent $env:SESSIONRECOVERY_HOST_EXE } else { $PSScriptRoot }
 $script:HostExe = $null
@@ -34,6 +34,25 @@ $script:SettingsLoaded = $false
 $script:ExclusionCards = @()
 $script:SnapshotRows = @()
 $script:ToastTimer = $null
+$script:SnapshotsDirty = $true
+$script:DashboardDirty = $true
+$script:ExclusionsDirty = $true
+$script:DiagnosticsDirty = $true
+$script:DiagnosticsLoading = $false
+$script:PageLoaded = @{}
+$script:LastSnapFlowWidth = 0
+$script:SnapshotBuildTimer = $null
+$script:SnapshotDetailsTimer = $null
+$script:SnapshotBuildQueue = @()
+$script:SnapshotBuildIndex = 0
+$script:SnapshotBuildWidth = 0
+$script:StudioJobs = @{}
+$script:StudioTaskTimer = $null
+$script:UpdateBusy = $false
+$script:UpdateAction = ''
+$script:AvailableUpdate = $null
+$script:DownloadedUpdate = $null
+$script:UpdateInstalling = $false
 
 $script:P = @{
     Bg          = [System.Drawing.Color]::FromArgb(8, 12, 18)
@@ -308,6 +327,90 @@ function Format-StudioBytes {
     return ('{0:N1} MB' -f ($Bytes / 1048576.0))
 }
 
+function Enable-StudioDoubleBuffer {
+    param($Control)
+    if ($null -eq $Control) { return }
+    try {
+        $type = $Control.GetType()
+        while ($null -ne $type) {
+            $property = $type.GetProperty('DoubleBuffered', [System.Reflection.BindingFlags]'Instance,NonPublic')
+            if ($null -ne $property) {
+                $property.SetValue($Control, $true, $null)
+                return
+            }
+            $type = $type.BaseType
+        }
+    } catch { }
+}
+
+function Stop-StudioWorker {
+    param([string]$Name)
+    if (-not $script:StudioJobs.ContainsKey($Name)) { return }
+    $job = $script:StudioJobs[$Name]
+    try { if ($null -ne $job.PowerShell) { $job.PowerShell.Stop(); $job.PowerShell.Dispose() } } catch { }
+    try { if ($null -ne $job.Runspace) { $job.Runspace.Close(); $job.Runspace.Dispose() } } catch { }
+    $script:StudioJobs.Remove($Name)
+}
+
+function Start-StudioWorker {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][scriptblock]$Script,
+        [object[]]$Arguments = @()
+    )
+    Stop-StudioWorker -Name $Name
+    $runspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+    $runspace.ApartmentState = [System.Threading.ApartmentState]::MTA
+    $runspace.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
+    $runspace.Open()
+    $powershell = [System.Management.Automation.PowerShell]::Create()
+    $powershell.Runspace = $runspace
+    [void]$powershell.AddScript([string]$Script)
+    foreach ($argument in $Arguments) { [void]$powershell.AddArgument($argument) }
+    $handle = $powershell.BeginInvoke()
+    $script:StudioJobs[$Name] = [pscustomobject]@{
+        PowerShell = $powershell
+        Runspace   = $runspace
+        Handle     = $handle
+    }
+}
+
+function Complete-StudioWorker {
+    param([string]$Name)
+    if (-not $script:StudioJobs.ContainsKey($Name)) { return $null }
+    $job = $script:StudioJobs[$Name]
+    if (-not $job.Handle.IsCompleted) { return $null }
+    $output = @()
+    $errorText = ''
+    try {
+        $output = @($job.PowerShell.EndInvoke($job.Handle))
+        if ($job.PowerShell.Streams.Error.Count -gt 0) {
+            $errorText = (@($job.PowerShell.Streams.Error | ForEach-Object { $_.ToString() }) -join "`r`n")
+        }
+    } catch {
+        $errorText = $_.Exception.Message
+    } finally {
+        try { $job.PowerShell.Dispose() } catch { }
+        try { $job.Runspace.Close(); $job.Runspace.Dispose() } catch { }
+        $script:StudioJobs.Remove($Name)
+    }
+    return [pscustomobject]@{ Output = $output; Error = $errorText }
+}
+
+function Update-StudioWorkers {
+    $completed = @()
+    foreach ($name in @($script:StudioJobs.Keys)) {
+        $result = Complete-StudioWorker -Name $name
+        if ($null -ne $result) { $completed += [pscustomobject]@{ Name = $name; Result = $result } }
+    }
+    foreach ($item in $completed) {
+        switch ($item.Name) {
+            'Diagnostics' { Complete-StudioDiagnosticsWorker -Result $item.Result }
+            'Update' { Complete-StudioUpdateWorker -Result $item.Result }
+        }
+    }
+}
+
 function Get-StudioStats {
     param($Snapshot)
     if ($null -eq $Snapshot) {
@@ -348,7 +451,7 @@ function Open-StudioPath {
 function Get-StudioTrayState {
     $tray = @()
     try {
-        $tray = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $tray = @(Get-CimInstance Win32_Process -Filter "Name='SessionRecovery.exe' OR Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object {
             ($_.Name -eq 'SessionRecovery.exe' -and $_.CommandLine -and $_.CommandLine -match '(?i)--tray') -or
             ($_.Name -eq 'powershell.exe' -and $_.CommandLine -and $_.CommandLine -match '(?i)Tray-SessionRecovery\.ps1')
         })
@@ -527,10 +630,17 @@ function Refresh-StudioSidebar {
 function Refresh-StudioData {
     $script:Config = Get-SRConfig
     $script:Snapshots = @(Get-SRSnapshots)
+    $script:SnapshotsDirty = $true
+    $script:DashboardDirty = $true
+    $script:ExclusionsDirty = $true
+    $script:DiagnosticsDirty = $true
     Refresh-StudioSidebar
-    Refresh-StudioDashboard
-    if ($script:CurrentPage -eq 'Snapshots') { Refresh-StudioSnapshotRows }
-    if ($script:CurrentPage -eq 'Settings' -and -not $script:SettingsLoaded) { Load-StudioSettings }
+    switch ($script:CurrentPage) {
+        'Dashboard' { if ($script:PageLoaded.ContainsKey('Dashboard')) { Refresh-StudioDashboard } }
+        'Snapshots' { if ($script:PageLoaded.ContainsKey('Snapshots')) { Refresh-StudioSnapshotRows } }
+        'Exclusions' { if ($script:PageLoaded.ContainsKey('Exclusions')) { Refresh-StudioExclusions } }
+        'Diagnostics' { if ($script:PageLoaded.ContainsKey('Diagnostics')) { Start-StudioDiagnosticsRefresh -Force } }
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -544,6 +654,7 @@ $form.MinimumSize = New-Object System.Drawing.Size(1040, 700)
 $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
 $form.BackColor = $script:P.Bg
 $form.ForeColor = $script:P.Text
+Enable-StudioDoubleBuffer $form
 $form.Font = $script:FontBody
 $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi
 $form.KeyPreview = $true
@@ -700,6 +811,7 @@ $pageHost = New-Object System.Windows.Forms.Panel
 $pageHost.Location = New-Object System.Drawing.Point(0, 88)
 $pageHost.Size = New-Object System.Drawing.Size(984, 692)
 $pageHost.BackColor = $script:P.Bg
+Enable-StudioDoubleBuffer $pageHost
 $main.Controls.Add($pageHost)
 $script:PageHost = $pageHost
 
@@ -710,6 +822,7 @@ function New-StudioPage {
     $page.BackColor = $script:P.Bg
     $page.Visible = $false
     $page.Size = $script:PageHost.ClientSize
+    Enable-StudioDoubleBuffer $page
     $script:PageHost.Controls.Add($page)
     $script:Pages[$Name] = $page
     return $page
@@ -976,6 +1089,7 @@ function Refresh-StudioDashboard {
         [array]::Reverse($values)
         $script:Ui.RecentSpark.Values = [int[]]$values
     }
+    $script:DashboardDirty = $false
 }
 
 # ---------------------------------------------------------------------------
@@ -1274,24 +1388,117 @@ function Update-StudioSnapshotDetails {
 }
 
 function Select-StudioSnapshotRow {
-    param([string]$Path)
+    param([string]$Path, [switch]$Immediate)
     $script:SelectedSnapshotPath = $Path
     foreach ($row in $script:SnapshotRows) {
         if ($null -eq $row) { continue }
-        if ([string]$row.Tag -eq $Path) {
+        $isSelected = ([string]$row.Tag -eq $Path)
+        $row.Selected = $isSelected
+        if ($isSelected) {
             $row.BorderColor = $script:P.Accent
         } else {
             $row.BorderColor = $script:P.BorderSoft
         }
     }
-    Update-StudioSnapshotDetails
+    if ($Immediate) {
+        Update-StudioSnapshotDetails
+        return
+    }
+    if ($null -eq $script:SnapshotDetailsTimer) {
+        $script:SnapshotDetailsTimer = New-Object System.Windows.Forms.Timer
+        $script:SnapshotDetailsTimer.Interval = 25
+        $script:SnapshotDetailsTimer.Add_Tick({
+            $script:SnapshotDetailsTimer.Stop()
+            Update-StudioSnapshotDetails
+        })
+    }
+    $script:SnapshotDetailsTimer.Stop()
+    $script:SnapshotDetailsTimer.Start()
+}
+
+function New-StudioSnapshotRowControl {
+    param(
+        $Entry,
+        [int]$Width,
+        [scriptblock]$ClickHandler
+    )
+    $stats = Get-StudioStats -Snapshot $Entry.Snapshot
+    $approx = $false
+    foreach ($browser in @($Entry.Snapshot.browsers)) {
+        foreach ($profile in @($browser.profiles)) {
+            if ($profile.tabsApproximate) { $approx = $true }
+        }
+    }
+    $row = New-Object SessionRecovery.Studio.StudioSnapshotRow
+    $row.Location = New-Object System.Drawing.Point(0, 0)
+    $row.Size = New-Object System.Drawing.Size($Width, 66)
+    $row.FillColor = $script:P.CardAlt
+    $row.BorderColor = $script:P.BorderSoft
+    $row.CanvasColor = $script:P.Card
+    $row.TextColor = $script:P.Text
+    $row.MutedColor = $script:P.Muted
+    $row.SubtleColor = $script:P.Subtle
+    $row.AccentColor = $script:P.Accent
+    $row.AmberColor = $script:P.Amber
+    $row.AmberSoft = $script:P.AmberSoft
+    $row.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 7)
+    $row.Tag = $Entry.Path
+    $row.TimeText = $Entry.CapturedAt.ToString('ddd  •  MMM d  •  HH:mm:ss')
+    $row.MetaText = ('{0} app(s)  •  {1} tab(s)  •  {2}' -f $stats.Apps, $stats.Tabs, (Format-StudioBytes -Bytes (Get-StudioSnapshotBytes -Entry $Entry)))
+    $row.AgeText = Format-StudioAge -CapturedAt $Entry.CapturedAt
+    $row.Approximate = $approx
+    $row.Selected = ([string]$row.Tag -eq [string]$script:SelectedSnapshotPath)
+    $row.AccessibleName = ('{0}. {1}. {2}' -f $row.TimeText, $row.MetaText, $row.AgeText)
+    $row.AccessibleDescription = 'Snapshot. Select to preview and restore.'
+    $row.Add_Click($ClickHandler)
+    return $row
+}
+
+function Add-StudioSnapshotBatch {
+    param([int]$BatchSize = 8)
+    if (-not $script:Ui.SnapFlow) { return }
+    $total = $script:SnapshotBuildQueue.Count
+    if ($script:SnapshotBuildIndex -ge $total) {
+        if ($script:SnapshotBuildTimer) { $script:SnapshotBuildTimer.Stop() }
+        return
+    }
+    $end = [Math]::Min($total, $script:SnapshotBuildIndex + $BatchSize)
+    $firstBatch = ($script:SnapshotBuildIndex -eq 0)
+    $flow = $script:Ui.SnapFlow
+    $flow.SuspendLayout()
+    try {
+        for ($index = $script:SnapshotBuildIndex; $index -lt $end; $index++) {
+            $row = New-StudioSnapshotRowControl -Entry $script:SnapshotBuildQueue[$index] -Width $script:SnapshotBuildWidth -ClickHandler $script:SnapshotClickHandler
+            [void]$flow.Controls.Add($row)
+            $script:SnapshotRows += $row
+        }
+        $script:SnapshotBuildIndex = $end
+    } finally {
+        $flow.ResumeLayout($true)
+    }
+    if ($firstBatch -or $script:SnapshotBuildIndex -ge $total) {
+        Select-StudioSnapshotRow -Path $script:SelectedSnapshotPath
+    }
+    if ($script:SnapshotBuildIndex -lt $total) {
+        if ($null -eq $script:SnapshotBuildTimer) {
+            $script:SnapshotBuildTimer = New-Object System.Windows.Forms.Timer
+            $script:SnapshotBuildTimer.Interval = 15
+            $script:SnapshotBuildTimer.Add_Tick({ Add-StudioSnapshotBatch -BatchSize 8 })
+        }
+        if (-not $script:SnapshotBuildTimer.Enabled) { $script:SnapshotBuildTimer.Start() }
+    } elseif ($script:SnapshotBuildTimer) {
+        $script:SnapshotBuildTimer.Stop()
+    }
 }
 
 function Refresh-StudioSnapshotRows {
     if (-not $script:Ui.SnapFlow) { return }
+    if ($script:SnapshotLayoutTimer) { $script:SnapshotLayoutTimer.Stop() }
+    if ($script:SnapshotBuildTimer) { $script:SnapshotBuildTimer.Stop() }
     if ($script:Snapshots.Count -eq 0) {
         $script:Snapshots = @(Get-SRSnapshots)
     }
+    $script:LastSnapFlowWidth = [Math]::Max(300, $script:Ui.SnapFlow.ClientSize.Width - 22)
 
     $search = [string]$script:Ui.SnapSearch.Text
     if ($script:Ui.SnapSearch.Tag -eq 'placeholder') { $search = '' }
@@ -1317,48 +1524,12 @@ function Refresh-StudioSnapshotRows {
         foreach ($control in @($script:Ui.SnapFlow.Controls)) { $control.Dispose() }
         $script:Ui.SnapFlow.Controls.Clear()
         $script:SnapshotRows = @()
-        $rowWidth = [Math]::Max(300, $script:Ui.SnapFlow.ClientSize.Width - 22)
-        foreach ($entry in $filtered) {
-            $stats = Get-StudioStats -Snapshot $entry.Snapshot
-            $approx = $false
-            foreach ($browser in @($entry.Snapshot.browsers)) {
-                foreach ($profile in @($browser.profiles)) {
-                    if ($profile.tabsApproximate) { $approx = $true }
-                }
-            }
-            $row = New-StudioCard -X 0 -Y 0 -Width $rowWidth -Height 66 -Fill $script:P.CardAlt -Border $script:P.BorderSoft -Radius 10
-            $row.CanvasColor = $script:P.Card
-            $row.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 7)
-            $row.Tag = $entry.Path
-            $timeLabel = New-StudioLabel -Text $entry.CapturedAt.ToString('ddd  •  MMM d  •  HH:mm:ss') -X 14 -Y 8 -Width ($rowWidth - 120) -Height 18 -Font $script:FontSemibold -Color $script:P.Text
-            $timeLabel.Tag = $entry.Path
-            $metaLabel = New-StudioLabel -Text ('{0} app(s)  •  {1} tab(s)  •  {2}' -f $stats.Apps, $stats.Tabs, (Format-StudioBytes -Bytes (Get-StudioSnapshotBytes -Entry $entry))) -X 14 -Y 29 -Width ($rowWidth - 120) -Height 16 -Font $script:FontBodySmall -Color $script:P.Muted
-            $metaLabel.Tag = $entry.Path
-            $ageLabel = New-StudioLabel -Text (Format-StudioAge -CapturedAt $entry.CapturedAt) -X 14 -Y 45 -Width 200 -Height 14 -Font $script:FontBodySmall -Color $script:P.Subtle
-            $ageLabel.Tag = $entry.Path
-            $chevron = New-StudioLabel -Text ([string][char]0xE76C) -X ($rowWidth - 34) -Y 22 -Width 20 -Height 20 -Font (New-Object System.Drawing.Font('Segoe MDL2 Assets', 10)) -Color $script:P.Subtle -Align 'MiddleCenter'
-            $chevron.Tag = $entry.Path
-            if ($approx) {
-                $approxBadge = New-StudioBadge -Text 'APPROX' -Width 58 -Height 18 -Fill $script:P.AmberSoft -TextColor $script:P.Amber
-                $approxBadge.Location = New-Object System.Drawing.Point(($rowWidth - 102), 8)
-                $approxBadge.Tag = $entry.Path
-                $row.Controls.Add($approxBadge)
-            }
-            $clickHandler = {
-                param($sender, $eventArgs)
-                Select-StudioSnapshotRow -Path ([string]$sender.Tag)
-            }
-            $row.Add_Click($clickHandler)
-            $timeLabel.Add_Click($clickHandler)
-            $metaLabel.Add_Click($clickHandler)
-            $ageLabel.Add_Click($clickHandler)
-            $chevron.Add_Click($clickHandler)
-            $row.Controls.Add($timeLabel)
-            $row.Controls.Add($metaLabel)
-            $row.Controls.Add($ageLabel)
-            $row.Controls.Add($chevron)
-            [void]$script:Ui.SnapFlow.Controls.Add($row)
-            $script:SnapshotRows += $row
+        $script:SnapshotBuildQueue = @($filtered.ToArray())
+        $script:SnapshotBuildIndex = 0
+        $script:SnapshotBuildWidth = [Math]::Max(300, $script:Ui.SnapFlow.ClientSize.Width - 22)
+        $script:SnapshotClickHandler = {
+            param($sender, $eventArgs)
+            Select-StudioSnapshotRow -Path ([string]$sender.Tag)
         }
         if ($filtered.Count -eq 0) {
             $script:Ui.SnapEmpty.Visible = $true
@@ -1371,9 +1542,18 @@ function Refresh-StudioSnapshotRows {
         if ($null -eq $selected -and $filtered.Count -gt 0) {
             $script:SelectedSnapshotPath = $filtered[0].Path
         }
-        Select-StudioSnapshotRow -Path $script:SelectedSnapshotPath
     } finally {
-        $script:Ui.SnapFlow.ResumeLayout()
+        $script:Ui.SnapFlow.ResumeLayout($false)
+    }
+    $script:SnapshotsDirty = $false
+    if ($filtered.Count -gt 0) {
+        if ($null -eq $script:SnapshotBuildTimer) {
+            $script:SnapshotBuildTimer = New-Object System.Windows.Forms.Timer
+            $script:SnapshotBuildTimer.Interval = 15
+            $script:SnapshotBuildTimer.Add_Tick({ Add-StudioSnapshotBatch -BatchSize 8 })
+        }
+        $script:SnapshotBuildTimer.Stop()
+        $script:SnapshotBuildTimer.Start()
     }
 }
 
@@ -1399,6 +1579,7 @@ function Refresh-StudioExclusions {
             $list.EndUpdate()
         }
     }
+    $script:ExclusionsDirty = $false
 }
 
 function Add-StudioExclusionValue {
@@ -2033,14 +2214,14 @@ function Add-StudioDiagnosticRow {
     $script:DiagnosticRows += $row
 }
 
-function Refresh-StudioDiagnostics {
+function Render-StudioDiagnostics {
+    param($Diag)
     if (-not $script:Ui.DiagHealthTitle) { return }
     try {
-        $script:Ui.DiagHealthTitle.Text = 'Checking local health...'
-        $script:Ui.DiagHealthDetail.Text = 'Reading snapshots, tasks and browser information.'
-        [System.Windows.Forms.Application]::DoEvents()
-        $diag = Get-SRDiagnostics
+        $diag = $Diag
+        if ($null -eq $diag) { throw 'Diagnostics returned no data.' }
         $script:Diagnostics = $diag
+        $script:DiagnosticsDirty = $false
         $interval = [Math]::Max(1, [int]$script:Config.snapshotIntervalMinutes)
         $age = $null
         if ($null -ne $diag.LatestSnapshotAgeMinutes) { $age = [double]$diag.LatestSnapshotAgeMinutes }
@@ -2136,6 +2317,66 @@ function Refresh-StudioDiagnostics {
         $script:Ui.DiagHealthDetail.Text = $_.Exception.Message
         $script:Ui.DiagRing.Value = 0
         $script:Ui.DiagRing.CenterText = '!'
+        $script:DiagnosticsDirty = $true
+    }
+}
+
+function Start-StudioDiagnosticsRefresh {
+    param([switch]$Force)
+    if (-not $script:Ui.DiagHealthTitle) { return }
+    if ($script:DiagnosticsLoading) { return }
+    if (-not $Force -and -not $script:DiagnosticsDirty -and $null -ne $script:Diagnostics) { return }
+    $script:DiagnosticsDirty = $true
+    $script:DiagnosticsLoading = $true
+    $script:Ui.DiagHealthTitle.Text = 'Checking local health...'
+    $script:Ui.DiagHealthTitle.ForeColor = $script:P.Text
+    $script:Ui.DiagHealthDetail.Text = 'Reading snapshots, tasks and browser information in the background.'
+    $script:Ui.DiagRing.Value = 0
+    $script:Ui.DiagRing.CenterText = '...'
+    try {
+        Start-StudioWorker -Name 'Diagnostics' -Script {
+            param($modulePath)
+            $ErrorActionPreference = 'Stop'
+            Import-Module $modulePath -Force -ErrorAction Stop | Out-Null
+            Get-SRDiagnostics | ConvertTo-Json -Depth 10 -Compress
+        } -Arguments @($modulePath)
+    } catch {
+        $script:DiagnosticsLoading = $false
+        $script:DiagnosticsDirty = $true
+        $script:Ui.DiagHealthTitle.Text = 'Diagnostics could not start'
+        $script:Ui.DiagHealthTitle.ForeColor = $script:P.Red
+        $script:Ui.DiagHealthDetail.Text = $_.Exception.Message
+    }
+}
+
+function Refresh-StudioDiagnostics {
+    Start-StudioDiagnosticsRefresh -Force
+}
+
+function Complete-StudioDiagnosticsWorker {
+    param($Result)
+    $script:DiagnosticsLoading = $false
+    if (-not [string]::IsNullOrWhiteSpace([string]$Result.Error)) {
+        $script:DiagnosticsDirty = $true
+        $script:Ui.DiagHealthTitle.Text = 'Diagnostics could not run'
+        $script:Ui.DiagHealthTitle.ForeColor = $script:P.Red
+        $script:Ui.DiagHealthDetail.Text = [string]$Result.Error
+        $script:Ui.DiagRing.Value = 0
+        $script:Ui.DiagRing.CenterText = '!'
+        return
+    }
+    try {
+        $json = [string](@($Result.Output) | Select-Object -Last 1)
+        if ([string]::IsNullOrWhiteSpace($json)) { throw 'Diagnostics returned no data.' }
+        $diag = $json | ConvertFrom-Json
+        Render-StudioDiagnostics -Diag $diag
+    } catch {
+        $script:DiagnosticsDirty = $true
+        $script:Ui.DiagHealthTitle.Text = 'Diagnostics could not run'
+        $script:Ui.DiagHealthTitle.ForeColor = $script:P.Red
+        $script:Ui.DiagHealthDetail.Text = $_.Exception.Message
+        $script:Ui.DiagRing.Value = 0
+        $script:Ui.DiagRing.CenterText = '!'
     }
 }
 
@@ -2216,10 +2457,25 @@ $aboutFlow.Controls.Add($aboutLocal)
 $aboutLocalText = New-StudioLabel -Text "Snapshots are plain JSON files in your Windows profile. Browser tabs are read locally, and restore opens apps and folders without rewriting files.`r`n`r`nThe background app keeps capturing while you work. Everything can be inspected, backed up or deleted from this Studio." -X 20 -Y 64 -Width 740 -Height 80 -Font $script:FontBody -Color $script:P.Muted
 $aboutLocal.Controls.Add($aboutLocalText)
 
-$aboutNew = New-StudioSettingsCard -Title 'What is new in 2.0' -Description 'A faster, calmer control center with stronger browser capture.' -Height 214
+$aboutNew = New-StudioSettingsCard -Title 'What is new in 2.1' -Description 'Faster navigation, in-app updates and a quieter restore.' -Height 214
 $aboutFlow.Controls.Add($aboutNew)
-$aboutNewText = New-StudioLabel -Text "• Native SessionRecovery.exe host — no console windows.`r`n• Chrome, Edge and Brave capture even when session files are empty.`r`n• Snapshot timeline with previews and one-click restore.`r`n• Exclusions for apps, folders and URLs.`r`n• Startup, desktop shortcut, notification and retention controls." -X 20 -Y 64 -Width 740 -Height 130 -Font $script:FontBody -Color $script:P.Muted
+$aboutNewText = New-StudioLabel -Text "• Check, download and install updates from Application updates.`r`n• Faster page switching and an incrementally built snapshot timeline.`r`n• Shell and console windows are skipped during capture and restore.`r`n• Native SessionRecovery.exe host with no visible cmd or PowerShell window.`r`n• Chrome, Edge and Brave capture, previews, one-click restore and exclusions." -X 20 -Y 64 -Width 740 -Height 130 -Font $script:FontBody -Color $script:P.Muted
 $aboutNew.Controls.Add($aboutNewText)
+
+$aboutUpdates = New-StudioSettingsCard -Title 'Application updates' -Description 'Check the private GitHub release channel for a newer build.' -Height 218
+$aboutFlow.Controls.Add($aboutUpdates)
+$updateStatus = New-StudioLabel -Text ('You are running version {0}. Check for a newer build without leaving the Studio.' -f $script:AppVersion) -X 20 -Y 64 -Width 740 -Height 42 -Font $script:FontBody -Color $script:P.Muted
+$aboutUpdates.Controls.Add($updateStatus)
+$updateDetail = New-StudioLabel -Text '' -X 20 -Y 108 -Width 740 -Height 36 -Font $script:FontBodySmall -Color $script:P.Subtle
+$aboutUpdates.Controls.Add($updateDetail)
+$updateCheck = New-StudioButton -Text 'Check for updates' -X 20 -Y 156 -Width 172 -Height 34 -Glyph ([string][char]0xE895)
+$aboutUpdates.Controls.Add($updateCheck)
+$updateInstall = New-StudioButton -Text 'Download and install' -X 204 -Y 156 -Width 188 -Height 34 -Glyph ([string][char]0xE896)
+$updateInstall.Visible = $false
+$aboutUpdates.Controls.Add($updateInstall)
+$updateRelease = New-StudioButton -Text 'Release notes' -X 404 -Y 156 -Width 146 -Height 34 -Glyph ([string][char]0xE8A7)
+$updateRelease.Visible = $false
+$aboutUpdates.Controls.Add($updateRelease)
 
 $aboutData = New-StudioSettingsCard -Title 'Data & support' -Description 'Session Recovery is private and local. These are the only places it writes.' -Height 188
 $aboutFlow.Controls.Add($aboutData)
@@ -2233,6 +2489,186 @@ $aboutData.Controls.Add($aboutDataOpen)
 $aboutFooter = New-StudioLabel -Text ('Session Recovery {0}  •  MIT licensed  •  made for Windows 10 and 11' -f $script:AppVersion) -X 0 -Y 0 -Width 800 -Height 18 -Font $script:FontBodySmall -Color $script:P.Subtle
 $aboutFooter.Margin = New-Object System.Windows.Forms.Padding(0, 2, 0, 0)
 $aboutFlow.Controls.Add($aboutFooter)
+$aboutFlow.Controls.SetChildIndex($aboutUpdates, 1)
+
+$script:Ui.UpdateStatus = $updateStatus
+$script:Ui.UpdateDetail = $updateDetail
+$script:Ui.UpdateCheck = $updateCheck
+$script:Ui.UpdateInstall = $updateInstall
+$script:Ui.UpdateRelease = $updateRelease
+
+function Set-StudioUpdateStatus {
+    param(
+        [string]$Text,
+        [System.Drawing.Color]$Color = $script:P.Muted,
+        [string]$Detail = ''
+    )
+    $script:Ui.UpdateStatus.Text = $Text
+    $script:Ui.UpdateStatus.ForeColor = $Color
+    $script:Ui.UpdateDetail.Text = $Detail
+}
+
+function Start-StudioUpdateCheck {
+    if ($script:UpdateBusy -or $script:UpdateInstalling) { return }
+    $script:UpdateAction = 'check'
+    $script:UpdateBusy = $true
+    $script:AvailableUpdate = $null
+    $script:DownloadedUpdate = $null
+    $script:Ui.UpdateCheck.Enabled = $false
+    $script:Ui.UpdateInstall.Visible = $false
+    $script:Ui.UpdateRelease.Visible = $false
+    Set-StudioUpdateStatus -Text 'Checking GitHub Releases...' -Color $script:P.Accent -Detail 'The check runs in the background and never uploads snapshots.'
+    try {
+        Start-StudioWorker -Name 'Update' -Script {
+            param($modulePath, $currentVersion, $action, $payload)
+            $ErrorActionPreference = 'Stop'
+            Import-Module $modulePath -Force -ErrorAction Stop | Out-Null
+            if ($action -eq 'check') {
+                Get-SRUpdateInfo -CurrentVersion $currentVersion | ConvertTo-Json -Depth 8 -Compress
+            } else {
+                Save-SRUpdate -UpdateJson $payload | ConvertTo-Json -Depth 6 -Compress
+            }
+        } -Arguments @($modulePath, [string]$script:AppVersion, 'check', '')
+    } catch {
+        $script:UpdateBusy = $false
+        $script:Ui.UpdateCheck.Enabled = $true
+        Set-StudioUpdateStatus -Text 'Could not start the update check.' -Color $script:P.Red -Detail $_.Exception.Message
+    }
+}
+
+function Start-StudioUpdateDownload {
+    if ($script:UpdateBusy -or $script:UpdateInstalling) { return }
+    if ($null -ne $script:DownloadedUpdate -and (Test-Path -LiteralPath $script:DownloadedUpdate.MsiPath -PathType Leaf)) {
+        Confirm-StudioUpdateInstall
+        return
+    }
+    if ($null -eq $script:AvailableUpdate) { return }
+    $script:UpdateAction = 'download'
+    $script:UpdateBusy = $true
+    $script:Ui.UpdateCheck.Enabled = $false
+    $script:Ui.UpdateInstall.Enabled = $false
+    Set-StudioUpdateStatus -Text ('Downloading version {0}...' -f $script:AvailableUpdate.LatestVersion) -Color $script:P.Accent -Detail 'The MSI will be checked against the release SHA256 before installation.'
+    try {
+        $payload = $script:AvailableUpdate | ConvertTo-Json -Depth 8 -Compress
+        Start-StudioWorker -Name 'Update' -Script {
+            param($modulePath, $currentVersion, $action, $payload)
+            $ErrorActionPreference = 'Stop'
+            Import-Module $modulePath -Force -ErrorAction Stop | Out-Null
+            if ($action -eq 'check') {
+                Get-SRUpdateInfo -CurrentVersion $currentVersion | ConvertTo-Json -Depth 8 -Compress
+            } else {
+                Save-SRUpdate -UpdateJson $payload | ConvertTo-Json -Depth 6 -Compress
+            }
+        } -Arguments @($modulePath, [string]$script:AppVersion, 'download', $payload)
+    } catch {
+        $script:UpdateBusy = $false
+        $script:Ui.UpdateCheck.Enabled = $true
+        $script:Ui.UpdateInstall.Enabled = $true
+        Set-StudioUpdateStatus -Text 'Could not start the update download.' -Color $script:P.Red -Detail $_.Exception.Message
+    }
+}
+
+function Install-StudioUpdatePackage {
+    param(
+        [Parameter(Mandatory = $true)][string]$MsiPath,
+        [string]$Version = ''
+    )
+    if (-not (Test-Path -LiteralPath $MsiPath -PathType Leaf)) {
+        Set-StudioUpdateStatus -Text 'The downloaded update package is missing.' -Color $script:P.Red -Detail 'Check again to download a fresh copy.'
+        return
+    }
+    $script:UpdateInstalling = $true
+    $script:Ui.UpdateCheck.Enabled = $false
+    $script:Ui.UpdateInstall.Enabled = $false
+    Set-StudioUpdateStatus -Text ('Starting the Windows installer for {0}...' -f $Version) -Color $script:P.Accent -Detail 'The Studio will close while the update installs. Snapshots and settings are preserved.'
+    [System.Windows.Forms.Application]::DoEvents()
+    try {
+        Start-SRUpdateInstall -MsiPath $MsiPath | Out-Null
+        $form.Close()
+    } catch {
+        $script:UpdateInstalling = $false
+        $script:Ui.UpdateCheck.Enabled = $true
+        $script:Ui.UpdateInstall.Enabled = $true
+        Set-StudioUpdateStatus -Text 'The update could not be started.' -Color $script:P.Red -Detail $_.Exception.Message
+    }
+}
+
+function Confirm-StudioUpdateInstall {
+    if ($null -eq $script:DownloadedUpdate) { return }
+    $version = [string]$script:DownloadedUpdate.Version
+    $answer = [System.Windows.Forms.MessageBox]::Show(
+        ("Version {0} is downloaded and its SHA256 hash matches the release.`r`n`r`nInstall now? The Studio will close while the per-user MSI updates the app. Your snapshots, settings and exclusions are kept." -f $version),
+        'Install Session Recovery update',
+        [System.Windows.Forms.MessageBoxButtons]::YesNo,
+        [System.Windows.Forms.MessageBoxIcon]::Question)
+    if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) {
+        Install-StudioUpdatePackage -MsiPath $script:DownloadedUpdate.MsiPath -Version $version
+    } else {
+        Set-StudioUpdateStatus -Text ('Version {0} is ready to install.' -f $version) -Color $script:P.Green -Detail 'Click Install update when you are ready. The downloaded package stays in your profile.'
+    }
+}
+
+function Complete-StudioUpdateWorker {
+    param($Result)
+    $script:UpdateBusy = $false
+    $script:Ui.UpdateCheck.Enabled = $true
+    $script:Ui.UpdateInstall.Enabled = $true
+    $action = $script:UpdateAction
+
+    $data = $null
+    try {
+        $json = [string](@($Result.Output) | Select-Object -Last 1)
+        if (-not [string]::IsNullOrWhiteSpace($json)) { $data = $json | ConvertFrom-Json }
+    } catch { }
+
+    if ($null -eq $data) {
+        $message = if (-not [string]::IsNullOrWhiteSpace([string]$Result.Error)) { [string]$Result.Error } else { 'The update service returned no result.' }
+        Set-StudioUpdateStatus -Text 'Could not check for updates.' -Color $script:P.Red -Detail $message
+        return
+    }
+
+    if ($action -eq 'check') {
+        if (-not [bool]$data.Ok) {
+            $hint = if ($data.PSObject.Properties['Hint'] -and -not [string]::IsNullOrWhiteSpace([string]$data.Hint)) { [string]$data.Hint } else { [string]$data.Error }
+            Set-StudioUpdateStatus -Text 'Could not check for updates.' -Color $script:P.Red -Detail $hint
+            return
+        }
+        if ([bool]$data.HasUpdate) {
+            if ([string]::IsNullOrWhiteSpace([string]$data.MsiName) -or [string]::IsNullOrWhiteSpace([string]$data.ShaName)) {
+                $script:AvailableUpdate = $data
+                $script:Ui.UpdateRelease.Visible = $true
+                Set-StudioUpdateStatus -Text ('Version {0} is available, but the release is incomplete.' -f $data.LatestVersion) -Color $script:P.Amber -Detail 'The release needs both a SessionRecovery MSI and a .msi.sha256 asset before the Studio can install it.'
+                return
+            }
+            $script:AvailableUpdate = $data
+            $script:Ui.UpdateInstall.Text = 'Download and install'
+            $script:Ui.UpdateInstall.Visible = $true
+            $script:Ui.UpdateRelease.Visible = $true
+            Set-StudioUpdateStatus -Text ('Version {0} is available.' -f $data.LatestVersion) -Color $script:P.Green -Detail ([string]$data.Name)
+        } else {
+            Set-StudioUpdateStatus -Text 'You are up to date.' -Color $script:P.Green -Detail ('Version {0} is the latest release.' -f $data.LatestVersion)
+        }
+        return
+    }
+
+    if (-not [bool]$data.Ok) {
+        Set-StudioUpdateStatus -Text 'The update download failed.' -Color $script:P.Red -Detail ([string]$data.Error)
+        return
+    }
+    $script:DownloadedUpdate = $data
+    $script:Ui.UpdateInstall.Text = 'Install update'
+    $script:Ui.UpdateInstall.Visible = $true
+    Set-StudioUpdateStatus -Text ('Version {0} is downloaded and verified.' -f $data.Version) -Color $script:P.Green -Detail 'SHA256 verified. The installer keeps your snapshots, settings and exclusions.'
+    Confirm-StudioUpdateInstall
+}
+
+$updateCheck.Add_Click({ Start-StudioUpdateCheck })
+$updateInstall.Add_Click({ Start-StudioUpdateDownload })
+$updateRelease.Add_Click({
+    if ($null -ne $script:AvailableUpdate -and -not [string]::IsNullOrWhiteSpace([string]$script:AvailableUpdate.ReleaseUrl)) {
+        Start-Process ([string]$script:AvailableUpdate.ReleaseUrl) | Out-Null
+    }
+})
 
 function Layout-StudioAbout {
     if (-not $script:Ui.AboutFlow) { return }
@@ -2240,9 +2676,12 @@ function Layout-StudioAbout {
     $aboutHero.Width = $width
     $aboutLocal.Width = $width
     $aboutNew.Width = $width
+    $aboutUpdates.Width = $width
     $aboutData.Width = $width
     $aboutLocalText.Width = $width - 40
     $aboutNewText.Width = $width - 40
+    $updateStatus.Width = $width - 40
+    $updateDetail.Width = $width - 40
     $aboutDataText.Width = $width - 40
     $aboutFooter.Width = $width
 }
@@ -2250,6 +2689,10 @@ function Layout-StudioAbout {
 # ---------------------------------------------------------------------------
 # Layout and page switching
 # ---------------------------------------------------------------------------
+
+foreach ($bufferedControl in @($main, $sidebar, $header, $snapSplit, $snapFlow, $recentFlow, $settingsFlow, $exFlow, $diagFlow, $aboutFlow)) {
+    Enable-StudioDoubleBuffer $bufferedControl
+}
 
 function Layout-StudioSidebar {
     $height = $sidebar.ClientSize.Height
@@ -2334,6 +2777,9 @@ function Layout-StudioSnapshots {
     $snapCount.Width = [Math]::Max(80, $snapOpenFolder.Left - 456)
     $snapSplit.Location = New-Object System.Drawing.Point(24, 90)
     $snapSplit.Size = New-Object System.Drawing.Size(($width - 48), [Math]::Max(260, $height - 110))
+    $rowWidth = [Math]::Max(300, $snapFlow.ClientSize.Width - 22)
+    if ($script:LastSnapFlowWidth -eq $rowWidth) { return }
+    $script:LastSnapFlowWidth = $rowWidth
     if ($script:CurrentPage -eq 'Snapshots') {
         if ($null -eq $script:SnapshotLayoutTimer) {
             $script:SnapshotLayoutTimer = New-Object System.Windows.Forms.Timer
@@ -2348,76 +2794,95 @@ function Layout-StudioSnapshots {
     }
 }
 
+function Layout-StudioPage {
+    param([string]$Name)
+    switch ($Name) {
+        'Dashboard' { Layout-StudioDashboard }
+        'Snapshots' { Layout-StudioSnapshots }
+        'Exclusions' { Layout-StudioExclusions }
+        'Settings' { Layout-StudioSettings }
+        'Diagnostics' { Layout-StudioDiagnostics }
+        'About' { Layout-StudioAbout }
+    }
+}
+
 function Layout-Studio {
     if (-not $script:UiReady) { return }
-    if ($script:PageHost -and $script:PageHost.ClientSize.Width -gt 0) {
-        $pageSize = $script:PageHost.ClientSize
-        foreach ($key in @($script:Pages.Keys)) {
-            $script:Pages[$key].Size = $pageSize
-        }
+    $pageSize = $script:PageHost.ClientSize
+    $current = $script:CurrentPage
+    if ($script:Pages.Contains($current) -and $pageSize.Width -gt 0) {
+        $script:Pages[$current].Size = $pageSize
     }
     Layout-StudioSidebar
     Layout-StudioHeader
-    Layout-StudioDashboard
-    Layout-StudioSnapshots
-    Layout-StudioExclusions
-    Layout-StudioSettings
-    Layout-StudioDiagnostics
-    Layout-StudioAbout
-    Layout-StudioHeader
+    if ($script:Pages.Contains($current)) { Layout-StudioPage -Name $current }
 }
 
 function Show-StudioPage {
     param([string]$Name)
     if (-not $script:Pages.Contains($Name)) { $Name = 'Dashboard' }
+    if ($Name -eq $script:CurrentPage -and $script:PageLoaded.ContainsKey($Name)) { return }
+
+    $previous = $script:CurrentPage
     $script:CurrentPage = $Name
-    foreach ($key in @($script:Pages.Keys)) {
-        $script:Pages[$key].Visible = ($key -eq $Name)
+    $target = $script:Pages[$Name]
+    $script:PageHost.SuspendLayout()
+    try {
+        if ($previous -ne $Name -and $script:Pages.Contains($previous)) {
+            $script:Pages[$previous].Visible = $false
+        }
+        foreach ($key in @($script:NavButtons.Keys)) {
+            $script:NavButtons[$key].Selected = ($key -eq $Name)
+        }
+        switch ($Name) {
+            'Dashboard' {
+                $pageTitle.Text = 'Dashboard'
+                $pageSubtitle.Text = 'Your session, exactly as you left it.'
+            }
+            'Snapshots' {
+                $pageTitle.Text = 'Snapshots'
+                $pageSubtitle.Text = 'A timeline of everything Session Recovery has saved.'
+            }
+            'Exclusions' {
+                $pageTitle.Text = 'Exclusions'
+                $pageSubtitle.Text = 'Keep private or noisy windows out of your snapshots.'
+            }
+            'Settings' {
+                $pageTitle.Text = 'Settings'
+                $pageSubtitle.Text = 'Tune capture, restore, startup and storage.'
+            }
+            'Diagnostics' {
+                $pageTitle.Text = 'Diagnostics'
+                $pageSubtitle.Text = 'Local health checks and recent activity.'
+            }
+            'About' {
+                $pageTitle.Text = 'About'
+                $pageSubtitle.Text = 'Local, fast and private by design.'
+            }
+        }
+        $captureButton.Visible = ($Name -eq 'Dashboard' -or $Name -eq 'Snapshots')
+        $refreshButton.Visible = ($Name -eq 'Diagnostics')
+        Layout-StudioHeader
+        if ($script:PageHost.ClientSize.Width -gt 0) {
+            $target.Size = $script:PageHost.ClientSize
+        }
+        $target.Visible = $true
+        Layout-StudioPage -Name $Name
+        $target.BringToFront()
+    } finally {
+        $script:PageHost.ResumeLayout($true)
+        $script:PageHost.Invalidate()
     }
-    foreach ($key in @($script:NavButtons.Keys)) {
-        $script:NavButtons[$key].Selected = ($key -eq $Name)
-    }
+
+    $firstShow = -not $script:PageLoaded.ContainsKey($Name)
     switch ($Name) {
-        'Dashboard' {
-            $pageTitle.Text = 'Dashboard'
-            $pageSubtitle.Text = 'Your session, exactly as you left it.'
-        }
-        'Snapshots' {
-            $pageTitle.Text = 'Snapshots'
-            $pageSubtitle.Text = 'A timeline of everything Session Recovery has saved.'
-        }
-        'Exclusions' {
-            $pageTitle.Text = 'Exclusions'
-            $pageSubtitle.Text = 'Keep private or noisy windows out of your snapshots.'
-        }
-        'Settings' {
-            $pageTitle.Text = 'Settings'
-            $pageSubtitle.Text = 'Tune capture, restore, startup and storage.'
-        }
-        'Diagnostics' {
-            $pageTitle.Text = 'Diagnostics'
-            $pageSubtitle.Text = 'Local health checks and recent activity.'
-        }
-        'About' {
-            $pageTitle.Text = 'About'
-            $pageSubtitle.Text = 'Local, fast and private by design.'
-        }
+        'Dashboard' { if ($firstShow -or $script:DashboardDirty) { Refresh-StudioDashboard } }
+        'Snapshots' { if ($firstShow -or $script:SnapshotsDirty) { Refresh-StudioSnapshotRows } }
+        'Exclusions' { if ($firstShow -or $script:ExclusionsDirty) { Refresh-StudioExclusions } }
+        'Settings' { if (-not $script:SettingsLoaded) { Load-StudioSettings } }
+        'Diagnostics' { if ($firstShow -or $script:DiagnosticsDirty) { Start-StudioDiagnosticsRefresh } }
     }
-    $captureButton.Visible = ($Name -eq 'Dashboard' -or $Name -eq 'Snapshots')
-    $refreshButton.Visible = ($Name -eq 'Diagnostics')
-    Layout-StudioHeader
-    if ($script:PageHost -and $script:PageHost.ClientSize.Width -gt 0) {
-        $script:Pages[$Name].Size = $script:PageHost.ClientSize
-    }
-    $script:Pages[$Name].BringToFront()
-    Layout-Studio
-    switch ($Name) {
-        'Dashboard' { Refresh-StudioDashboard }
-        'Snapshots' { Refresh-StudioSnapshotRows }
-        'Exclusions' { Refresh-StudioExclusions }
-        'Settings' { Load-StudioSettings }
-        'Diagnostics' { Refresh-StudioDiagnostics }
-    }
+    $script:PageLoaded[$Name] = $true
 }
 
 $form.Add_Resize({
@@ -2458,15 +2923,28 @@ $statusTimer.Add_Tick({
 })
 $script:StatusTimer = $statusTimer
 
+$studioTaskTimer = New-Object System.Windows.Forms.Timer
+$studioTaskTimer.Interval = 200
+$studioTaskTimer.Add_Tick({
+    if (-not $script:UiReady) { return }
+    Update-StudioWorkers
+})
+$script:StudioTaskTimer = $studioTaskTimer
+
 $form.Add_Shown({
     $script:UiReady = $true
     Layout-Studio
     Refresh-StudioData
     Show-StudioPage -Name $Page
     $statusTimer.Start()
+    $studioTaskTimer.Start()
 })
 $form.Add_FormClosing({
     try { $statusTimer.Stop(); $statusTimer.Dispose() } catch { }
+    if ($script:StudioTaskTimer) { try { $script:StudioTaskTimer.Stop(); $script:StudioTaskTimer.Dispose() } catch { } }
+    foreach ($workerName in @($script:StudioJobs.Keys)) { Stop-StudioWorker -Name $workerName }
+    if ($script:SnapshotBuildTimer) { try { $script:SnapshotBuildTimer.Stop(); $script:SnapshotBuildTimer.Dispose() } catch { } }
+    if ($script:SnapshotDetailsTimer) { try { $script:SnapshotDetailsTimer.Stop(); $script:SnapshotDetailsTimer.Dispose() } catch { } }
     if ($script:SnapshotLayoutTimer) { try { $script:SnapshotLayoutTimer.Stop(); $script:SnapshotLayoutTimer.Dispose() } catch { } }
     if ($script:ToastTimer) { try { $script:ToastTimer.Stop(); $script:ToastTimer.Dispose() } catch { } }
 })
@@ -2484,8 +2962,10 @@ if (-not [string]::IsNullOrWhiteSpace($RenderDir)) {
     if (-not (Test-Path -LiteralPath $RenderDir)) { New-Item -ItemType Directory -Path $RenderDir -Force | Out-Null }
     foreach ($renderPage in @('Dashboard', 'Snapshots', 'Exclusions', 'Settings', 'Diagnostics', 'About')) {
         Show-StudioPage -Name $renderPage
-        [System.Windows.Forms.Application]::DoEvents()
-        Start-Sleep -Milliseconds 250
+        for ($pump = 0; $pump -lt 12; $pump++) {
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 50
+        }
         $bitmap = New-Object System.Drawing.Bitmap($form.ClientSize.Width, $form.ClientSize.Height)
         $rect = New-Object System.Drawing.Rectangle(0, 0, $bitmap.Width, $bitmap.Height)
         $form.DrawToBitmap($bitmap, $rect)

@@ -10,7 +10,7 @@
 
 Option Explicit
 
-Dim shell, fso, here, mode, scriptPath, command, powershellPath
+Dim shell, fso, here, mode, scriptPath, command, powershellPath, hostPath, hostArgs
 
 If WScript.Arguments.Count > 0 Then
     mode = LCase(WScript.Arguments(0))
@@ -21,6 +21,27 @@ End If
 Set shell = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
 here = fso.GetParentFolderName(WScript.ScriptFullName)
+
+' Old scheduled tasks still call this helper. Prefer the native GUI host so
+' those tasks do not create a hidden PowerShell process or a conhost window.
+hostPath = fso.BuildPath(here, "SessionRecovery.exe")
+If fso.FileExists(hostPath) Then
+    hostArgs = ""
+    Select Case mode
+        Case "save"
+            hostArgs = "--snapshot"
+        Case "tray"
+            hostArgs = "--tray"
+        Case "tray-monitor"
+            hostArgs = "--tray-monitor"
+        Case "restore"
+            hostArgs = "--restore-prompt -StartupDelaySeconds 20"
+    End Select
+    If hostArgs <> "" Then
+        shell.Run """" & hostPath & """ " & hostArgs, 1, False
+        WScript.Quit 0
+    End If
+End If
 
 Select Case mode
     Case "watch"

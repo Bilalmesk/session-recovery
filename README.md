@@ -23,6 +23,9 @@ Session Recovery is a local Windows utility with a native desktop Studio. It sna
 - Duplicate tabs and browser window groups are preserved.
 - Capture exclusions keep chosen apps, folders and URLs out of new snapshots.
 - Selective restore by app, folder or browser, with wildcard include/exclude filters.
+- Shell and terminal windows are skipped during capture and restore, so restoration does not flash command prompts.
+- Logon tasks left by older releases are handed to the native host, avoiding their PowerShell windows.
+- In-app update checks with SHA256-verified MSI downloads in **About**.
 - Snapshot listing, age-based cleanup, health checks and a diagnostics report.
 - Optional desktop shortcut, startup protection and notification controls.
 - Local snapshots, logs and settings only; nothing is uploaded.
@@ -86,6 +89,14 @@ You should see `Snapshot saved`. Snapshots are stored in:
 ```
 
 Use **Restore Session** in the Studio or Start Menu to confirm the window lists your current apps and folders. If something looks wrong, open **Diagnostics** in the Studio.
+
+## Updates
+
+Open **Studio → About → Application updates** and choose **Check for updates**. When a newer release is available, **Download and install** fetches the MSI, verifies the published SHA256, asks for confirmation, and starts the per-user Windows installer. The Studio closes while the MSI updates it; snapshots, settings and exclusions are preserved.
+
+The repository is private, so update checks need GitHub authentication. The app uses an authenticated GitHub CLI session (`gh auth login`) when available, then `SESSIONRECOVERY_UPDATE_TOKEN`, `GITHUB_TOKEN` or `GH_TOKEN`. No token or authentication data is stored by Session Recovery.
+
+If you prefer to update manually, download the new MSI and its `.sha256` file from the GitHub **Releases** page, close the Studio, and run the MSI.
 
 ## Installation options
 
@@ -414,7 +425,7 @@ Prerequisites: .NET SDK 6 or newer and internet access for the WiX NuGet restore
 powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\Build-MSI.ps1
 ```
 
-The build compiles the native host first, then writes `dist\SessionRecovery-2.0.0.msi`, its `.sha256` file and a short release README. Use `-Version 2.0.1` for a later build. `dist\` is intentionally ignored by Git; publish the MSI as a GitHub Release asset rather than committing it.
+The build compiles the native host first, then writes `dist\SessionRecovery-2.1.0.msi`, its `.sha256` file and a short release README. Use `-Version 2.1.1` for a later build. `dist\` is intentionally ignored by Git; publish the MSI as a GitHub Release asset rather than committing it.
 
 The WiX package uses the per-user model (`ALLUSERS=2`, `MSIINSTALLPERUSER=1`), `WixUI_FeatureTree` for install-folder browsing and optional features, and a **Desktop shortcut** feature that is selected by default but can be cleared in Custom Setup. A registry search remembers a custom install folder so uninstall removes the same files.
 

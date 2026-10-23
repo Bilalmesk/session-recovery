@@ -1103,6 +1103,15 @@ function Start-SRApplication {
         return [pscustomobject]@{ Started = $false; Message = "Missing executable: $($App.exe)"; App = $App }
     }
 
+    # Never replay terminal/shell windows. A saved cmd.exe or PowerShell
+    # window can flash a console during a restore and looks suspicious.
+    $consoleHosts = @('cmd', 'powershell', 'pwsh', 'conhost', 'wsl', 'wt', 'windowsterminal', 'openconsole', 'bash', 'mintty')
+    $leaf = [System.IO.Path]::GetFileNameWithoutExtension([string]$App.exe).ToLowerInvariant()
+    $appName = ([string]$App.name).ToLowerInvariant()
+    if ($consoleHosts -contains $leaf -or $consoleHosts -contains $appName) {
+        return [pscustomobject]@{ Started = $false; Message = "Skipped console window: $($App.name)"; App = $App }
+    }
+
     if (-not $Force) {
         $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
             try { $_.Path -and ($_.Path -ieq $App.exe) } catch { $false }
@@ -1149,7 +1158,8 @@ function Get-SRApplications {
         'StartMenuExperienceHost', 'SearchHost', 'SearchApp', 'TextInputHost',
         'LockApp', 'SecurityHealthSystray', 'SystemSettings', 'WidgetService',
         'Widgets', 'msedgewebview2', 'WebViewHost', 'MoUsoCoreWorker',
-        'backgroundTaskHost', 'dwm', 'Explorer'
+        'backgroundTaskHost', 'dwm', 'Explorer', 'cmd', 'powershell', 'pwsh',
+        'conhost', 'WindowsTerminal', 'wt', 'OpenConsole', 'wsl', 'bash', 'mintty'
     )
     $blockedExeParts = @(
         '\Windows\System32\ApplicationFrameHost.exe',
@@ -2537,6 +2547,296 @@ function Get-SRSnapshotByPath {
     if (-not (Test-Path -LiteralPath $Path)) { throw "Snapshot not found: $Path" }
     $snapshot = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json
     return $snapshot
+}
+
+# ---------------------------------------------------------------------------
+# Application updates
+# ---------------------------------------------------------------------------
+
+$script:SRUpdateRepository = 'Bilalmesk/session-recovery'
+$script:SRUpdateUserAgent = 'SessionRecovery-Updater'
+
+function ConvertTo-SRVersion {
+    param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+    $clean = $Value.Trim()
+    if ($clean -match '^[vV]?(\d+\.\d+\.\d+(?:\.\d+)?)') {
+        try { return [version]$matches[1] } catch { return $null }
+    }
+    return $null
+}
+
+function ConvertTo-SRProcessArgument {
+    param([string]$Value)
+    if ($null -eq $Value) { return '""' }
+    if ($Value -notmatch '[\s"]') { return $Value }
+    return '"' + ($Value -replace '"', '\"') + '"'
+}
+
+function Hide-SRConsoleWindow {
+    # A restore prompt launched by an old scheduled task can briefly own a
+    # conhost window even when PowerShell was started with -WindowStyle Hidden.
+    # Hide it as soon as the script runs; the native host has no console at all.
+    if (-not [string]::IsNullOrWhiteSpace($env:SESSIONRECOVERY_HOST)) { return }
+    try {
+        if (-not ('SessionRecovery.ConsoleWindow' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace SessionRecovery
+{
+    public static class ConsoleWindow
+    {
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr GetConsoleWindow();
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+        public static void Hide()
+        {
+            IntPtr handle = GetConsoleWindow();
+            if (handle != IntPtr.Zero) { ShowWindow(handle, 0); }
+        }
+    }
+}
+'@
+        }
+        [SessionRecovery.ConsoleWindow]::Hide()
+    } catch { }
+}
+
+function Invoke-SRHiddenProcess {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [string[]]$Arguments = @(),
+        [int]$TimeoutSeconds = 90
+    )
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $FilePath
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+    $startInfo.Arguments = (@($Arguments | ForEach-Object { ConvertTo-SRProcessArgument ([string]$_) }) -join ' ')
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    try {
+        $output = $process.StandardOutput.ReadToEnd()
+        $errorOutput = $process.StandardError.ReadToEnd()
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            try { $process.Kill() } catch { }
+            throw ("{0} did not finish within {1} seconds." -f ([System.IO.Path]::GetFileName($FilePath)), $TimeoutSeconds)
+        }
+        return [pscustomobject]@{
+            ExitCode = $process.ExitCode
+            Output   = $output
+            Error    = $errorOutput
+        }
+    } finally {
+        $process.Dispose()
+    }
+}
+
+function Get-SRGitHubToken {
+    foreach ($name in @('SESSIONRECOVERY_UPDATE_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN')) {
+        $value = [Environment]::GetEnvironmentVariable($name)
+        if (-not [string]::IsNullOrWhiteSpace($value)) { return $value.Trim() }
+    }
+    $gh = Get-Command gh -ErrorAction SilentlyContinue
+    if ($null -ne $gh) {
+        try {
+            $result = Invoke-SRHiddenProcess -FilePath $gh.Source -Arguments @('auth', 'token') -TimeoutSeconds 20
+            if ($result.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($result.Output)) {
+                return $result.Output.Trim()
+            }
+        } catch { }
+    }
+    return $null
+}
+
+function Get-SRUpdateInfo {
+    param([string]$CurrentVersion = '0.0.0')
+    $current = ConvertTo-SRVersion -Value $CurrentVersion
+    if ($null -eq $current) {
+        return [pscustomobject]@{ Ok = $false; Error = "Current version '$CurrentVersion' is invalid." }
+    }
+
+    $release = $null
+    $usedGh = $false
+    $gh = Get-Command gh -ErrorAction SilentlyContinue
+    if ($null -ne $gh) {
+        try {
+            $result = Invoke-SRHiddenProcess -FilePath $gh.Source -Arguments @('api', ("repos/{0}/releases/latest" -f $script:SRUpdateRepository)) -TimeoutSeconds 45
+            if ($result.ExitCode -eq 0) {
+                $release = $result.Output | ConvertFrom-Json
+                $usedGh = $true
+            }
+        } catch { }
+    }
+
+    if ($null -eq $release) {
+        try {
+            $token = Get-SRGitHubToken
+            $headers = @{
+                'User-Agent' = $script:SRUpdateUserAgent
+                'Accept'     = 'application/vnd.github+json'
+            }
+            if (-not [string]::IsNullOrWhiteSpace($token)) { $headers.Authorization = 'Bearer ' + $token }
+            $uri = 'https://api.github.com/repos/{0}/releases/latest' -f $script:SRUpdateRepository
+            $release = Invoke-RestMethod -Uri $uri -Headers $headers -TimeoutSec 45 -ErrorAction Stop
+        } catch {
+            return [pscustomobject]@{
+                Ok    = $false
+                Error = ('Could not check GitHub Releases: ' + $_.Exception.Message)
+                Hint  = 'The repository is private. Sign in with GitHub CLI (gh auth login) or set SESSIONRECOVERY_UPDATE_TOKEN.'
+            }
+        }
+    }
+
+    try {
+        $tag = [string]$release.tag_name
+        $latest = ConvertTo-SRVersion -Value $tag
+        if ($null -eq $latest) { throw "Release tag '$tag' is not a version number." }
+        $assets = @($release.assets)
+        $msi = @($assets | Where-Object { $_.name -match '(?i)^SessionRecovery-.+\.msi$' } | Select-Object -First 1)
+        $sha = @($assets | Where-Object { $_.name -match '(?i)^SessionRecovery-.+\.msi\.sha256$' } | Select-Object -First 1)
+        return [pscustomobject]@{
+            Ok             = $true
+            CurrentVersion = $current.ToString()
+            LatestVersion  = $latest.ToString()
+            Version        = $latest.ToString()
+            HasUpdate      = ($latest -gt $current)
+            Tag            = $tag
+            Name           = [string]$release.name
+            Notes          = [string]$release.body
+            ReleaseUrl     = [string]$release.html_url
+            PublishedAt    = [string]$release.published_at
+            MsiName        = if ($msi.Count -gt 0) { [string]$msi[0].name } else { '' }
+            MsiApiUrl      = if ($msi.Count -gt 0) { [string]$msi[0].url } else { '' }
+            MsiDownloadUrl = if ($msi.Count -gt 0) { [string]$msi[0].browser_download_url } else { '' }
+            ShaName        = if ($sha.Count -gt 0) { [string]$sha[0].name } else { '' }
+            ShaApiUrl      = if ($sha.Count -gt 0) { [string]$sha[0].url } else { '' }
+            ShaDownloadUrl = if ($sha.Count -gt 0) { [string]$sha[0].browser_download_url } else { '' }
+            Source         = if ($usedGh) { 'gh' } else { 'api' }
+        }
+    } catch {
+        return [pscustomobject]@{ Ok = $false; Error = $_.Exception.Message }
+    }
+}
+
+function Save-SRUpdate {
+    param(
+        [Parameter(Mandatory = $true)][string]$UpdateJson,
+        [string]$Destination = ''
+    )
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+        $update = $UpdateJson | ConvertFrom-Json
+        if ([string]::IsNullOrWhiteSpace([string]$update.MsiName) -or [string]::IsNullOrWhiteSpace([string]$update.ShaName)) {
+            throw 'The release does not include both the MSI and its SHA256 file.'
+        }
+        $version = [string]$update.Version
+        $safeVersion = ($version -replace '[^0-9A-Za-z._-]', '_')
+        if ([string]::IsNullOrWhiteSpace($Destination)) {
+            $Destination = Join-Path (Get-SRRoot) ('updates\' + $safeVersion)
+        }
+        New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+        $msiPath = Join-Path $Destination ([string]$update.MsiName)
+        $shaPath = Join-Path $Destination ([string]$update.ShaName)
+
+        $token = Get-SRGitHubToken
+        $headers = @{
+            'User-Agent' = $script:SRUpdateUserAgent
+            'Accept'     = 'application/octet-stream'
+        }
+        if (-not [string]::IsNullOrWhiteSpace($token)) { $headers.Authorization = 'Bearer ' + $token }
+
+        $msiUrl = if (-not [string]::IsNullOrWhiteSpace($token) -and -not [string]::IsNullOrWhiteSpace([string]$update.MsiApiUrl)) { [string]$update.MsiApiUrl } else { [string]$update.MsiDownloadUrl }
+        $shaUrl = if (-not [string]::IsNullOrWhiteSpace($token) -and -not [string]::IsNullOrWhiteSpace([string]$update.ShaApiUrl)) { [string]$update.ShaApiUrl } else { [string]$update.ShaDownloadUrl }
+        foreach ($url in @($msiUrl, $shaUrl)) {
+            if ($url -notmatch '^https://(api\.github\.com|github\.com)/') { throw 'The update download URL is not a trusted GitHub URL.' }
+        }
+
+        Invoke-WebRequest -Uri $shaUrl -Headers $headers -OutFile $shaPath -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
+        Invoke-WebRequest -Uri $msiUrl -Headers $headers -OutFile $msiPath -UseBasicParsing -TimeoutSec 240 -ErrorAction Stop
+
+        $expected = ([string](Get-Content -LiteralPath $shaPath -Raw -ErrorAction Stop)).Trim()
+        $match = [regex]::Match($expected, '(?i)\b[0-9a-f]{64}\b')
+        if (-not $match.Success) { throw 'The release SHA256 file is not valid.' }
+        $expectedHash = $match.Value.ToUpperInvariant()
+        $actualHash = (Get-FileHash -LiteralPath $msiPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
+        if ($actualHash -ne $expectedHash) {
+            Remove-Item -LiteralPath $msiPath -Force -ErrorAction SilentlyContinue
+            throw 'The downloaded MSI failed SHA256 verification.'
+        }
+        return [pscustomobject]@{
+            Ok         = $true
+            MsiPath    = $msiPath
+            Sha256     = $actualHash
+            Version    = $version
+            ReleaseUrl = [string]$update.ReleaseUrl
+        }
+    } catch {
+        return [pscustomobject]@{ Ok = $false; Error = $_.Exception.Message }
+    }
+}
+
+function Repair-SRLegacyTasks {
+    # Older installers created logon tasks that launched Windows PowerShell
+    # directly. Those tasks can flash a console even with -WindowStyle Hidden.
+    # Point them at the native GUI host instead, preserving triggers/settings.
+    $hostPath = [string]$env:SESSIONRECOVERY_HOST_EXE
+    if ([string]::IsNullOrWhiteSpace($hostPath) -or -not (Test-Path -LiteralPath $hostPath)) {
+        $candidate = Join-Path $env:LOCALAPPDATA 'SessionRecovery\app\SessionRecovery.exe'
+        if (Test-Path -LiteralPath $candidate) { $hostPath = $candidate }
+    }
+    if ([string]::IsNullOrWhiteSpace($hostPath) -or -not (Test-Path -LiteralPath $hostPath)) { return @() }
+    $workingDirectory = Split-Path -Parent $hostPath
+    $repaired = New-Object System.Collections.Generic.List[string]
+    $definitions = @(
+        @{ Name = 'SessionRecovery-Snapshot'; Argument = '--snapshot'; Marker = 'Save-Session|RunHidden' },
+        @{ Name = 'SessionRecovery-RestorePrompt'; Argument = '--restore-prompt'; Marker = 'Restore-Session' }
+    )
+    foreach ($definition in $definitions) {
+        $name = [string]$definition.Name
+        try {
+            $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+            if ($null -eq $task) { continue }
+            $actions = @($task.Actions)
+            $needsRepair = $false
+            foreach ($action in $actions) {
+                $execute = [string]$action.Execute
+                $arguments = [string]$action.Arguments
+                if ($execute -match '(?i)powershell(?:\.exe)?$|wscript(?:\.exe)?$' -and $arguments -match ('(?i)' + $definition.Marker)) {
+                    $needsRepair = $true
+                }
+            }
+            if (-not $needsRepair) { continue }
+            $newAction = New-ScheduledTaskAction -Execute $hostPath -Argument $definition.Argument -WorkingDirectory $workingDirectory
+            Set-ScheduledTask -TaskName $name -Action $newAction -ErrorAction Stop | Out-Null
+            $repaired.Add($name)
+            Write-SRLog -Message "Repaired legacy scheduled task $name to use the native host."
+        } catch {
+            Write-SRLog -Level WARN -Message "Could not repair scheduled task ${name}: $($_.Exception.Message)"
+        }
+    }
+    return $repaired.ToArray()
+}
+
+function Start-SRUpdateInstall {
+    param([Parameter(Mandatory = $true)][string]$MsiPath)
+    if (-not (Test-Path -LiteralPath $MsiPath -PathType Leaf)) {
+        throw "Update package not found: $MsiPath"
+    }
+    try {
+        $trayProcesses = @(Get-CimInstance Win32_Process -Filter "Name='SessionRecovery.exe'" -ErrorAction SilentlyContinue | Where-Object {
+            $_.CommandLine -and $_.CommandLine -match '(?i)--tray'
+        })
+        foreach ($process in $trayProcesses) {
+            try { Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction Stop } catch { }
+        }
+    } catch { }
+    $arguments = '/i "' + $MsiPath.Replace('"', '""') + '" /passive /norestart REBOOT=ReallySuppress'
+    return (Start-Process -FilePath 'msiexec.exe' -ArgumentList $arguments -PassThru)
 }
 
 function Get-SRDiagnostics {

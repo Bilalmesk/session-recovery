@@ -99,6 +99,88 @@ namespace SessionRecovery.Studio
         }
     }
 
+    public class StudioSnapshotRow : StudioCard
+    {
+        private static readonly Font TimeFont = new Font("Segoe UI Semibold", 9.5f, FontStyle.Regular, GraphicsUnit.Point);
+        private static readonly Font MetaFont = new Font("Segoe UI", 8.25f, FontStyle.Regular, GraphicsUnit.Point);
+        private static readonly Font GlyphFont = new Font("Segoe MDL2 Assets", 10f, FontStyle.Regular, GraphicsUnit.Point);
+        private string _timeText = "";
+        private string _metaText = "";
+        private string _ageText = "";
+        private bool _approximate;
+        private bool _selected;
+        private Color _textColor = Color.FromArgb(238, 244, 252);
+        private Color _mutedColor = Color.FromArgb(151, 164, 181);
+        private Color _subtleColor = Color.FromArgb(116, 132, 151);
+        private Color _accentColor = Color.FromArgb(108, 99, 255);
+        private Color _amberColor = Color.FromArgb(245, 184, 78);
+        private Color _amberSoft = Color.FromArgb(55, 45, 26);
+
+        public string TimeText { get { return _timeText; } set { _timeText = value ?? ""; Invalidate(); } }
+        public string MetaText { get { return _metaText; } set { _metaText = value ?? ""; Invalidate(); } }
+        public string AgeText { get { return _ageText; } set { _ageText = value ?? ""; Invalidate(); } }
+        public bool Approximate { get { return _approximate; } set { _approximate = value; Invalidate(); } }
+        public bool Selected { get { return _selected; } set { _selected = value; Invalidate(); } }
+        public Color TextColor { get { return _textColor; } set { _textColor = value; Invalidate(); } }
+        public Color MutedColor { get { return _mutedColor; } set { _mutedColor = value; Invalidate(); } }
+        public Color SubtleColor { get { return _subtleColor; } set { _subtleColor = value; Invalidate(); } }
+        public Color AccentColor { get { return _accentColor; } set { _accentColor = value; Invalidate(); } }
+        public Color AmberColor { get { return _amberColor; } set { _amberColor = value; Invalidate(); } }
+        public Color AmberSoft { get { return _amberSoft; } set { _amberSoft = value; Invalidate(); } }
+
+        public StudioSnapshotRow()
+        {
+            Cursor = Cursors.Hand;
+            CornerRadius = 10;
+            Padding = new Padding(1);
+            TabStop = true;
+            AccessibleRole = AccessibleRole.ListItem;
+        }
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Enter || e.KeyCode == Keys.Space)
+            {
+                OnClick(EventArgs.Empty);
+                e.Handled = true;
+                return;
+            }
+            base.OnKeyDown(e);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            int textWidth = Math.Max(80, Width - 120);
+            TextRenderer.DrawText(e.Graphics, _timeText, TimeFont, new Rectangle(14, 8, textWidth, 18), _textColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+            TextRenderer.DrawText(e.Graphics, _metaText, MetaFont, new Rectangle(14, 29, textWidth, 16), _mutedColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+            TextRenderer.DrawText(e.Graphics, _ageText, MetaFont, new Rectangle(14, 45, 200, 14), _subtleColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+            if (_approximate)
+            {
+                Rectangle badge = new Rectangle(Math.Max(82, Width - 102), 8, 58, 18);
+                Draw.FillRoundRect(e.Graphics, badge, 5, _amberSoft);
+                TextRenderer.DrawText(e.Graphics, "APPROX", MetaFont, badge, _amberColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            }
+            Rectangle chevron = new Rectangle(Width - 34, 22, 20, 20);
+            TextRenderer.DrawText(e.Graphics, "\uE76C", GlyphFont, chevron, _subtleColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            if (_selected)
+            {
+                using (Pen accent = new Pen(_accentColor, 1.5f))
+                {
+                    using (GraphicsPath path = Draw.RoundRect(new Rectangle(0, 0, Width - 1, Height - 1), CornerRadius))
+                    {
+                        e.Graphics.DrawPath(accent, path);
+                    }
+                }
+            }
+            if (Focused)
+            {
+                ControlPaint.DrawFocusRectangle(e.Graphics, new Rectangle(5, 5, Width - 10, Height - 10), _textColor, Color.Transparent);
+            }
+        }
+    }
+
     public class StudioButton : Button
     {
         private bool _hover;
