@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
     Tray-SessionRecovery.ps1
     Keeps Session Recovery running in the notification area.
@@ -21,6 +21,24 @@ $ErrorActionPreference = 'Stop'
 
 $modulePath = Join-Path $PSScriptRoot 'SessionRecovery.psm1'
 Import-Module $modulePath -Force -ErrorAction Stop
+. (Join-Path $PSScriptRoot 'Strings.ps1')
+try {
+    $trayLanguage = 'en'
+    $trayConfig = Get-SRConfig
+    $trayLanguageProperty = $trayConfig.PSObject.Properties['language']
+    if ($null -ne $trayLanguageProperty -and -not [string]::IsNullOrWhiteSpace([string]$trayLanguageProperty.Value)) {
+        $trayLanguage = [string]$trayLanguageProperty.Value
+    }
+} catch { $trayLanguage = 'en' }
+$script:TrayLang = $trayLanguage
+$script:TrayStrings = Get-SRStrings -Language $trayLanguage
+function T {
+    param([Parameter(Mandatory = $true)][string]$Key, [string]$Default = '')
+    if ($script:TrayStrings -and $script:TrayStrings.ContainsKey($Key) -and -not [string]::IsNullOrWhiteSpace([string]$script:TrayStrings[$Key])) {
+        return [string]$script:TrayStrings[$Key]
+    }
+    return $Default
+}
 try { Write-SRLog -Message 'Tray app booting.' } catch { }
 try {
     $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
@@ -113,13 +131,13 @@ function Format-SRTrayAge {
 
 function Get-SRTrayModeText {
     if ($script:paused) {
-        if ($null -ne $script:resumeAt) { return ('paused until {0}' -f $script:resumeAt.ToString('HH:mm')) }
-        return 'paused'
+        if ($null -ne $script:resumeAt) { return ((T 'ModePausedUntil' 'paused until {0}') -f $script:resumeAt.ToString('HH:mm')) }
+        return (T 'ModePaused' 'paused')
     }
-    if ($script:ownsSnapshots) { return ('every {0} min' -f $script:intervalMinutes) }
-    if ($script:taskMode) { return 'scheduled task' }
-    if ($script:watcherMode) { return 'watcher active' }
-    return 'manual'
+    if ($script:ownsSnapshots) { return ((T 'ModeEveryMin' 'every {0} min') -f $script:intervalMinutes) }
+    if ($script:taskMode) { return (T 'ModeTask' 'scheduled task') }
+    if ($script:watcherMode) { return (T 'ModeWatcher' 'watcher active') }
+    return (T 'ModeManual' 'manual')
 }
 
 function Update-SRTraySettings {
@@ -140,15 +158,15 @@ function Update-SRTrayStatus {
     $script:notify.Text = $tooltip
 
     if ($null -ne $script:statusLabel) {
-        $script:statusLabel.Text = 'Background status: ' + $modeText
+        $script:statusLabel.Text = ((T 'BackgroundStatus' 'Background status: {0}') -f $modeText)
     }
 
     $last = Get-SRLastSnapshotInfo
     if ($null -ne $script:lastLabel) {
         if ($null -eq $last) {
-            $script:lastLabel.Text = 'Last snapshot: none yet'
+            $script:lastLabel.Text = (T 'LastSnapshotNone' 'Last snapshot: none yet')
         } else {
-            $script:lastLabel.Text = ('Last snapshot: {0} ({1})' -f $last.CapturedAt.ToString('MMM d, HH:mm'), (Format-SRTrayAge -CapturedAt $last.CapturedAt))
+            $script:lastLabel.Text = ((T 'LastSnapshotInfo' 'Last snapshot: {0} ({1})') -f $last.CapturedAt.ToString('MMM d, HH:mm'), (Format-SRTrayAge -CapturedAt $last.CapturedAt))
         }
     }
 
@@ -162,7 +180,7 @@ function Update-SRTrayStatus {
         } finally {
             $script:updatingPauseMenu = $false
         }
-        $script:pauseItem.Text = if ($script:paused) { 'Resume snapshots' } else { 'Pause snapshots' }
+        $script:pauseItem.Text = if ($script:paused) { (T 'TrayResume' 'Resume snapshots') } else { (T 'TrayPause' 'Pause snapshots') }
     }
     if ($null -ne $script:pauseHourItem) {
         $script:pauseHourItem.Enabled = ([bool]$script:ownsSnapshots -and -not $script:paused)
@@ -212,26 +230,26 @@ function Stop-SRTrayTimers {
 function Invoke-SRTraySnapshot {
     param([switch]$Manual)
     if ($script:snapshotBusy) {
-        if ($Manual) { Show-SRTrayBalloon -Text 'A snapshot is already in progress.' -Icon Information }
+        if ($Manual) { Show-SRTrayBalloon -Text (T 'TrayBalloonBusy' 'A snapshot is already in progress.') -Icon Information }
         return
     }
 
     $script:snapshotBusy = $true
     try {
-        $path = Save-SRSnapshot
+        $path = Save-SRSnapshot -Force
         if ($path) {
             $script:snapshotFailures = 0
             if ($Manual) {
-                Show-SRTrayBalloon -Text 'Snapshot saved. Your current windows and tabs are protected.' -Icon Information
+                Show-SRTrayBalloon -Text (T 'TrayBalloonSaved' 'Snapshot saved. Your current windows and tabs are protected.') -Icon Information
             }
         } elseif ($Manual) {
-            Show-SRTrayBalloon -Text 'The snapshot was skipped because another snapshot is running.' -Icon Warning
+            Show-SRTrayBalloon -Text (T 'TrayBalloonSkip' 'The snapshot was skipped because another snapshot is running.') -Icon Warning
         }
     } catch {
         $script:snapshotFailures++
         try { Write-SRLog -Level ERROR -Message "Tray snapshot failed: $($_.Exception.Message)" } catch { }
         if ($Manual -or $script:snapshotFailures -eq 1) {
-            Show-SRTrayBalloon -Text ('Snapshot failed: ' + $_.Exception.Message) -Icon Error -Timeout 5000
+            Show-SRTrayBalloon -Text ((T 'TrayBalloonFail' 'Snapshot failed: {0}') -f $_.Exception.Message) -Icon Error -Timeout 5000
         }
     } finally {
         $script:snapshotBusy = $false
@@ -254,7 +272,7 @@ function Resume-SRTraySnapshots {
     Update-SRTrayStatus
     if ($script:ownsSnapshots -and -not $script:exiting) {
         Start-SRTrayFirstSnapshot
-        Show-SRTrayBalloon -Text 'Snapshots resumed.'
+        Show-SRTrayBalloon -Text (T 'TrayResumed' 'Snapshots resumed.')
     }
 }
 
@@ -304,6 +322,10 @@ function Exit-SRTray {
     if ($script:exiting) { return }
     $script:exiting = $true
     Stop-SRTrayTimers
+    if ($null -ne $script:hotkeyTimer) {
+        try { $script:hotkeyTimer.Stop(); $script:hotkeyTimer.Dispose() } catch { }
+        $script:hotkeyTimer = $null
+    }
     if ($null -ne $script:healthTimer) {
         try { $script:healthTimer.Stop(); $script:healthTimer.Dispose() } catch { }
         $script:healthTimer = $null
@@ -432,21 +454,21 @@ $script:lastLabel.Padding = New-Object System.Windows.Forms.Padding(2, 0, 2, 2)
 
 [void]$script:menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 
-$studioItem = New-Object System.Windows.Forms.ToolStripMenuItem('Open Session Recovery')
+$studioItem = New-Object System.Windows.Forms.ToolStripMenuItem((T 'TrayOpen' 'Open Session Recovery'))
 $studioItem.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 9)
 [void]$studioItem.Add_Click({ Start-SRStudio })
 [void]$script:menu.Items.Add($studioItem)
 
-$restoreItem = New-Object System.Windows.Forms.ToolStripMenuItem('Restore last session...')
+$restoreItem = New-Object System.Windows.Forms.ToolStripMenuItem((T 'TrayRestore' 'Restore last session...'))
 $restoreItem.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 9)
 [void]$restoreItem.Add_Click({ Start-SRRestoreWindow })
 [void]$script:menu.Items.Add($restoreItem)
 
-$snapshotItem = New-Object System.Windows.Forms.ToolStripMenuItem('Take snapshot now')
+$snapshotItem = New-Object System.Windows.Forms.ToolStripMenuItem((T 'TraySnapshotNow' 'Take snapshot now'))
 [void]$snapshotItem.Add_Click({ Invoke-SRTraySnapshot -Manual })
 [void]$script:menu.Items.Add($snapshotItem)
 
-$script:pauseItem = New-Object System.Windows.Forms.ToolStripMenuItem('Pause snapshots')
+$script:pauseItem = New-Object System.Windows.Forms.ToolStripMenuItem((T 'TrayPause' 'Pause snapshots'))
 $script:pauseItem.CheckOnClick = $true
 [void]$script:pauseItem.Add_CheckedChanged({
     if ($script:updatingPauseMenu) { return }
@@ -463,7 +485,7 @@ $script:pauseItem.CheckOnClick = $true
 })
 [void]$script:menu.Items.Add($script:pauseItem)
 
-$script:pauseHourItem = New-Object System.Windows.Forms.ToolStripMenuItem('Pause for 1 hour')
+$script:pauseHourItem = New-Object System.Windows.Forms.ToolStripMenuItem((T 'TrayPauseHour' 'Pause for 1 hour'))
 [void]$script:pauseHourItem.Add_Click({
     if (-not $script:ownsSnapshots) { return }
     $script:paused = $true
@@ -481,27 +503,27 @@ $script:pauseHourItem = New-Object System.Windows.Forms.ToolStripMenuItem('Pause
     $script:resumeTimer.Stop()
     $script:resumeTimer.Start()
     Update-SRTrayStatus
-    Show-SRTrayBalloon -Text ('Snapshots paused until {0}. They resume automatically.' -f $script:resumeAt.ToString('HH:mm'))
+    Show-SRTrayBalloon -Text ((T 'TrayPausedUntil' 'Snapshots paused until {0}. They resume automatically.') -f $script:resumeAt.ToString('HH:mm'))
 })
 [void]$script:menu.Items.Add($script:pauseHourItem)
 
 [void]$script:menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 
-$folderItem = New-Object System.Windows.Forms.ToolStripMenuItem('Open snapshots folder')
+$folderItem = New-Object System.Windows.Forms.ToolStripMenuItem((T 'TrayOpenFolder' 'Open snapshots folder'))
 [void]$folderItem.Add_Click({ Open-SRSnapshotsFolder })
 [void]$script:menu.Items.Add($folderItem)
 
-$settingsItem = New-Object System.Windows.Forms.ToolStripMenuItem('Settings')
+$settingsItem = New-Object System.Windows.Forms.ToolStripMenuItem((T 'TraySettings' 'Settings'))
 [void]$settingsItem.Add_Click({ Open-SRSettingsFile })
 [void]$script:menu.Items.Add($settingsItem)
 
-$diagnosticsItem = New-Object System.Windows.Forms.ToolStripMenuItem('Run diagnostics')
+$diagnosticsItem = New-Object System.Windows.Forms.ToolStripMenuItem((T 'TrayDiagnostics' 'Run diagnostics'))
 [void]$diagnosticsItem.Add_Click({ Start-SRDiagnosticsWindow })
 [void]$script:menu.Items.Add($diagnosticsItem)
 
 [void]$script:menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 
-$exitItem = New-Object System.Windows.Forms.ToolStripMenuItem('Exit Session Recovery')
+$exitItem = New-Object System.Windows.Forms.ToolStripMenuItem((T 'TrayExit' 'Exit Session Recovery'))
 [void]$exitItem.Add_Click({ Exit-SRTray })
 [void]$script:menu.Items.Add($exitItem)
 
@@ -550,6 +572,44 @@ $script:healthTimer.Interval = 10000
 })
 $script:healthTimer.Start()
 
+# Global capture hotkey Ctrl+Alt+S. RegisterHotKey needs its own message
+# window, so this polls the async key state instead: simple and reliable in
+# a PowerShell host. The latch makes the combination fire once per press.
+try {
+    if (-not ('SessionRecovery.Tray.HotkeyPoll' -as [type])) {
+        Add-Type -Namespace SessionRecovery.Tray -Name HotkeyPoll -MemberDefinition '[DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);'
+    }
+    $script:hotkeyAvailable = $true
+} catch { $script:hotkeyAvailable = $false }
+$script:hotkeyLatch = $false
+$script:hotkeyTimer = New-Object System.Windows.Forms.Timer
+$script:hotkeyTimer.Interval = 250
+[void]$script:hotkeyTimer.Add_Tick({
+    if (-not $script:hotkeyAvailable -or $script:exiting) { return }
+    $pressed = $false
+    try {
+        $ctrl = ([SessionRecovery.Tray.HotkeyPoll]::GetAsyncKeyState(0x11) -band 0x8000) -ne 0
+        $alt = ([SessionRecovery.Tray.HotkeyPoll]::GetAsyncKeyState(0x12) -band 0x8000) -ne 0
+        $s = ([SessionRecovery.Tray.HotkeyPoll]::GetAsyncKeyState(0x53) -band 0x8000) -ne 0
+        $pressed = ($ctrl -and $alt -and $s)
+    } catch { }
+    if ($pressed -and -not $script:hotkeyLatch) {
+        $script:hotkeyLatch = $true
+        $enabled = $true
+        try {
+            $hotkeyConfig = Get-SRConfig
+            $hotkeyProperty = $hotkeyConfig.PSObject.Properties['captureHotkey']
+            if ($null -ne $hotkeyProperty) { $enabled = [bool]$hotkeyProperty.Value }
+        } catch { }
+        if ($enabled -and -not $script:paused) {
+            Invoke-SRTraySnapshot -Manual
+        }
+    } elseif (-not $pressed) {
+        $script:hotkeyLatch = $false
+    }
+})
+$script:hotkeyTimer.Start()
+
 try {
     [Microsoft.Win32.SystemEvents]::PowerModeChanged += {
         param($sender, $e)
@@ -575,9 +635,9 @@ try {
 Update-SRTrayStatus
 if ($script:ownsSnapshots) {
     Start-SRTrayFirstSnapshot
-    Show-SRTrayBalloon -Text 'Session Recovery is running in the background. Double-click the tray icon to restore a session.'
+    Show-SRTrayBalloon -Text (T 'TrayStarted' 'Session Recovery is running in the background. Double-click the tray icon to restore a session.')
 } else {
-    Show-SRTrayBalloon -Text ('Session Recovery is running in the background. Snapshot mode: {0}.' -f (Get-SRTrayModeText))
+    Show-SRTrayBalloon -Text ((T 'TrayStarted' 'Session Recovery is running in the background. Double-click the tray icon to restore a session.') + ' [' + (Get-SRTrayModeText) + ']')
 }
 
 $script:appContext = New-Object System.Windows.Forms.ApplicationContext

@@ -29,7 +29,8 @@ If fso.FileExists(hostPath) Then
     hostArgs = ""
     Select Case mode
         Case "save"
-            hostArgs = "--snapshot"
+            ' Scheduled captures must stay silent: no toast and no sound.
+            hostArgs = "--snapshot-quiet"
         Case "tray"
             hostArgs = "--tray"
         Case "tray-monitor"

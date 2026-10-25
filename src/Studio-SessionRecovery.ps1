@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
     Studio-SessionRecovery.ps1
     Session Recovery 2.2 control center.
@@ -17,7 +17,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-$script:AppVersion = '2.2.0'
+$script:AppVersion = '2.4.0'
 $script:ScriptDir = $PSScriptRoot
 $script:AppDir = if ($env:SESSIONRECOVERY_HOST_EXE) { Split-Path -Parent $env:SESSIONRECOVERY_HOST_EXE } else { $PSScriptRoot }
 $script:HostExe = $null
@@ -39,6 +39,10 @@ $script:DashboardDirty = $true
 $script:ExclusionsDirty = $true
 $script:DiagnosticsDirty = $true
 $script:DiagnosticsLoading = $false
+$script:DiagLoadingTimer = $null
+$script:DiagPhase = 0
+$script:DiagStartedAt = [datetime]::MinValue
+$script:SharedWorkerRunspace = $null
 $script:PageLoaded = @{}
 $script:LastSnapFlowWidth = 0
 $script:SnapshotBuildTimer = $null
@@ -103,80 +107,700 @@ if ($script:HostExe) {
     } catch { }
 }
 
-function Get-StudioPalette {
-    param([string]$Theme = 'Aurora')
-    if ($Theme -eq 'Daylight') {
-        return @{
-            Bg          = [System.Drawing.Color]::FromArgb(243, 246, 250)
-            Sidebar     = [System.Drawing.Color]::FromArgb(235, 240, 246)
-            Card        = [System.Drawing.Color]::FromArgb(255, 255, 255)
-            CardAlt     = [System.Drawing.Color]::FromArgb(244, 247, 251)
-            CardHover   = [System.Drawing.Color]::FromArgb(231, 238, 247)
-            Border      = [System.Drawing.Color]::FromArgb(205, 216, 229)
-            BorderSoft  = [System.Drawing.Color]::FromArgb(220, 228, 238)
-            Text        = [System.Drawing.Color]::FromArgb(26, 34, 46)
-            Muted       = [System.Drawing.Color]::FromArgb(92, 105, 122)
-            Subtle      = [System.Drawing.Color]::FromArgb(128, 141, 158)
-            Accent      = [System.Drawing.Color]::FromArgb(108, 99, 255)
-            Accent2     = [System.Drawing.Color]::FromArgb(38, 160, 205)
-            AccentSoft  = [System.Drawing.Color]::FromArgb(232, 230, 255)
-            Green       = [System.Drawing.Color]::FromArgb(23, 142, 86)
-            GreenSoft   = [System.Drawing.Color]::FromArgb(222, 242, 232)
-            Amber       = [System.Drawing.Color]::FromArgb(168, 116, 22)
-            AmberSoft   = [System.Drawing.Color]::FromArgb(250, 240, 220)
-            Red         = [System.Drawing.Color]::FromArgb(200, 58, 79)
-            RedSoft     = [System.Drawing.Color]::FromArgb(250, 228, 232)
-            White       = [System.Drawing.Color]::White
-            NavSelected = [System.Drawing.Color]::FromArgb(226, 233, 244)
-            NavHover    = [System.Drawing.Color]::FromArgb(238, 243, 250)
-            Pressed     = [System.Drawing.Color]::FromArgb(222, 229, 240)
-            ToggleOff   = [System.Drawing.Color]::FromArgb(201, 210, 223)
-            SparkFill   = [System.Drawing.Color]::FromArgb(214, 210, 254)
-            ComboSelection = [System.Drawing.Color]::FromArgb(226, 233, 244)
-            DisabledFill   = [System.Drawing.Color]::FromArgb(232, 237, 243)
-            DisabledText   = [System.Drawing.Color]::FromArgb(145, 156, 170)
-            DangerHover    = [System.Drawing.Color]::FromArgb(248, 218, 223)
-            DangerPressed  = [System.Drawing.Color]::FromArgb(242, 206, 213)
-            DangerOutline  = [System.Drawing.Color]::FromArgb(228, 180, 190)
+$script:StudioThemeCatalog = $null
+function Get-StudioThemeCatalog {
+    if ($null -ne $script:StudioThemeCatalog) { return $script:StudioThemeCatalog }
+    $script:StudioThemeCatalog = [ordered]@{
+        'Aurora' = @{
+            Key         = 'Aurora'
+            Label       = 'Aurora (dark)'
+            Description = 'Violet twilight with cool cyan highlights.'
+            Dark        = $true
+            Palette     = @{
+                Bg          = [System.Drawing.Color]::FromArgb(8, 12, 18)
+                Sidebar     = [System.Drawing.Color]::FromArgb(11, 16, 24)
+                Card        = [System.Drawing.Color]::FromArgb(18, 25, 36)
+                CardAlt     = [System.Drawing.Color]::FromArgb(14, 20, 30)
+                CardHover   = [System.Drawing.Color]::FromArgb(26, 36, 51)
+                Border      = [System.Drawing.Color]::FromArgb(34, 45, 61)
+                BorderSoft  = [System.Drawing.Color]::FromArgb(26, 35, 48)
+                Text        = [System.Drawing.Color]::FromArgb(238, 244, 252)
+                Muted       = [System.Drawing.Color]::FromArgb(130, 145, 165)
+                Subtle      = [System.Drawing.Color]::FromArgb(96, 112, 133)
+                Accent      = [System.Drawing.Color]::FromArgb(108, 99, 255)
+                Accent2     = [System.Drawing.Color]::FromArgb(51, 181, 229)
+                AccentSoft  = [System.Drawing.Color]::FromArgb(31, 31, 61)
+                AccentHover = [System.Drawing.Color]::FromArgb(124, 117, 255)
+                AccentPressed = [System.Drawing.Color]::FromArgb(84, 76, 214)
+                Green       = [System.Drawing.Color]::FromArgb(83, 221, 151)
+                GreenSoft   = [System.Drawing.Color]::FromArgb(25, 51, 42)
+                Amber       = [System.Drawing.Color]::FromArgb(244, 184, 96)
+                AmberSoft   = [System.Drawing.Color]::FromArgb(56, 43, 25)
+                Red         = [System.Drawing.Color]::FromArgb(255, 107, 129)
+                RedSoft     = [System.Drawing.Color]::FromArgb(61, 29, 38)
+                White       = [System.Drawing.Color]::White
+                AccentText  = [System.Drawing.Color]::FromArgb(11, 10, 26)
+                NavSelected = [System.Drawing.Color]::FromArgb(27, 38, 54)
+                NavHover    = [System.Drawing.Color]::FromArgb(20, 29, 42)
+                Pressed     = [System.Drawing.Color]::FromArgb(22, 30, 43)
+                ToggleOff   = [System.Drawing.Color]::FromArgb(45, 55, 70)
+                SparkFill   = [System.Drawing.Color]::FromArgb(55, 45, 150)
+                ComboSelection = [System.Drawing.Color]::FromArgb(40, 52, 72)
+                DisabledFill   = [System.Drawing.Color]::FromArgb(44, 52, 65)
+                DisabledText   = [System.Drawing.Color]::FromArgb(131, 143, 160)
+                DangerHover    = [System.Drawing.Color]::FromArgb(84, 36, 49)
+                DangerPressed  = [System.Drawing.Color]::FromArgb(70, 30, 41)
+                DangerOutline  = [System.Drawing.Color]::FromArgb(92, 48, 62)
+            }
+        }
+        'Daylight' = @{
+            Key         = 'Daylight'
+            Label       = 'Daylight (light)'
+            Description = 'Crisp white with a calm blue accent.'
+            Dark        = $false
+            Palette     = @{
+                Bg          = [System.Drawing.Color]::FromArgb(244, 247, 252)
+                Sidebar     = [System.Drawing.Color]::FromArgb(236, 240, 248)
+                Card        = [System.Drawing.Color]::FromArgb(255, 255, 255)
+                CardAlt     = [System.Drawing.Color]::FromArgb(246, 249, 253)
+                CardHover   = [System.Drawing.Color]::FromArgb(232, 238, 249)
+                Border      = [System.Drawing.Color]::FromArgb(205, 215, 230)
+                BorderSoft  = [System.Drawing.Color]::FromArgb(221, 228, 239)
+                Text        = [System.Drawing.Color]::FromArgb(23, 31, 44)
+                Muted       = [System.Drawing.Color]::FromArgb(84, 98, 117)
+                Subtle      = [System.Drawing.Color]::FromArgb(121, 134, 152)
+                Accent      = [System.Drawing.Color]::FromArgb(92, 80, 240)
+                Accent2     = [System.Drawing.Color]::FromArgb(18, 148, 196)
+                AccentSoft  = [System.Drawing.Color]::FromArgb(235, 232, 255)
+                AccentHover = [System.Drawing.Color]::FromArgb(108, 96, 250)
+                AccentPressed = [System.Drawing.Color]::FromArgb(96, 84, 222)
+                Green       = [System.Drawing.Color]::FromArgb(18, 131, 75)
+                GreenSoft   = [System.Drawing.Color]::FromArgb(220, 243, 230)
+                Amber       = [System.Drawing.Color]::FromArgb(155, 104, 10)
+                AmberSoft   = [System.Drawing.Color]::FromArgb(251, 240, 216)
+                Red         = [System.Drawing.Color]::FromArgb(191, 48, 70)
+                RedSoft     = [System.Drawing.Color]::FromArgb(251, 228, 232)
+                White       = [System.Drawing.Color]::White
+                AccentText  = [System.Drawing.Color]::FromArgb(9, 8, 24)
+                NavSelected = [System.Drawing.Color]::FromArgb(225, 233, 245)
+                NavHover    = [System.Drawing.Color]::FromArgb(239, 244, 251)
+                Pressed     = [System.Drawing.Color]::FromArgb(218, 227, 241)
+                ToggleOff   = [System.Drawing.Color]::FromArgb(198, 208, 222)
+                SparkFill   = [System.Drawing.Color]::FromArgb(215, 211, 255)
+                ComboSelection = [System.Drawing.Color]::FromArgb(225, 233, 245)
+                DisabledFill   = [System.Drawing.Color]::FromArgb(233, 238, 245)
+                DisabledText   = [System.Drawing.Color]::FromArgb(106, 118, 134)
+                DangerHover    = [System.Drawing.Color]::FromArgb(248, 217, 223)
+                DangerPressed  = [System.Drawing.Color]::FromArgb(242, 204, 212)
+                DangerOutline  = [System.Drawing.Color]::FromArgb(227, 177, 189)
+            }
+        }
+        'Midnight' = @{
+            Key         = 'Midnight'
+            Label       = 'Midnight (dark)'
+            Description = 'Deep navy with electric blue and cyan.'
+            Dark        = $true
+            Palette     = @{
+                Bg          = [System.Drawing.Color]::FromArgb(6, 12, 24)
+                Sidebar     = [System.Drawing.Color]::FromArgb(9, 17, 32)
+                Card        = [System.Drawing.Color]::FromArgb(14, 25, 45)
+                CardAlt     = [System.Drawing.Color]::FromArgb(10, 19, 35)
+                CardHover   = [System.Drawing.Color]::FromArgb(21, 37, 64)
+                Border      = [System.Drawing.Color]::FromArgb(33, 54, 86)
+                BorderSoft  = [System.Drawing.Color]::FromArgb(24, 41, 68)
+                Text        = [System.Drawing.Color]::FromArgb(232, 241, 255)
+                Muted       = [System.Drawing.Color]::FromArgb(132, 151, 181)
+                Subtle      = [System.Drawing.Color]::FromArgb(95, 115, 148)
+                Accent      = [System.Drawing.Color]::FromArgb(60, 132, 246)
+                Accent2     = [System.Drawing.Color]::FromArgb(32, 207, 236)
+                AccentSoft  = [System.Drawing.Color]::FromArgb(20, 41, 76)
+                AccentHover = [System.Drawing.Color]::FromArgb(82, 149, 255)
+                AccentPressed = [System.Drawing.Color]::FromArgb(36, 109, 219)
+                Green       = [System.Drawing.Color]::FromArgb(72, 222, 166)
+                GreenSoft   = [System.Drawing.Color]::FromArgb(19, 54, 47)
+                Amber       = [System.Drawing.Color]::FromArgb(250, 189, 89)
+                AmberSoft   = [System.Drawing.Color]::FromArgb(58, 44, 22)
+                Red         = [System.Drawing.Color]::FromArgb(255, 107, 129)
+                RedSoft     = [System.Drawing.Color]::FromArgb(64, 29, 41)
+                White       = [System.Drawing.Color]::White
+                AccentText  = [System.Drawing.Color]::FromArgb(6, 13, 25)
+                NavSelected = [System.Drawing.Color]::FromArgb(23, 43, 74)
+                NavHover    = [System.Drawing.Color]::FromArgb(15, 29, 53)
+                Pressed     = [System.Drawing.Color]::FromArgb(19, 35, 61)
+                ToggleOff   = [System.Drawing.Color]::FromArgb(42, 60, 86)
+                SparkFill   = [System.Drawing.Color]::FromArgb(24, 58, 123)
+                ComboSelection = [System.Drawing.Color]::FromArgb(33, 56, 94)
+                DisabledFill   = [System.Drawing.Color]::FromArgb(39, 52, 70)
+                DisabledText   = [System.Drawing.Color]::FromArgb(125, 141, 164)
+                DangerHover    = [System.Drawing.Color]::FromArgb(86, 36, 50)
+                DangerPressed  = [System.Drawing.Color]::FromArgb(72, 30, 42)
+                DangerOutline  = [System.Drawing.Color]::FromArgb(94, 48, 63)
+            }
+        }
+        'Forest' = @{
+            Key         = 'Forest'
+            Label       = 'Forest (dark)'
+            Description = 'Mossy charcoal with fresh green light.'
+            Dark        = $true
+            Palette     = @{
+                Bg          = [System.Drawing.Color]::FromArgb(6, 15, 13)
+                Sidebar     = [System.Drawing.Color]::FromArgb(9, 22, 19)
+                Card        = [System.Drawing.Color]::FromArgb(14, 31, 26)
+                CardAlt     = [System.Drawing.Color]::FromArgb(10, 24, 21)
+                CardHover   = [System.Drawing.Color]::FromArgb(22, 45, 38)
+                Border      = [System.Drawing.Color]::FromArgb(34, 64, 54)
+                BorderSoft  = [System.Drawing.Color]::FromArgb(24, 50, 42)
+                Text        = [System.Drawing.Color]::FromArgb(231, 246, 238)
+                Muted       = [System.Drawing.Color]::FromArgb(128, 154, 143)
+                Subtle      = [System.Drawing.Color]::FromArgb(93, 119, 107)
+                Accent      = [System.Drawing.Color]::FromArgb(45, 205, 112)
+                Accent2     = [System.Drawing.Color]::FromArgb(24, 190, 157)
+                AccentSoft  = [System.Drawing.Color]::FromArgb(18, 57, 42)
+                AccentHover = [System.Drawing.Color]::FromArgb(63, 220, 132)
+                AccentPressed = [System.Drawing.Color]::FromArgb(32, 163, 90)
+                Green       = [System.Drawing.Color]::FromArgb(94, 230, 158)
+                GreenSoft   = [System.Drawing.Color]::FromArgb(23, 61, 43)
+                Amber       = [System.Drawing.Color]::FromArgb(245, 190, 96)
+                AmberSoft   = [System.Drawing.Color]::FromArgb(56, 44, 24)
+                Red         = [System.Drawing.Color]::FromArgb(255, 115, 125)
+                RedSoft     = [System.Drawing.Color]::FromArgb(64, 31, 36)
+                White       = [System.Drawing.Color]::White
+                AccentText  = [System.Drawing.Color]::FromArgb(4, 20, 11)
+                NavSelected = [System.Drawing.Color]::FromArgb(24, 54, 42)
+                NavHover    = [System.Drawing.Color]::FromArgb(16, 40, 32)
+                Pressed     = [System.Drawing.Color]::FromArgb(20, 46, 36)
+                ToggleOff   = [System.Drawing.Color]::FromArgb(44, 68, 57)
+                SparkFill   = [System.Drawing.Color]::FromArgb(24, 83, 57)
+                ComboSelection = [System.Drawing.Color]::FromArgb(32, 66, 51)
+                DisabledFill   = [System.Drawing.Color]::FromArgb(37, 55, 46)
+                DisabledText   = [System.Drawing.Color]::FromArgb(123, 143, 131)
+                DangerHover    = [System.Drawing.Color]::FromArgb(86, 38, 44)
+                DangerPressed  = [System.Drawing.Color]::FromArgb(72, 31, 37)
+                DangerOutline  = [System.Drawing.Color]::FromArgb(94, 50, 56)
+            }
+        }
+        'Ember' = @{
+            Key         = 'Ember'
+            Label       = 'Ember (dark)'
+            Description = 'Warm charcoal with amber and coral.'
+            Dark        = $true
+            Palette     = @{
+                Bg          = [System.Drawing.Color]::FromArgb(17, 12, 10)
+                Sidebar     = [System.Drawing.Color]::FromArgb(24, 16, 13)
+                Card        = [System.Drawing.Color]::FromArgb(33, 23, 19)
+                CardAlt     = [System.Drawing.Color]::FromArgb(27, 18, 15)
+                CardHover   = [System.Drawing.Color]::FromArgb(48, 33, 26)
+                Border      = [System.Drawing.Color]::FromArgb(64, 44, 34)
+                BorderSoft  = [System.Drawing.Color]::FromArgb(50, 35, 27)
+                Text        = [System.Drawing.Color]::FromArgb(255, 245, 237)
+                Muted       = [System.Drawing.Color]::FromArgb(173, 146, 130)
+                Subtle      = [System.Drawing.Color]::FromArgb(126, 104, 91)
+                Accent      = [System.Drawing.Color]::FromArgb(255, 120, 66)
+                Accent2     = [System.Drawing.Color]::FromArgb(255, 186, 79)
+                AccentSoft  = [System.Drawing.Color]::FromArgb(65, 34, 23)
+                AccentHover = [System.Drawing.Color]::FromArgb(255, 143, 97)
+                AccentPressed = [System.Drawing.Color]::FromArgb(218, 91, 41)
+                Green       = [System.Drawing.Color]::FromArgb(103, 220, 156)
+                GreenSoft   = [System.Drawing.Color]::FromArgb(29, 58, 43)
+                Amber       = [System.Drawing.Color]::FromArgb(255, 192, 92)
+                AmberSoft   = [System.Drawing.Color]::FromArgb(66, 48, 23)
+                Red         = [System.Drawing.Color]::FromArgb(255, 106, 118)
+                RedSoft     = [System.Drawing.Color]::FromArgb(69, 29, 35)
+                White       = [System.Drawing.Color]::White
+                AccentText  = [System.Drawing.Color]::FromArgb(26, 12, 7)
+                NavSelected = [System.Drawing.Color]::FromArgb(55, 36, 28)
+                NavHover    = [System.Drawing.Color]::FromArgb(34, 24, 19)
+                Pressed     = [System.Drawing.Color]::FromArgb(43, 29, 23)
+                ToggleOff   = [System.Drawing.Color]::FromArgb(72, 52, 42)
+                SparkFill   = [System.Drawing.Color]::FromArgb(92, 45, 26)
+                ComboSelection = [System.Drawing.Color]::FromArgb(64, 43, 33)
+                DisabledFill   = [System.Drawing.Color]::FromArgb(55, 43, 36)
+                DisabledText   = [System.Drawing.Color]::FromArgb(150, 127, 114)
+                DangerHover    = [System.Drawing.Color]::FromArgb(90, 39, 47)
+                DangerPressed  = [System.Drawing.Color]::FromArgb(75, 31, 39)
+                DangerOutline  = [System.Drawing.Color]::FromArgb(99, 52, 61)
+            }
+        }
+        'Neon' = @{
+            Key         = 'Neon'
+            Label       = 'Neon (dark)'
+            Description = 'Inky black with magenta and cyan.'
+            Dark        = $true
+            Palette     = @{
+                Bg          = [System.Drawing.Color]::FromArgb(8, 6, 16)
+                Sidebar     = [System.Drawing.Color]::FromArgb(12, 9, 22)
+                Card        = [System.Drawing.Color]::FromArgb(20, 15, 35)
+                CardAlt     = [System.Drawing.Color]::FromArgb(15, 11, 28)
+                CardHover   = [System.Drawing.Color]::FromArgb(32, 23, 53)
+                Border      = [System.Drawing.Color]::FromArgb(49, 35, 76)
+                BorderSoft  = [System.Drawing.Color]::FromArgb(37, 27, 59)
+                Text        = [System.Drawing.Color]::FromArgb(246, 241, 255)
+                Muted       = [System.Drawing.Color]::FromArgb(160, 143, 189)
+                Subtle      = [System.Drawing.Color]::FromArgb(117, 101, 145)
+                Accent      = [System.Drawing.Color]::FromArgb(255, 64, 160)
+                Accent2     = [System.Drawing.Color]::FromArgb(38, 231, 255)
+                AccentSoft  = [System.Drawing.Color]::FromArgb(56, 20, 48)
+                AccentHover = [System.Drawing.Color]::FromArgb(255, 91, 179)
+                AccentPressed = [System.Drawing.Color]::FromArgb(214, 36, 124)
+                Green       = [System.Drawing.Color]::FromArgb(99, 255, 179)
+                GreenSoft   = [System.Drawing.Color]::FromArgb(17, 59, 44)
+                Amber       = [System.Drawing.Color]::FromArgb(255, 214, 91)
+                AmberSoft   = [System.Drawing.Color]::FromArgb(66, 51, 18)
+                Red         = [System.Drawing.Color]::FromArgb(255, 92, 119)
+                RedSoft     = [System.Drawing.Color]::FromArgb(68, 23, 38)
+                White       = [System.Drawing.Color]::White
+                AccentText  = [System.Drawing.Color]::FromArgb(26, 6, 16)
+                NavSelected = [System.Drawing.Color]::FromArgb(41, 22, 56)
+                NavHover    = [System.Drawing.Color]::FromArgb(24, 17, 42)
+                Pressed     = [System.Drawing.Color]::FromArgb(31, 21, 49)
+                ToggleOff   = [System.Drawing.Color]::FromArgb(61, 44, 83)
+                SparkFill   = [System.Drawing.Color]::FromArgb(79, 21, 74)
+                ComboSelection = [System.Drawing.Color]::FromArgb(56, 30, 73)
+                DisabledFill   = [System.Drawing.Color]::FromArgb(46, 34, 62)
+                DisabledText   = [System.Drawing.Color]::FromArgb(138, 121, 161)
+                DangerHover    = [System.Drawing.Color]::FromArgb(90, 32, 55)
+                DangerPressed  = [System.Drawing.Color]::FromArgb(75, 25, 46)
+                DangerOutline  = [System.Drawing.Color]::FromArgb(98, 42, 67)
+            }
+        }
+        'Sakura' = @{
+            Key         = 'Sakura'
+            Label       = 'Sakura (light)'
+            Description = 'Soft blush with rose and violet.'
+            Dark        = $false
+            Palette     = @{
+                Bg          = [System.Drawing.Color]::FromArgb(253, 246, 249)
+                Sidebar     = [System.Drawing.Color]::FromArgb(249, 235, 242)
+                Card        = [System.Drawing.Color]::FromArgb(255, 255, 255)
+                CardAlt     = [System.Drawing.Color]::FromArgb(255, 248, 251)
+                CardHover   = [System.Drawing.Color]::FromArgb(250, 234, 242)
+                Border      = [System.Drawing.Color]::FromArgb(235, 205, 219)
+                BorderSoft  = [System.Drawing.Color]::FromArgb(244, 221, 231)
+                Text        = [System.Drawing.Color]::FromArgb(48, 30, 40)
+                Muted       = [System.Drawing.Color]::FromArgb(118, 90, 104)
+                Subtle      = [System.Drawing.Color]::FromArgb(153, 123, 138)
+                Accent      = [System.Drawing.Color]::FromArgb(211, 69, 137)
+                Accent2     = [System.Drawing.Color]::FromArgb(138, 89, 244)
+                AccentSoft  = [System.Drawing.Color]::FromArgb(252, 229, 240)
+                AccentHover = [System.Drawing.Color]::FromArgb(224, 86, 152)
+                AccentPressed = [System.Drawing.Color]::FromArgb(177, 47, 109)
+                Green       = [System.Drawing.Color]::FromArgb(22, 139, 89)
+                GreenSoft   = [System.Drawing.Color]::FromArgb(225, 245, 234)
+                Amber       = [System.Drawing.Color]::FromArgb(168, 108, 16)
+                AmberSoft   = [System.Drawing.Color]::FromArgb(252, 241, 219)
+                Red         = [System.Drawing.Color]::FromArgb(197, 50, 77)
+                RedSoft     = [System.Drawing.Color]::FromArgb(252, 228, 233)
+                White       = [System.Drawing.Color]::White
+                AccentText  = [System.Drawing.Color]::FromArgb(21, 7, 14)
+                NavSelected = [System.Drawing.Color]::FromArgb(250, 227, 238)
+                NavHover    = [System.Drawing.Color]::FromArgb(253, 240, 246)
+                Pressed     = [System.Drawing.Color]::FromArgb(247, 218, 230)
+                ToggleOff   = [System.Drawing.Color]::FromArgb(225, 198, 212)
+                SparkFill   = [System.Drawing.Color]::FromArgb(247, 203, 224)
+                ComboSelection = [System.Drawing.Color]::FromArgb(250, 227, 238)
+                DisabledFill   = [System.Drawing.Color]::FromArgb(244, 232, 238)
+                DisabledText   = [System.Drawing.Color]::FromArgb(124, 99, 112)
+                DangerHover    = [System.Drawing.Color]::FromArgb(248, 216, 224)
+                DangerPressed  = [System.Drawing.Color]::FromArgb(242, 203, 213)
+                DangerOutline  = [System.Drawing.Color]::FromArgb(227, 176, 189)
+            }
+        }
+        'Paper' = @{
+            Key         = 'Paper'
+            Label       = 'Paper (light)'
+            Description = 'Warm paper with teal ink and amber.'
+            Dark        = $false
+            Palette     = @{
+                Bg          = [System.Drawing.Color]::FromArgb(246, 243, 236)
+                Sidebar     = [System.Drawing.Color]::FromArgb(239, 235, 226)
+                Card        = [System.Drawing.Color]::FromArgb(255, 253, 249)
+                CardAlt     = [System.Drawing.Color]::FromArgb(249, 246, 239)
+                CardHover   = [System.Drawing.Color]::FromArgb(240, 235, 224)
+                Border      = [System.Drawing.Color]::FromArgb(217, 209, 195)
+                BorderSoft  = [System.Drawing.Color]::FromArgb(230, 223, 212)
+                Text        = [System.Drawing.Color]::FromArgb(45, 42, 36)
+                Muted       = [System.Drawing.Color]::FromArgb(106, 99, 87)
+                Subtle      = [System.Drawing.Color]::FromArgb(141, 133, 119)
+                Accent      = [System.Drawing.Color]::FromArgb(35, 108, 118)
+                Accent2     = [System.Drawing.Color]::FromArgb(176, 103, 43)
+                AccentSoft  = [System.Drawing.Color]::FromArgb(226, 240, 239)
+                AccentHover = [System.Drawing.Color]::FromArgb(51, 130, 141)
+                AccentPressed = [System.Drawing.Color]::FromArgb(26, 85, 93)
+                Green       = [System.Drawing.Color]::FromArgb(30, 126, 80)
+                GreenSoft   = [System.Drawing.Color]::FromArgb(224, 242, 232)
+                Amber       = [System.Drawing.Color]::FromArgb(164, 105, 18)
+                AmberSoft   = [System.Drawing.Color]::FromArgb(247, 237, 217)
+                Red         = [System.Drawing.Color]::FromArgb(188, 53, 68)
+                RedSoft     = [System.Drawing.Color]::FromArgb(248, 227, 230)
+                White       = [System.Drawing.Color]::White
+                AccentText  = [System.Drawing.Color]::FromArgb(254, 254, 254)
+                NavSelected = [System.Drawing.Color]::FromArgb(231, 236, 229)
+                NavHover    = [System.Drawing.Color]::FromArgb(244, 240, 232)
+                Pressed     = [System.Drawing.Color]::FromArgb(225, 231, 223)
+                ToggleOff   = [System.Drawing.Color]::FromArgb(205, 198, 184)
+                SparkFill   = [System.Drawing.Color]::FromArgb(205, 226, 227)
+                ComboSelection = [System.Drawing.Color]::FromArgb(231, 236, 229)
+                DisabledFill   = [System.Drawing.Color]::FromArgb(237, 233, 224)
+                DisabledText   = [System.Drawing.Color]::FromArgb(114, 106, 93)
+                DangerHover    = [System.Drawing.Color]::FromArgb(247, 215, 220)
+                DangerPressed  = [System.Drawing.Color]::FromArgb(241, 202, 209)
+                DangerOutline  = [System.Drawing.Color]::FromArgb(225, 175, 185)
+            }
+        }
+        'Synthwave' = @{
+            Key         = 'Synthwave'
+            Label       = 'Synthwave (dark)'
+            Description = 'Retro purple night with hot pink sunsets.'
+            Dark        = $true
+            Palette     = @{
+                Bg          = [System.Drawing.Color]::FromArgb(16, 10, 28)
+                Sidebar     = [System.Drawing.Color]::FromArgb(21, 13, 36)
+                Card        = [System.Drawing.Color]::FromArgb(30, 19, 50)
+                CardAlt     = [System.Drawing.Color]::FromArgb(24, 15, 41)
+                CardHover   = [System.Drawing.Color]::FromArgb(43, 28, 70)
+                Border      = [System.Drawing.Color]::FromArgb(70, 45, 108)
+                BorderSoft  = [System.Drawing.Color]::FromArgb(52, 33, 82)
+                Text        = [System.Drawing.Color]::FromArgb(245, 238, 255)
+                Muted       = [System.Drawing.Color]::FromArgb(165, 148, 196)
+                Subtle      = [System.Drawing.Color]::FromArgb(122, 106, 152)
+                Accent      = [System.Drawing.Color]::FromArgb(255, 45, 170)
+                Accent2     = [System.Drawing.Color]::FromArgb(255, 130, 61)
+                AccentSoft  = [System.Drawing.Color]::FromArgb(66, 22, 58)
+                AccentHover = [System.Drawing.Color]::FromArgb(255, 78, 190)
+                AccentPressed = [System.Drawing.Color]::FromArgb(212, 28, 136)
+                Green       = [System.Drawing.Color]::FromArgb(120, 235, 172)
+                GreenSoft   = [System.Drawing.Color]::FromArgb(23, 63, 46)
+                Amber       = [System.Drawing.Color]::FromArgb(255, 205, 94)
+                AmberSoft   = [System.Drawing.Color]::FromArgb(66, 51, 21)
+                Red         = [System.Drawing.Color]::FromArgb(255, 96, 122)
+                RedSoft     = [System.Drawing.Color]::FromArgb(70, 24, 38)
+                White       = [System.Drawing.Color]::White
+                AccentText  = [System.Drawing.Color]::FromArgb(26, 4, 17)
+                NavSelected = [System.Drawing.Color]::FromArgb(52, 28, 72)
+                NavHover    = [System.Drawing.Color]::FromArgb(32, 19, 52)
+                Pressed     = [System.Drawing.Color]::FromArgb(42, 23, 58)
+                ToggleOff   = [System.Drawing.Color]::FromArgb(74, 56, 96)
+                SparkFill   = [System.Drawing.Color]::FromArgb(96, 26, 88)
+                ComboSelection = [System.Drawing.Color]::FromArgb(64, 36, 86)
+                DisabledFill   = [System.Drawing.Color]::FromArgb(50, 40, 66)
+                DisabledText   = [System.Drawing.Color]::FromArgb(140, 126, 162)
+                DangerHover    = [System.Drawing.Color]::FromArgb(92, 32, 52)
+                DangerPressed  = [System.Drawing.Color]::FromArgb(76, 26, 44)
+                DangerOutline  = [System.Drawing.Color]::FromArgb(102, 44, 62)
+            }
+        }
+        'Voltage' = @{
+            Key         = 'Voltage'
+            Label       = 'Voltage (dark)'
+            Description = 'Inky green-black with electric lime.'
+            Dark        = $true
+            Palette     = @{
+                Bg          = [System.Drawing.Color]::FromArgb(8, 12, 8)
+                Sidebar     = [System.Drawing.Color]::FromArgb(11, 16, 11)
+                Card        = [System.Drawing.Color]::FromArgb(16, 24, 16)
+                CardAlt     = [System.Drawing.Color]::FromArgb(12, 19, 12)
+                CardHover   = [System.Drawing.Color]::FromArgb(24, 35, 23)
+                Border      = [System.Drawing.Color]::FromArgb(38, 56, 36)
+                BorderSoft  = [System.Drawing.Color]::FromArgb(28, 42, 27)
+                Text        = [System.Drawing.Color]::FromArgb(236, 248, 234)
+                Muted       = [System.Drawing.Color]::FromArgb(135, 158, 131)
+                Subtle      = [System.Drawing.Color]::FromArgb(99, 120, 96)
+                Accent      = [System.Drawing.Color]::FromArgb(140, 255, 60)
+                Accent2     = [System.Drawing.Color]::FromArgb(0, 230, 160)
+                AccentSoft  = [System.Drawing.Color]::FromArgb(26, 60, 24)
+                AccentHover = [System.Drawing.Color]::FromArgb(168, 255, 96)
+                AccentPressed = [System.Drawing.Color]::FromArgb(108, 210, 40)
+                Green       = [System.Drawing.Color]::FromArgb(108, 240, 140)
+                GreenSoft   = [System.Drawing.Color]::FromArgb(23, 60, 32)
+                Amber       = [System.Drawing.Color]::FromArgb(250, 200, 90)
+                AmberSoft   = [System.Drawing.Color]::FromArgb(60, 48, 22)
+                Red         = [System.Drawing.Color]::FromArgb(255, 105, 115)
+                RedSoft     = [System.Drawing.Color]::FromArgb(66, 27, 32)
+                White       = [System.Drawing.Color]::White
+                AccentText  = [System.Drawing.Color]::FromArgb(14, 26, 6)
+                NavSelected = [System.Drawing.Color]::FromArgb(28, 46, 26)
+                NavHover    = [System.Drawing.Color]::FromArgb(18, 31, 17)
+                Pressed     = [System.Drawing.Color]::FromArgb(23, 39, 22)
+                ToggleOff   = [System.Drawing.Color]::FromArgb(48, 62, 45)
+                SparkFill   = [System.Drawing.Color]::FromArgb(36, 90, 40)
+                ComboSelection = [System.Drawing.Color]::FromArgb(38, 58, 36)
+                DisabledFill   = [System.Drawing.Color]::FromArgb(40, 50, 39)
+                DisabledText   = [System.Drawing.Color]::FromArgb(128, 145, 125)
+                DangerHover    = [System.Drawing.Color]::FromArgb(88, 36, 40)
+                DangerPressed  = [System.Drawing.Color]::FromArgb(74, 30, 33)
+                DangerOutline  = [System.Drawing.Color]::FromArgb(96, 46, 50)
+            }
+        }
+        'Frostbite' = @{
+            Key         = 'Frostbite'
+            Label       = 'Frostbite (dark)'
+            Description = 'Steel blue night with an ice-cyan glow.'
+            Dark        = $true
+            Palette     = @{
+                Bg          = [System.Drawing.Color]::FromArgb(7, 13, 20)
+                Sidebar     = [System.Drawing.Color]::FromArgb(10, 17, 26)
+                Card        = [System.Drawing.Color]::FromArgb(15, 25, 37)
+                CardAlt     = [System.Drawing.Color]::FromArgb(11, 20, 30)
+                CardHover   = [System.Drawing.Color]::FromArgb(22, 36, 52)
+                Border      = [System.Drawing.Color]::FromArgb(36, 56, 78)
+                BorderSoft  = [System.Drawing.Color]::FromArgb(27, 42, 60)
+                Text        = [System.Drawing.Color]::FromArgb(230, 244, 255)
+                Muted       = [System.Drawing.Color]::FromArgb(134, 158, 182)
+                Subtle      = [System.Drawing.Color]::FromArgb(97, 120, 145)
+                Accent      = [System.Drawing.Color]::FromArgb(56, 224, 255)
+                Accent2     = [System.Drawing.Color]::FromArgb(130, 160, 255)
+                AccentSoft  = [System.Drawing.Color]::FromArgb(18, 52, 70)
+                AccentHover = [System.Drawing.Color]::FromArgb(92, 234, 255)
+                AccentPressed = [System.Drawing.Color]::FromArgb(38, 186, 216)
+                Green       = [System.Drawing.Color]::FromArgb(96, 232, 190)
+                GreenSoft   = [System.Drawing.Color]::FromArgb(19, 58, 50)
+                Amber       = [System.Drawing.Color]::FromArgb(252, 200, 110)
+                AmberSoft   = [System.Drawing.Color]::FromArgb(60, 47, 24)
+                Red         = [System.Drawing.Color]::FromArgb(255, 110, 130)
+                RedSoft     = [System.Drawing.Color]::FromArgb(66, 28, 37)
+                White       = [System.Drawing.Color]::White
+                AccentText  = [System.Drawing.Color]::FromArgb(6, 22, 26)
+                NavSelected = [System.Drawing.Color]::FromArgb(25, 44, 63)
+                NavHover    = [System.Drawing.Color]::FromArgb(16, 30, 45)
+                Pressed     = [System.Drawing.Color]::FromArgb(20, 36, 52)
+                ToggleOff   = [System.Drawing.Color]::FromArgb(46, 64, 84)
+                SparkFill   = [System.Drawing.Color]::FromArgb(22, 70, 96)
+                ComboSelection = [System.Drawing.Color]::FromArgb(35, 57, 80)
+                DisabledFill   = [System.Drawing.Color]::FromArgb(40, 53, 67)
+                DisabledText   = [System.Drawing.Color]::FromArgb(126, 144, 164)
+                DangerHover    = [System.Drawing.Color]::FromArgb(88, 36, 48)
+                DangerPressed  = [System.Drawing.Color]::FromArgb(73, 30, 40)
+                DangerOutline  = [System.Drawing.Color]::FromArgb(96, 46, 58)
+            }
+        }
+        'Magma' = @{
+            Key         = 'Magma'
+            Label       = 'Magma (dark)'
+            Description = 'Charcoal ash with lava orange and gold.'
+            Dark        = $true
+            Palette     = @{
+                Bg          = [System.Drawing.Color]::FromArgb(18, 11, 10)
+                Sidebar     = [System.Drawing.Color]::FromArgb(24, 14, 13)
+                Card        = [System.Drawing.Color]::FromArgb(34, 20, 18)
+                CardAlt     = [System.Drawing.Color]::FromArgb(28, 17, 15)
+                CardHover   = [System.Drawing.Color]::FromArgb(50, 29, 26)
+                Border      = [System.Drawing.Color]::FromArgb(72, 42, 37)
+                BorderSoft  = [System.Drawing.Color]::FromArgb(54, 32, 28)
+                Text        = [System.Drawing.Color]::FromArgb(255, 240, 235)
+                Muted       = [System.Drawing.Color]::FromArgb(186, 148, 140)
+                Subtle      = [System.Drawing.Color]::FromArgb(138, 107, 100)
+                Accent      = [System.Drawing.Color]::FromArgb(255, 82, 40)
+                Accent2     = [System.Drawing.Color]::FromArgb(255, 168, 42)
+                AccentSoft  = [System.Drawing.Color]::FromArgb(74, 30, 22)
+                AccentHover = [System.Drawing.Color]::FromArgb(255, 110, 70)
+                AccentPressed = [System.Drawing.Color]::FromArgb(214, 62, 26)
+                Green       = [System.Drawing.Color]::FromArgb(110, 225, 160)
+                GreenSoft   = [System.Drawing.Color]::FromArgb(25, 60, 42)
+                Amber       = [System.Drawing.Color]::FromArgb(255, 200, 96)
+                AmberSoft   = [System.Drawing.Color]::FromArgb(68, 50, 22)
+                Red         = [System.Drawing.Color]::FromArgb(255, 100, 110)
+                RedSoft     = [System.Drawing.Color]::FromArgb(72, 26, 32)
+                White       = [System.Drawing.Color]::White
+                AccentText  = [System.Drawing.Color]::FromArgb(26, 8, 4)
+                NavSelected = [System.Drawing.Color]::FromArgb(58, 30, 26)
+                NavHover    = [System.Drawing.Color]::FromArgb(36, 21, 18)
+                Pressed     = [System.Drawing.Color]::FromArgb(45, 25, 22)
+                ToggleOff   = [System.Drawing.Color]::FromArgb(78, 54, 48)
+                SparkFill   = [System.Drawing.Color]::FromArgb(104, 42, 28)
+                ComboSelection = [System.Drawing.Color]::FromArgb(68, 38, 32)
+                DisabledFill   = [System.Drawing.Color]::FromArgb(58, 45, 42)
+                DisabledText   = [System.Drawing.Color]::FromArgb(158, 133, 127)
+                DangerHover    = [System.Drawing.Color]::FromArgb(94, 36, 42)
+                DangerPressed  = [System.Drawing.Color]::FromArgb(78, 30, 35)
+                DangerOutline  = [System.Drawing.Color]::FromArgb(104, 46, 52)
+            }
+        }
+        'Aqua' = @{
+            Key         = 'Aqua'
+            Label       = 'Aqua (dark)'
+            Description = 'Deep ocean teal with aqua and violet.'
+            Dark        = $true
+            Palette     = @{
+                Bg          = [System.Drawing.Color]::FromArgb(6, 16, 18)
+                Sidebar     = [System.Drawing.Color]::FromArgb(9, 21, 23)
+                Card        = [System.Drawing.Color]::FromArgb(13, 30, 33)
+                CardAlt     = [System.Drawing.Color]::FromArgb(10, 24, 26)
+                CardHover   = [System.Drawing.Color]::FromArgb(20, 43, 47)
+                Border      = [System.Drawing.Color]::FromArgb(31, 64, 68)
+                BorderSoft  = [System.Drawing.Color]::FromArgb(23, 48, 52)
+                Text        = [System.Drawing.Color]::FromArgb(230, 248, 250)
+                Muted       = [System.Drawing.Color]::FromArgb(130, 165, 170)
+                Subtle      = [System.Drawing.Color]::FromArgb(94, 126, 131)
+                Accent      = [System.Drawing.Color]::FromArgb(34, 225, 220)
+                Accent2     = [System.Drawing.Color]::FromArgb(157, 110, 255)
+                AccentSoft  = [System.Drawing.Color]::FromArgb(16, 60, 62)
+                AccentHover = [System.Drawing.Color]::FromArgb(74, 236, 229)
+                AccentPressed = [System.Drawing.Color]::FromArgb(24, 184, 180)
+                Green       = [System.Drawing.Color]::FromArgb(98, 232, 168)
+                GreenSoft   = [System.Drawing.Color]::FromArgb(18, 60, 44)
+                Amber       = [System.Drawing.Color]::FromArgb(252, 202, 104)
+                AmberSoft   = [System.Drawing.Color]::FromArgb(60, 48, 24)
+                Red         = [System.Drawing.Color]::FromArgb(255, 106, 124)
+                RedSoft     = [System.Drawing.Color]::FromArgb(66, 27, 35)
+                White       = [System.Drawing.Color]::White
+                AccentText  = [System.Drawing.Color]::FromArgb(3, 22, 22)
+                NavSelected = [System.Drawing.Color]::FromArgb(21, 50, 53)
+                NavHover    = [System.Drawing.Color]::FromArgb(14, 35, 38)
+                Pressed     = [System.Drawing.Color]::FromArgb(17, 42, 45)
+                ToggleOff   = [System.Drawing.Color]::FromArgb(44, 68, 70)
+                SparkFill   = [System.Drawing.Color]::FromArgb(18, 82, 86)
+                ComboSelection = [System.Drawing.Color]::FromArgb(30, 62, 66)
+                DisabledFill   = [System.Drawing.Color]::FromArgb(38, 55, 57)
+                DisabledText   = [System.Drawing.Color]::FromArgb(122, 148, 151)
+                DangerHover    = [System.Drawing.Color]::FromArgb(88, 34, 44)
+                DangerPressed  = [System.Drawing.Color]::FromArgb(73, 28, 37)
+                DangerOutline  = [System.Drawing.Color]::FromArgb(96, 44, 54)
+            }
+        }
+        'Solar' = @{
+            Key         = 'Solar'
+            Label       = 'Solar (light)'
+            Description = 'Warm cream with coral and golden light.'
+            Dark        = $false
+            Palette     = @{
+                Bg          = [System.Drawing.Color]::FromArgb(253, 247, 240)
+                Sidebar     = [System.Drawing.Color]::FromArgb(249, 240, 231)
+                Card        = [System.Drawing.Color]::FromArgb(255, 255, 255)
+                CardAlt     = [System.Drawing.Color]::FromArgb(253, 249, 243)
+                CardHover   = [System.Drawing.Color]::FromArgb(249, 236, 226)
+                Border      = [System.Drawing.Color]::FromArgb(236, 211, 195)
+                BorderSoft  = [System.Drawing.Color]::FromArgb(244, 226, 213)
+                Text        = [System.Drawing.Color]::FromArgb(53, 35, 28)
+                Muted       = [System.Drawing.Color]::FromArgb(126, 100, 88)
+                Subtle      = [System.Drawing.Color]::FromArgb(160, 134, 121)
+                Accent      = [System.Drawing.Color]::FromArgb(240, 90, 60)
+                Accent2     = [System.Drawing.Color]::FromArgb(245, 150, 50)
+                AccentSoft  = [System.Drawing.Color]::FromArgb(253, 230, 222)
+                AccentHover = [System.Drawing.Color]::FromArgb(246, 112, 84)
+                AccentPressed = [System.Drawing.Color]::FromArgb(204, 70, 44)
+                Green       = [System.Drawing.Color]::FromArgb(26, 132, 82)
+                GreenSoft   = [System.Drawing.Color]::FromArgb(223, 244, 233)
+                Amber       = [System.Drawing.Color]::FromArgb(170, 112, 14)
+                AmberSoft   = [System.Drawing.Color]::FromArgb(252, 240, 216)
+                Red         = [System.Drawing.Color]::FromArgb(200, 52, 62)
+                RedSoft     = [System.Drawing.Color]::FromArgb(252, 227, 228)
+                White       = [System.Drawing.Color]::White
+                AccentText  = [System.Drawing.Color]::FromArgb(24, 9, 6)
+                NavSelected = [System.Drawing.Color]::FromArgb(248, 230, 218)
+                NavHover    = [System.Drawing.Color]::FromArgb(252, 240, 233)
+                Pressed     = [System.Drawing.Color]::FromArgb(244, 222, 208)
+                ToggleOff   = [System.Drawing.Color]::FromArgb(226, 205, 190)
+                SparkFill   = [System.Drawing.Color]::FromArgb(250, 216, 198)
+                ComboSelection = [System.Drawing.Color]::FromArgb(248, 230, 218)
+                DisabledFill   = [System.Drawing.Color]::FromArgb(242, 235, 228)
+                DisabledText   = [System.Drawing.Color]::FromArgb(127, 106, 93)
+                DangerHover    = [System.Drawing.Color]::FromArgb(249, 219, 216)
+                DangerPressed  = [System.Drawing.Color]::FromArgb(243, 203, 199)
+                DangerOutline  = [System.Drawing.Color]::FromArgb(229, 172, 165)
+            }
         }
     }
-    return @{
-        Bg          = [System.Drawing.Color]::FromArgb(8, 12, 18)
-        Sidebar     = [System.Drawing.Color]::FromArgb(11, 16, 24)
-        Card        = [System.Drawing.Color]::FromArgb(18, 25, 36)
-        CardAlt     = [System.Drawing.Color]::FromArgb(14, 20, 30)
-        CardHover   = [System.Drawing.Color]::FromArgb(26, 36, 51)
-        Border      = [System.Drawing.Color]::FromArgb(34, 45, 61)
-        BorderSoft  = [System.Drawing.Color]::FromArgb(26, 35, 48)
-        Text        = [System.Drawing.Color]::FromArgb(238, 244, 252)
-        Muted       = [System.Drawing.Color]::FromArgb(130, 145, 165)
-        Subtle      = [System.Drawing.Color]::FromArgb(96, 112, 133)
-        Accent      = [System.Drawing.Color]::FromArgb(108, 99, 255)
-        Accent2     = [System.Drawing.Color]::FromArgb(51, 181, 229)
-        AccentSoft  = [System.Drawing.Color]::FromArgb(31, 31, 61)
-        Green       = [System.Drawing.Color]::FromArgb(83, 221, 151)
-        GreenSoft   = [System.Drawing.Color]::FromArgb(25, 51, 42)
-        Amber       = [System.Drawing.Color]::FromArgb(244, 184, 96)
-        AmberSoft   = [System.Drawing.Color]::FromArgb(56, 43, 25)
-        Red         = [System.Drawing.Color]::FromArgb(255, 107, 129)
-        RedSoft     = [System.Drawing.Color]::FromArgb(61, 29, 38)
-        White       = [System.Drawing.Color]::White
-        NavSelected = [System.Drawing.Color]::FromArgb(27, 38, 54)
-        NavHover    = [System.Drawing.Color]::FromArgb(20, 29, 42)
-        Pressed     = [System.Drawing.Color]::FromArgb(22, 30, 43)
-        ToggleOff   = [System.Drawing.Color]::FromArgb(45, 55, 70)
-        SparkFill   = [System.Drawing.Color]::FromArgb(55, 45, 150)
-        ComboSelection = [System.Drawing.Color]::FromArgb(40, 52, 72)
-        DisabledFill   = [System.Drawing.Color]::FromArgb(44, 52, 65)
-        DisabledText   = [System.Drawing.Color]::FromArgb(131, 143, 160)
-        DangerHover    = [System.Drawing.Color]::FromArgb(84, 36, 49)
-        DangerPressed  = [System.Drawing.Color]::FromArgb(70, 30, 41)
-        DangerOutline  = [System.Drawing.Color]::FromArgb(92, 48, 62)
+    return $script:StudioThemeCatalog
+}
+
+function Resolve-StudioThemeKey {
+    param([string]$Theme = 'Aurora')
+    $catalog = Get-StudioThemeCatalog
+    $aliases = @{
+        'dark' = 'Aurora'
+        'light' = 'Daylight'
+    }
+    $value = ([string]$Theme).Trim()
+    if (-not [string]::IsNullOrWhiteSpace($value)) {
+        foreach ($key in $catalog.Keys) {
+            if ([string]::Equals($value, [string]$key, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return [string]$key
+            }
+            $entry = $catalog[$key]
+            if ([string]::Equals($value, [string]$entry.Label, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return [string]$key
+            }
+        }
+        if ($aliases.ContainsKey($value.ToLowerInvariant())) {
+            return [string]$aliases[$value.ToLowerInvariant()]
+        }
+    }
+    return 'Aurora'
+}
+
+function Get-StudioThemeList {
+    $catalog = Get-StudioThemeCatalog
+    $list = New-Object System.Collections.Generic.List[object]
+    foreach ($key in $catalog.Keys) {
+        $entry = $catalog[$key]
+        $list.Add([pscustomobject]@{
+            Key         = [string]$entry.Key
+            Label       = [string]$entry.Label
+            Description = [string]$entry.Description
+            Dark        = [bool]$entry.Dark
+        })
+    }
+    return $list.ToArray()
+}
+
+function Get-StudioPalette {
+    param([string]$Theme = 'Aurora')
+    $key = Resolve-StudioThemeKey -Theme $Theme
+    $entry = (Get-StudioThemeCatalog)[$key]
+    return $entry.Palette.Clone()
+}
+
+function Update-StudioThemeControl {
+    param($Control, [hashtable]$ColorMap)
+    if ($null -eq $Control) { return }
+    $type = $Control.GetType()
+    while ($null -ne $type) {
+        foreach ($property in $type.GetProperties([System.Reflection.BindingFlags]'Instance,Public')) {
+            if ($property.PropertyType -ne [System.Drawing.Color] -or -not $property.CanRead -or -not $property.CanWrite) { continue }
+            if ($property.GetIndexParameters().Length -gt 0) { continue }
+            try {
+                $current = [System.Drawing.Color]$property.GetValue($Control, $null)
+                if ($current.IsEmpty) { continue }
+                $argb = [int]$current.ToArgb()
+                if ($ColorMap.ContainsKey($argb)) {
+                    $next = [System.Drawing.Color]$ColorMap[$argb]
+                    if ($next -ne $current) { $property.SetValue($Control, $next, $null) }
+                }
+            } catch { }
+        }
+        $type = $type.BaseType
+    }
+    foreach ($child in @($Control.Controls)) {
+        Update-StudioThemeControl -Control $child -ColorMap $ColorMap
     }
 }
 
-# The palette is chosen once per Studio session so every control is consistent;
-# changing the theme in Settings applies the next time the Studio opens.
+function Apply-StudioTheme {
+    param([string]$Theme, $Root)
+    $key = Resolve-StudioThemeKey -Theme $Theme
+    if ($key -eq $script:ThemeKey) { return $key }
+    $oldPalette = $script:P
+    $newPalette = Get-StudioPalette -Theme $key
+    $map = @{}
+    foreach ($name in @($oldPalette.Keys)) {
+        if (-not $newPalette.ContainsKey($name)) { continue }
+        $oldColor = [System.Drawing.Color]$oldPalette[$name]
+        if ($oldColor.IsEmpty) { continue }
+        $argb = [int]$oldColor.ToArgb()
+        if (-not $map.ContainsKey($argb)) { $map[$argb] = [System.Drawing.Color]$newPalette[$name] }
+    }
+    $script:ThemeKey = $key
+    $script:P = $newPalette
+    if ($null -ne $Root) {
+        Update-StudioThemeControl -Control $Root -ColorMap $map
+        try {
+            $Root.Invalidate($true)
+            $Root.Update()
+        } catch { }
+    }
+    return $key
+}
+
 $studioTheme = 'Aurora'
 try {
     $themeConfig = Get-SRConfig
@@ -185,7 +809,95 @@ try {
         $studioTheme = [string]$themeProperty.Value
     }
 } catch { }
-$script:P = Get-StudioPalette -Theme $studioTheme
+$script:ThemeKey = Resolve-StudioThemeKey -Theme $studioTheme
+$script:ThemeList = @(Get-StudioThemeList)
+$script:P = Get-StudioPalette -Theme $script:ThemeKey
+
+# ---------------------------------------------------------------------------
+# Localization
+# ---------------------------------------------------------------------------
+
+$stringsPath = Join-Path $PSScriptRoot 'Strings.ps1'
+if (-not (Test-Path -LiteralPath $stringsPath)) {
+    $stringsPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'src\Strings.ps1'
+}
+. $stringsPath
+
+function Set-StudioLanguage {
+    param([string]$Language)
+    $script:Lang = 'en'
+    try {
+        if (-not [string]::IsNullOrWhiteSpace($Language)) { $script:Lang = ([string]$Language).ToLowerInvariant() }
+    } catch { }
+    $script:L = Get-SRStrings -Language $script:Lang
+}
+
+function T {
+    param([Parameter(Mandatory = $true)][string]$Key, [string]$Default = '')
+    if ($script:L -and $script:L.ContainsKey($Key) -and -not [string]::IsNullOrWhiteSpace([string]$script:L[$Key])) {
+        return [string]$script:L[$Key]
+    }
+    return $Default
+}
+
+function Localize-StudioString {
+    # Translate one already-built English string when a translated key exists.
+    param([string]$Text)
+    if ($script:Lang -eq 'en' -or [string]::IsNullOrWhiteSpace($Text)) { return $Text }
+    if ($script:L.ReverseLookup -and $script:L.ReverseLookup.ContainsKey($Text)) {
+        return [string]$script:L.ReverseLookup[$Text]
+    }
+    return $Text
+}
+
+function Localize-StudioTexts {
+    # One pass over the whole tree: any control whose text still shows the
+    # English source of a translated key gets the translation. This covers
+    # the many labels built once with literal strings.
+    param($Control)
+    if ($null -eq $Control) { return }
+    if ($script:Lang -ne 'en') {
+        $textProperty = $Control.PSObject.Properties['Text']
+        if ($null -ne $textProperty) {
+            $text = [string]$Control.Text
+            if (-not [string]::IsNullOrWhiteSpace($text) -and $script:L.ReverseLookup.ContainsKey($text)) {
+                $Control.Text = [string]$script:L.ReverseLookup[$text]
+            }
+        }
+    }
+    foreach ($child in @($Control.Controls)) { Localize-StudioTexts -Control $child }
+}
+
+function Initialize-StudioLanguage {
+    param([string]$Language, $Root)
+    Set-StudioLanguage -Language $Language
+    # Reverse map for the tree walk: English source text -> translation.
+    $reverse = @{}
+    $english = Get-SRStrings -Language 'en'
+    foreach ($key in @($english.Keys)) {
+        $reverse[[string]$english[$key]] = $script:L[$key]
+    }
+    $script:L.ReverseLookup = $reverse
+    if ($null -ne $Root) {
+        try {
+            $rtl = Test-SRRtlLanguage -Language $script:Lang
+            $Root.RightToLeft = if ($rtl) { [System.Windows.Forms.RightToLeft]::Yes } else { [System.Windows.Forms.RightToLeft]::No }
+            $Root.RightToLeftLayout = $rtl
+        } catch { }
+        Localize-StudioTexts -Control $Root
+    }
+}
+
+$studioLanguage = 'en'
+try {
+    $languageConfig = Get-SRConfig
+    $languageProperty = $languageConfig.PSObject.Properties['language']
+    if ($null -ne $languageProperty -and -not [string]::IsNullOrWhiteSpace([string]$languageProperty.Value)) {
+        $studioLanguage = [string]$languageProperty.Value
+    }
+} catch { }
+Set-StudioLanguage -Language $studioLanguage
+$script:LanguageList = @(Get-SRLanguageList)
 
 $script:FontBody = New-Object System.Drawing.Font('Segoe UI', 9)
 $script:FontBodySmall = New-Object System.Drawing.Font('Segoe UI', 8.25)
@@ -268,9 +980,11 @@ function New-StudioButton {
     if ($Primary) {
         $button.FillColor = $script:P.Accent
         $button.GradientEndColor = $script:P.Accent2
-        $button.HoverColor = [System.Drawing.Color]::FromArgb(124, 117, 255)
-        $button.PressedColor = [System.Drawing.Color]::FromArgb(84, 76, 214)
-        $button.TextColor = $script:P.White
+        $button.HoverColor = $script:P.AccentHover
+        $button.PressedColor = $script:P.AccentPressed
+        # Accent gradients are bright in several themes; AccentText picks the
+        # readable side (dark or white) per theme.
+        $button.TextColor = if ($script:P.ContainsKey('AccentText')) { $script:P.AccentText } else { $script:P.White }
         $button.OutlineColor = [System.Drawing.Color]::Empty
     } elseif ($Danger) {
         $button.FillColor = $script:P.RedSoft
@@ -351,7 +1065,7 @@ function Set-StudioStatus {
 function Show-StudioToast {
     param([string]$Text, [System.Drawing.Color]$Color = [System.Drawing.Color]::Empty)
     if (-not $script:Ui.Toast) { return }
-    $script:Ui.Toast.Text = $Text
+    $script:Ui.Toast.Text = [string](Localize-StudioString $Text)
     $script:Ui.Toast.ForeColor = if (-not $Color.IsEmpty) { $Color } else { $script:P.Green }
     $script:Ui.Toast.Visible = $true
     if ($null -eq $script:ToastTimer) {
@@ -369,10 +1083,10 @@ function Show-StudioToast {
 function Format-StudioAge {
     param([datetime]$CapturedAt)
     $span = (Get-Date) - $CapturedAt
-    if ($span.TotalSeconds -lt 45) { return 'just now' }
-    if ($span.TotalMinutes -lt 60) { return ('{0} min ago' -f [Math]::Max(1, [int]$span.TotalMinutes)) }
-    if ($span.TotalHours -lt 24) { return ('{0} hr ago' -f [Math]::Max(1, [int]$span.TotalHours)) }
-    if ($span.TotalDays -lt 7) { return ('{0} day(s) ago' -f [Math]::Max(1, [int]$span.TotalDays)) }
+    if ($span.TotalSeconds -lt 45) { return (T 'JustNow' 'just now') }
+    if ($span.TotalMinutes -lt 60) { return ((T 'MinutesAgo' '{0} min ago') -f [Math]::Max(1, [int]$span.TotalMinutes)) }
+    if ($span.TotalHours -lt 24) { return ((T 'HoursAgo' '{0} hr ago') -f [Math]::Max(1, [int]$span.TotalHours)) }
+    if ($span.TotalDays -lt 7) { return ((T 'DaysAgo' '{0} day(s) ago') -f [Math]::Max(1, [int]$span.TotalDays)) }
     return $CapturedAt.ToString('MMM d, HH:mm')
 }
 
@@ -380,13 +1094,13 @@ function Format-StudioNext {
     $config = $script:Config
     if ($null -eq $config) { return 'waiting for settings' }
     $interval = [Math]::Max(1, [int]$config.snapshotIntervalMinutes)
-    if ($script:Snapshots.Count -eq 0) { return 'within a few minutes' }
+    if ($script:Snapshots.Count -eq 0) { return (T 'WithinFew' 'within a few minutes') }
     $latest = $script:Snapshots[0].CapturedAt
     $next = $latest.AddMinutes($interval)
     $remaining = $next - (Get-Date)
-    if ($remaining.TotalSeconds -le 0) { return 'any moment' }
-    if ($remaining.TotalMinutes -lt 1) { return ('in {0} sec' -f [Math]::Max(1, [int]$remaining.TotalSeconds)) }
-    return ('in {0} min' -f [Math]::Max(1, [int]$remaining.TotalMinutes))
+    if ($remaining.TotalSeconds -le 0) { return (T 'AnyMoment' 'any moment') }
+    if ($remaining.TotalMinutes -lt 1) { return ((T 'InSeconds' 'in {0} sec') -f [Math]::Max(1, [int]$remaining.TotalSeconds)) }
+    return ((T 'InMinutes' 'in {0} min') -f [Math]::Max(1, [int]$remaining.TotalMinutes))
 }
 
 function Format-StudioBytes {
@@ -412,12 +1126,25 @@ function Enable-StudioDoubleBuffer {
     } catch { }
 }
 
+function Enable-StudioDoubleBufferTree {
+    # The custom controls opt in via SetStyle; plain panels and flow layouts
+    # do not, and they are what flickers when pages switch or resize.
+    param($Control)
+    if ($null -eq $Control) { return }
+    Enable-StudioDoubleBuffer -Control $Control
+    foreach ($child in @($Control.Controls)) {
+        Enable-StudioDoubleBufferTree -Control $child
+    }
+}
+
 function Stop-StudioWorker {
     param([string]$Name)
     if (-not $script:StudioJobs.ContainsKey($Name)) { return }
     $job = $script:StudioJobs[$Name]
     try { if ($null -ne $job.PowerShell) { $job.PowerShell.Stop(); $job.PowerShell.Dispose() } } catch { }
-    try { if ($null -ne $job.Runspace) { $job.Runspace.Close(); $job.Runspace.Dispose() } } catch { }
+    if ($job.OwnRunspace) {
+        try { if ($null -ne $job.Runspace) { $job.Runspace.Close(); $job.Runspace.Dispose() } } catch { }
+    }
     $script:StudioJobs.Remove($Name)
 }
 
@@ -425,22 +1152,39 @@ function Start-StudioWorker {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
         [Parameter(Mandatory = $true)][scriptblock]$Script,
-        [object[]]$Arguments = @()
+        [object[]]$Arguments = @(),
+        # Run in a persistent shared runspace. The first job pays the module
+        # import; later jobs reuse the warm runspace and start immediately.
+        [switch]$SharedRunspace
     )
     Stop-StudioWorker -Name $Name
-    $runspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
-    $runspace.ApartmentState = [System.Threading.ApartmentState]::MTA
-    $runspace.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
-    $runspace.Open()
+    $runspace = $null
+    $ownRunspace = $true
+    if ($SharedRunspace) {
+        if ($null -eq $script:SharedWorkerRunspace) {
+            $script:SharedWorkerRunspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+            $script:SharedWorkerRunspace.ApartmentState = [System.Threading.ApartmentState]::MTA
+            $script:SharedWorkerRunspace.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
+            $script:SharedWorkerRunspace.Open()
+        }
+        $runspace = $script:SharedWorkerRunspace
+        $ownRunspace = $false
+    } else {
+        $runspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+        $runspace.ApartmentState = [System.Threading.ApartmentState]::MTA
+        $runspace.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
+        $runspace.Open()
+    }
     $powershell = [System.Management.Automation.PowerShell]::Create()
     $powershell.Runspace = $runspace
     [void]$powershell.AddScript([string]$Script)
     foreach ($argument in $Arguments) { [void]$powershell.AddArgument($argument) }
     $handle = $powershell.BeginInvoke()
     $script:StudioJobs[$Name] = [pscustomobject]@{
-        PowerShell = $powershell
-        Runspace   = $runspace
-        Handle     = $handle
+        PowerShell  = $powershell
+        Runspace    = $runspace
+        Handle      = $handle
+        OwnRunspace = $ownRunspace
     }
 }
 
@@ -460,7 +1204,9 @@ function Complete-StudioWorker {
         $errorText = $_.Exception.Message
     } finally {
         try { $job.PowerShell.Dispose() } catch { }
-        try { $job.Runspace.Close(); $job.Runspace.Dispose() } catch { }
+        if ($job.OwnRunspace) {
+            try { $job.Runspace.Close(); $job.Runspace.Dispose() } catch { }
+        }
         $script:StudioJobs.Remove($Name)
     }
     return [pscustomobject]@{ Output = $output; Error = $errorText }
@@ -517,30 +1263,44 @@ function Open-StudioPath {
     }
 }
 
+$script:TrayStateCache = $null
+$script:TrayStateCacheAt = [datetime]::MinValue
 function Get-StudioTrayState {
-    $tray = @()
-    try {
-        $tray = @(Get-CimInstance Win32_Process -Filter "Name='SessionRecovery.exe' OR Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object {
-            ($_.Name -eq 'SessionRecovery.exe' -and $_.CommandLine -and $_.CommandLine -match '(?i)--tray') -or
-            ($_.Name -eq 'powershell.exe' -and $_.CommandLine -and $_.CommandLine -match '(?i)Tray-SessionRecovery\.ps1')
-        })
-    } catch { }
-    $tasks = @()
-    try {
-        $tasks = @(Get-ScheduledTask -TaskName 'SessionRecovery-Snapshot' -ErrorAction SilentlyContinue)
-    } catch { }
+    param([switch]$Force)
+    $now = Get-Date
+    if (-not $Force -and $null -ne $script:TrayStateCache -and ($now - $script:TrayStateCacheAt).TotalSeconds -lt 30) {
+        return $script:TrayStateCache
+    }
+
+    $trayPids = @()
+    $nativeProcesses = @(Get-Process -Name 'SessionRecovery' -ErrorAction SilentlyContinue)
+    if ($nativeProcesses.Count -gt 0) {
+        try {
+            $trayPids = @(Get-CimInstance Win32_Process -Filter "Name='SessionRecovery.exe'" -ErrorAction SilentlyContinue | Where-Object {
+                $_.CommandLine -and ($_.CommandLine -match '(?i)--tray')
+            } | ForEach-Object { [int]$_.ProcessId })
+        } catch { }
+    }
+
+    $tasks = @(Get-SRScheduledTaskStatus -TaskName 'SessionRecovery-Snapshot')
+    $activeTasks = @($tasks | Where-Object { $_.Active })
     $mode = 'Not running'
-    if ($tasks.Count -gt 0) {
-        $mode = if ($tray.Count -gt 0) { 'Scheduled tasks + tray' } else { 'Scheduled tasks' }
-    } elseif ($tray.Count -gt 0) {
+    if ($activeTasks.Count -gt 0) {
+        $mode = if ($trayPids.Count -gt 0) { 'Scheduled tasks + tray' } else { 'Scheduled tasks' }
+    } elseif ($trayPids.Count -gt 0) {
         $mode = 'Background tray'
     }
-    return [pscustomobject]@{
-        Running = ($tray.Count -gt 0)
-        Tasks   = ($tasks.Count -gt 0)
-        Mode    = $mode
-        Count   = $tray.Count
+    $state = [pscustomobject]@{
+        Running     = ($trayPids.Count -gt 0)
+        Tasks       = ($activeTasks.Count -gt 0)
+        Mode        = $mode
+        Count       = $trayPids.Count
+        TaskState   = if ($tasks.Count -gt 0) { [string]$tasks[0].State } else { '' }
+        TaskEnabled = if ($tasks.Count -gt 0) { [bool]$tasks[0].Enabled } else { $false }
     }
+    $script:TrayStateCache = $state
+    $script:TrayStateCacheAt = $now
+    return $state
 }
 
 function Start-StudioBackground {
@@ -548,14 +1308,28 @@ function Start-StudioBackground {
         Show-StudioToast 'SessionRecovery.exe is missing. Reinstall the app.' $script:P.Red
         return
     }
-    $state = Get-StudioTrayState
+    $state = Get-StudioTrayState -Force
     if ($state.Running) {
         Show-StudioToast 'The background app is already running.' $script:P.Green
         return
     }
+    $taskWasActive = [bool]$state.Tasks
     try {
         Start-Process -FilePath $script:HostExe -ArgumentList '--tray' -WorkingDirectory $script:ScriptDir | Out-Null
-        Show-StudioToast 'Background protection started.' $script:P.Green
+        if ($taskWasActive) {
+            Show-StudioToast 'Tray controls started. Windows task protection is already active.' $script:P.Green
+        } else {
+            Show-StudioToast 'Background protection started.' $script:P.Green
+        }
+        $script:TrayStateCache = [pscustomobject]@{
+            Running     = $true
+            Tasks       = $taskWasActive
+            Mode        = if ($taskWasActive) { 'Scheduled tasks + tray' } else { 'Background tray' }
+            Count       = 1
+            TaskState   = [string]$state.TaskState
+            TaskEnabled = [bool]$state.TaskEnabled
+        }
+        $script:TrayStateCacheAt = Get-Date
         Refresh-StudioSidebar
     } catch {
         Show-StudioToast ('Could not start background app: ' + $_.Exception.Message) $script:P.Red
@@ -584,11 +1358,11 @@ function Reset-StudioCaptureButtons {
     $script:CaptureBusy = $false
     if ($script:Ui.CaptureButton) {
         $script:Ui.CaptureButton.Enabled = $true
-        $script:Ui.CaptureButton.Text = 'Capture now'
+        $script:Ui.CaptureButton.Text = (T 'BtnCaptureNow' 'Capture now')
     }
     if ($script:Ui.QuickCapture) {
         $script:Ui.QuickCapture.Enabled = $true
-        $script:Ui.QuickCapture.Text = 'Capture now'
+        $script:Ui.QuickCapture.Text = (T 'BtnCaptureNow' 'Capture now')
     }
 }
 
@@ -599,12 +1373,12 @@ function Complete-StudioCapture {
     if ($Succeeded) {
         Refresh-StudioData
         if ($script:Snapshots.Count -gt 0) {
-            Show-StudioToast ('Snapshot saved  •  ' + $script:Snapshots[0].CapturedAt.ToString('HH:mm:ss')) $script:P.Green
+            Show-StudioToast ((T 'ToastSavedAt' 'Snapshot saved  •  {0}') -f $script:Snapshots[0].CapturedAt.ToString('HH:mm:ss')) $script:P.Green
         } else {
-            Show-StudioToast 'Snapshot saved.' $script:P.Green
+            Show-StudioToast (T 'ToastSaved' 'Snapshot saved.') $script:P.Green
         }
     } else {
-        Show-StudioToast $Message $script:P.Amber
+        Show-StudioToast (Localize-StudioString $Message) $script:P.Amber
     }
 }
 
@@ -618,13 +1392,15 @@ function Invoke-StudioCapture {
     # The snapshot runs in its own process; the Studio polls for the new file
     # so the window never freezes while capture is working.
     $script:CaptureBusy = $true
+    # The Studio shows its own progress and result toast; the quiet host mode
+    # avoids a second notification and sound for the same manual capture.
     foreach ($button in @($script:Ui.CaptureButton, $script:Ui.QuickCapture)) {
         if ($null -ne $button) {
             $button.Enabled = $false
-            $button.Text = 'Capturing...'
+            $button.Text = (T 'BtnCapturing' 'Capturing...')
         }
     }
-    Show-StudioToast 'Capturing your current session...' $script:P.Muted
+    Show-StudioToast (T 'ToastCapturing' 'Capturing your current session...') $script:P.Muted
 
     $before = [datetime]::MinValue
     try {
@@ -635,7 +1411,9 @@ function Invoke-StudioCapture {
 
     $captureProcess = $null
     try {
-        $captureProcess = Start-Process -FilePath $script:HostExe -ArgumentList '--snapshot' -WorkingDirectory $script:ScriptDir -PassThru -ErrorAction Stop
+        # The Studio shows its own progress and result toast; the quiet host mode
+        # avoids a second notification and sound for the same manual capture.
+        $captureProcess = Start-Process -FilePath $script:HostExe -ArgumentList '--snapshot-studio' -WorkingDirectory $script:ScriptDir -PassThru -ErrorAction Stop
     } catch {
         Complete-StudioCapture -Succeeded $false -Message ('Snapshot failed: ' + $_.Exception.Message)
         return
@@ -756,35 +1534,41 @@ function Set-StudioDesktopShortcut {
 }
 
 function Refresh-StudioSidebar {
+    param([switch]$Force)
     if (-not $script:Ui.SidebarBadge) { return }
-    $state = Get-StudioTrayState
+    $state = Get-StudioTrayState -Force:$Force
     $latestAge = $null
     if ($script:Snapshots.Count -gt 0) {
         $latestAge = ((Get-Date) - $script:Snapshots[0].CapturedAt).TotalMinutes
     }
     $healthy = ($null -ne $latestAge -and $latestAge -le ([Math]::Max(1, [int]$script:Config.snapshotIntervalMinutes) * 2.5))
     if ($healthy) {
-        $script:Ui.SidebarBadge.Text = 'PROTECTED'
+        $script:Ui.SidebarBadge.Text = (T 'BadgeProtected' 'PROTECTED')
         $script:Ui.SidebarBadge.FillColor = $script:P.GreenSoft
         $script:Ui.SidebarBadge.TextColor = $script:P.Green
     } else {
-        $script:Ui.SidebarBadge.Text = 'ATTENTION'
+        $script:Ui.SidebarBadge.Text = (T 'BadgeAttention' 'ATTENTION')
         $script:Ui.SidebarBadge.FillColor = $script:P.AmberSoft
         $script:Ui.SidebarBadge.TextColor = $script:P.Amber
     }
     $script:Ui.SidebarStatus.Text = $state.Mode
-    $script:Ui.SidebarDetail.Text = if ($state.Running) {
-        'Tray app running'
+    $script:Ui.SidebarDetail.Text = if ($state.Running -and $state.Tasks) {
+        (T 'StatusTaskTray' 'Task + tray controls active')
+    } elseif ($state.Running) {
+        (T 'StatusTray' 'Tray app running')
     } elseif ($state.Tasks) {
-        'Snapshots handled by Windows'
+        (T 'StatusTask' 'Windows task is active')
     } else {
-        'Background app is not running'
+        (T 'StatusNone' 'Background app is not running')
     }
     if ($state.Running) {
-        $script:Ui.TrayButton.Text = 'Background running'
+        $script:Ui.TrayButton.Text = (T 'BtnBackgroundRunning' 'Background running')
         $script:Ui.TrayButton.Enabled = $false
+    } elseif ($state.Tasks) {
+        $script:Ui.TrayButton.Text = (T 'BtnStartTray' 'Start tray controls')
+        $script:Ui.TrayButton.Enabled = $true
     } else {
-        $script:Ui.TrayButton.Text = 'Start background app'
+        $script:Ui.TrayButton.Text = (T 'BtnStartBackground' 'Start background app')
         $script:Ui.TrayButton.Enabled = $true
     }
 }
@@ -796,7 +1580,7 @@ function Refresh-StudioData {
     $script:DashboardDirty = $true
     $script:ExclusionsDirty = $true
     $script:DiagnosticsDirty = $true
-    Refresh-StudioSidebar
+    Refresh-StudioSidebar -Force
     switch ($script:CurrentPage) {
         'Dashboard' { if ($script:PageLoaded.ContainsKey('Dashboard')) { Refresh-StudioDashboard } }
         'Snapshots' { if ($script:PageLoaded.ContainsKey('Snapshots')) { Refresh-StudioSnapshotRows } }
@@ -1207,28 +1991,28 @@ function Refresh-StudioDashboard {
             $script:Ui.HeroLast.Text = ('Last snapshot {0}  •  {1}  •  {2} app(s), {3} tab(s)' -f (Format-StudioAge -CapturedAt $latest.CapturedAt), $latest.CapturedAt.ToString('HH:mm:ss'), $stats.Apps, $stats.Tabs)
         } else {
             $script:Ui.HeroRing.CenterText = '--'
-            $script:Ui.HeroLast.Text = 'No snapshot has been saved yet.'
+            $script:Ui.HeroLast.Text = (T 'NoSnapshotSaved' 'No snapshot has been saved yet.')
         }
-        $script:Ui.HeroNext.Text = 'Next automatic snapshot  •  ' + (Format-StudioNext)
+        $script:Ui.HeroNext.Text = ((T 'NextSnapshot' 'Next automatic snapshot') + '  •  ' + (Format-StudioNext))
         if ($health -ge 80) {
-            $script:Ui.HeroBadge.Text = 'PROTECTED'
+            $script:Ui.HeroBadge.Text = (T 'BadgeProtected' 'PROTECTED')
             $script:Ui.HeroBadge.FillColor = $script:P.GreenSoft
             $script:Ui.HeroBadge.TextColor = $script:P.Green
-            $script:Ui.HeroTitle.Text = 'Your session is protected'
+            $script:Ui.HeroTitle.Text = (T 'HeroProtected' 'Your session is protected')
             $script:Ui.HeroRing.ProgressColor = $script:P.Green
             $script:Ui.HeroRing.ProgressEndColor = $script:P.Accent2
         } elseif ($health -ge 40) {
-            $script:Ui.HeroBadge.Text = 'ATTENTION'
+            $script:Ui.HeroBadge.Text = (T 'BadgeAttention' 'ATTENTION')
             $script:Ui.HeroBadge.FillColor = $script:P.AmberSoft
             $script:Ui.HeroBadge.TextColor = $script:P.Amber
-            $script:Ui.HeroTitle.Text = 'Protection needs a nudge'
+            $script:Ui.HeroTitle.Text = (T 'AttentionNeeded' 'A little attention is needed')
             $script:Ui.HeroRing.ProgressColor = $script:P.Amber
             $script:Ui.HeroRing.ProgressEndColor = $script:P.Amber
         } else {
-            $script:Ui.HeroBadge.Text = 'NO SNAPSHOT'
+            $script:Ui.HeroBadge.Text = (T 'BadgeAttention' 'ATTENTION')
             $script:Ui.HeroBadge.FillColor = $script:P.RedSoft
             $script:Ui.HeroBadge.TextColor = $script:P.Red
-            $script:Ui.HeroTitle.Text = 'Nothing has been saved yet'
+            $script:Ui.HeroTitle.Text = (T 'HeroNothing' 'Nothing has been saved yet')
             $script:Ui.HeroRing.ProgressColor = $script:P.Red
             $script:Ui.HeroRing.ProgressEndColor = $script:P.Red
         }
@@ -1573,16 +2357,16 @@ function Update-StudioSnapshotDetails {
         $script:Ui.DetailBadge.Text = 'NO SNAPSHOT'
         $script:Ui.DetailBadge.FillColor = $script:P.CardAlt
         $script:Ui.DetailBadge.TextColor = $script:P.Muted
-        $script:Ui.DetailTitle.Text = 'Select a snapshot'
+        $script:Ui.DetailTitle.Text = (T 'SelectSnapshot' 'Select a snapshot')
         $script:Ui.DetailMeta.Text = ''
-        $script:Ui.DetailSummary.Text = 'Capture a moment, then select it here to inspect and restore it.'
+        $script:Ui.DetailSummary.Text = (T 'CaptureMomentHint' 'Capture a moment, then select it here to inspect and restore it.')
         $script:Ui.DetailText.Text = ''
         $script:Ui.DetailRestore.Enabled = $false
         $script:Ui.DetailOpen.Enabled = $false
         $script:Ui.DetailDelete.Enabled = $false
         if ($script:Ui.DetailPin) {
             $script:Ui.DetailPin.Enabled = $false
-            $script:Ui.DetailPin.Text = 'Pin'
+            $script:Ui.DetailPin.Text = (T 'BtnPin' 'Pin')
         }
         if ($script:Ui.SnapExport) { $script:Ui.SnapExport.Enabled = $false }
         return
@@ -1604,11 +2388,50 @@ function Update-StudioSnapshotDetails {
     $script:Ui.DetailDelete.Enabled = $true
     if ($script:Ui.DetailPin) {
         $script:Ui.DetailPin.Enabled = $true
-        $script:Ui.DetailPin.Text = if ($isPinned) { 'Unpin' } else { 'Pin' }
+        $script:Ui.DetailPin.Text = if ($isPinned) { (T 'BtnUnpin' 'Unpin') } else { (T 'BtnPin' 'Pin') }
     }
     if ($script:Ui.SnapExport) { $script:Ui.SnapExport.Enabled = $true }
 
     $lines = New-Object System.Collections.Generic.List[string]
+
+    # What changed vs the previous snapshot: new/closed apps and tab movement.
+    try {
+        $previousEntry = @($script:Snapshots | Where-Object { $_.CapturedAt -lt $entry.CapturedAt } | Select-Object -First 1)
+        if ($previousEntry.Count -gt 0) {
+            $previous = $previousEntry[0].Snapshot
+            $nameOf = {
+                param($App)
+                $n = [string]$App.displayName
+                if ([string]::IsNullOrWhiteSpace($n)) { $n = [string]$App.name }
+                if ([string]::IsNullOrWhiteSpace($n)) { $n = [string]$App.exe }
+                return $n.ToLowerInvariant()
+            }
+            $current = @($snapshot.apps | ForEach-Object { & $nameOf $_ })
+            $before = @($previous.apps | ForEach-Object { & $nameOf $_ })
+            $newApps = @($current | Where-Object { $_ -and ($before -notcontains $_) })
+            $closedApps = @($before | Where-Object { $_ -and ($current -notcontains $_) })
+            $prevStats = Get-StudioStats -Snapshot $previous
+            $tabDelta = $stats.Tabs - $prevStats.Tabs
+            if ($newApps.Count -eq 0 -and $closedApps.Count -eq 0 -and $tabDelta -eq 0) {
+                $lines.Add((T 'WhatsChanged' 'WHAT CHANGED'))
+                $lines.Add('  ' + (T 'DiffNone' 'No changes since the previous snapshot.'))
+                $lines.Add('')
+            } else {
+                $lines.Add((T 'WhatsChanged' 'WHAT CHANGED'))
+                if ($newApps.Count -gt 0) {
+                    $lines.Add(('+ ' + ((T 'DiffNewApps' 'New: {0}') -f ($newApps -join ', '))))
+                }
+                if ($closedApps.Count -gt 0) {
+                    $lines.Add(('- ' + ((T 'DiffClosedApps' 'Closed: {0}') -f ($closedApps -join ', '))))
+                }
+                if ($tabDelta -ne 0) {
+                    $lines.Add(('~ ' + ((T 'DiffTabs' 'Tabs: {0}') -f $tabDelta)))
+                }
+                $lines.Add('')
+            }
+        }
+    } catch { }
+
     $mediaApps = @($snapshot.apps | Where-Object {
         $prop = $_.PSObject.Properties['media']
         $null -ne $prop -and $null -ne $prop.Value
@@ -2286,11 +3109,11 @@ $toggleMedia = New-StudioToggle -X 20 -Y 76 -Checked $true
 $mediaCard.Controls.Add($toggleMedia)
 $mediaLabel = New-StudioLabel -Text 'Capture the playing video and its position' -X 76 -Y 80 -Width 380 -Height 20 -Font $script:FontBody -Color $script:P.Text
 $mediaCard.Controls.Add($mediaLabel)
-$mediaHint = New-StudioLabel -Text 'VLC is supported: restore reopens the same file near the moment it was playing. Positions between snapshots are estimated, so restore lands at most one interval early.' -X 76 -Y 100 -Width 580 -Height 32 -Font $script:FontBodySmall -Color $script:P.Subtle
+$mediaHint = New-StudioLabel -Text 'VLC, MPC-HC, MPC-BE, mpv, PotPlayer and Windows Media Player are supported: restore reopens the same file, near the moment it was playing when it can. Positions between snapshots are estimated, so restore lands at most one interval early.' -X 76 -Y 100 -Width 580 -Height 32 -Font $script:FontBodySmall -Color $script:P.Subtle
 $mediaCard.Controls.Add($mediaHint)
 
 # Card: background and desktop
-$backgroundCard = New-StudioSettingsCard -Title 'Background & desktop' -Description 'Keep Session Recovery close without leaving windows open.' -Height 240
+$backgroundCard = New-StudioSettingsCard -Title 'Background & desktop' -Description 'Keep Session Recovery close without leaving windows open.' -Height 250
 $settingsFlow.Controls.Add($backgroundCard)
 $settingsCards.Add($backgroundCard)
 
@@ -2308,8 +3131,10 @@ $backgroundCard.Controls.Add($desktopLabel)
 
 $toggleNotifications = New-StudioToggle -X 20 -Y 188 -Checked $true
 $backgroundCard.Controls.Add($toggleNotifications)
-$notificationsLabel = New-StudioLabel -Text 'Show snapshot notifications' -X 76 -Y 192 -Width 300 -Height 20 -Font $script:FontBody -Color $script:P.Text
+$notificationsLabel = New-StudioLabel -Text 'Show tray notifications' -X 76 -Y 192 -Width 300 -Height 20 -Font $script:FontBody -Color $script:P.Text
 $backgroundCard.Controls.Add($notificationsLabel)
+$notificationsHint = New-StudioLabel -Text 'Automatic snapshots stay silent. Manual tray actions and errors can still notify.' -X 76 -Y 212 -Width 420 -Height 18 -Font $script:FontBodySmall -Color $script:P.Subtle
+$backgroundCard.Controls.Add($notificationsHint)
 
 $startNow = New-StudioButton -Text 'Start background now' -X 470 -Y 74 -Width 300 -Height 34 -Glyph ([string][char]0xE768)
 $startNow.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
@@ -2325,22 +3150,63 @@ $openDesktop.Add_Click({ Open-StudioPath ([Environment]::GetFolderPath('Desktop'
 $backgroundCard.Controls.Add($openDesktop)
 
 # Card: appearance
-$appearanceCard = New-StudioSettingsCard -Title 'Appearance' -Description 'Choose how the Studio looks.' -Height 128
+$appearanceCard = New-StudioSettingsCard -Title 'Appearance' -Description 'Choose how the Studio looks and speaks.' -Height 250
 $settingsFlow.Controls.Add($appearanceCard)
 $settingsCards.Add($appearanceCard)
 
 $themeLabel = New-StudioLabel -Text 'STUDIO THEME' -X 20 -Y 70 -Width 180 -Height 16 -Font $script:FontMono -Color $script:P.Subtle
 $appearanceCard.Controls.Add($themeLabel)
-$comboTheme = New-StudioCombo -X 20 -Y 90 -Width 210
-[void]$comboTheme.Items.Add('Aurora (dark)')
-[void]$comboTheme.Items.Add('Daylight (light)')
+$comboTheme = New-StudioCombo -X 20 -Y 90 -Width 220
+foreach ($themeEntry in $script:ThemeList) { [void]$comboTheme.Items.Add([string]$themeEntry.Label) }
 $comboTheme.SelectedIndex = 0
 $appearanceCard.Controls.Add($comboTheme)
-$themeHint = New-StudioLabel -Text 'Applied the next time the Studio opens. Aurora is the dark palette; Daylight is a light one for bright rooms and screenshots.' -X 270 -Y 94 -Width 460 -Height 20 -Font $script:FontBodySmall -Color $script:P.Muted
+$themeHint = New-StudioLabel -Text '' -X 270 -Y 84 -Width 500 -Height 38 -Font $script:FontBodySmall -Color $script:P.Muted
 $appearanceCard.Controls.Add($themeHint)
+$script:Ui.ThemeHint = $themeHint
+$comboTheme.Add_SelectedIndexChanged({
+    if (-not $script:SettingsLoaded) { return }
+    $index = $comboTheme.SelectedIndex
+    if ($index -ge 0 -and $index -lt $script:ThemeList.Count) {
+        $themeHint.Text = $script:ThemeList[$index].Description + "`r`nSave to apply instantly, without reopening the Studio."
+    }
+})
+
+$languageLabel = New-StudioLabel -Text 'LANGUAGE' -X 20 -Y 140 -Width 180 -Height 16 -Font $script:FontMono -Color $script:P.Subtle
+$appearanceCard.Controls.Add($languageLabel)
+$comboLanguage = New-StudioCombo -X 20 -Y 160 -Width 220
+foreach ($languageEntry in $script:LanguageList) { [void]$comboLanguage.Items.Add([string]$languageEntry.Label) }
+$comboLanguage.SelectedIndex = 0
+$appearanceCard.Controls.Add($comboLanguage)
+$script:Ui.ComboLanguage = $comboLanguage
+$languageHint = New-StudioLabel -Text 'English, Arabic, French, Spanish, German, Portuguese, Russian, Chinese and Turkish.' -X 270 -Y 154 -Width 500 -Height 38 -Font $script:FontBodySmall -Color $script:P.Muted
+$appearanceCard.Controls.Add($languageHint)
+
+# Card: smart capture
+$smartCard = New-StudioSettingsCard -Title 'Smart capture' -Description 'Skip snapshots nobody needs, and capture from anywhere.' -Height 232
+$settingsFlow.Controls.Add($smartCard)
+$settingsCards.Add($smartCard)
+
+$toggleIdle = New-StudioToggle -X 20 -Y 76 -Checked $true
+$smartCard.Controls.Add($toggleIdle)
+$idleLabel = New-StudioLabel -Text 'Pause while the PC is idle' -X 76 -Y 80 -Width 380 -Height 20 -Font $script:FontBody -Color $script:P.Text
+$smartCard.Controls.Add($idleLabel)
+$idleHint = New-StudioLabel -Text 'No snapshot runs after 15 minutes without keyboard or mouse activity.' -X 76 -Y 100 -Width 430 -Height 18 -Font $script:FontBodySmall -Color $script:P.Subtle
+$smartCard.Controls.Add($idleHint)
+
+$toggleFullscreen = New-StudioToggle -X 20 -Y 132 -Checked $true
+$smartCard.Controls.Add($toggleFullscreen)
+$fullscreenLabel = New-StudioLabel -Text 'Pause during fullscreen apps and games' -X 76 -Y 136 -Width 380 -Height 20 -Font $script:FontBody -Color $script:P.Text
+$smartCard.Controls.Add($fullscreenLabel)
+
+$toggleHotkey = New-StudioToggle -X 20 -Y 188 -Checked $true
+$smartCard.Controls.Add($toggleHotkey)
+$hotkeyLabel = New-StudioLabel -Text 'Ctrl+Alt+S captures a snapshot anywhere' -X 76 -Y 192 -Width 380 -Height 20 -Font $script:FontBody -Color $script:P.Text
+$smartCard.Controls.Add($hotkeyLabel)
+$hotkeyHint = New-StudioLabel -Text 'Works while the background app is running. Takes effect after saving.' -X 76 -Y 212 -Width 430 -Height 18 -Font $script:FontBodySmall -Color $script:P.Subtle
+$smartCard.Controls.Add($hotkeyHint)
 
 # Card: storage and privacy
-$storageCard = New-StudioSettingsCard -Title 'Storage & privacy' -Description 'Everything Session Recovery saves stays in your local profile.' -Height 260
+$storageCard = New-StudioSettingsCard -Title 'Storage & privacy' -Description 'Everything Session Recovery saves stays in your local profile.' -Height 330
 $settingsFlow.Controls.Add($storageCard)
 $settingsCards.Add($storageCard)
 
@@ -2353,18 +3219,35 @@ $openData = New-StudioButton -Text 'Open data folder' -X 20 -Y 116 -Width 170 -H
 $openData.Add_Click({ Open-StudioPath (Get-SRRoot) })
 $storageCard.Controls.Add($openData)
 
-$configLabel = New-StudioLabel -Text 'CONFIG FILE' -X 20 -Y 158 -Width 160 -Height 16 -Font $script:FontMono -Color $script:P.Subtle
+$autoExportLabel = New-StudioLabel -Text 'AUTO-BACKUP FOLDER' -X 20 -Y 160 -Width 220 -Height 16 -Font $script:FontMono -Color $script:P.Subtle
+$storageCard.Controls.Add($autoExportLabel)
+$autoExportBox = New-StudioTextBox -X 20 -Y 178 -Width 560 -Height 28
+$storageCard.Controls.Add($autoExportBox)
+$script:Ui.AutoExportBox = $autoExportBox
+$autoExportBrowse = New-StudioButton -Text 'Browse...' -X 592 -Y 177 -Width 110 -Height 30 -Glyph ''
+$autoExportBrowse.Add_Click({
+    $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dialog.Description = 'Choose the auto-backup folder'
+    if ($dialog.ShowDialog([System.Windows.Forms.Form]::ActiveForm) -eq [System.Windows.Forms.DialogResult]::OK) {
+        $script:Ui.AutoExportBox.Text = $dialog.SelectedPath
+    }
+})
+$storageCard.Controls.Add($autoExportBrowse)
+$autoExportHint = New-StudioLabel -Text 'Each new snapshot is copied here as plain JSON (latest ten kept). Leave empty to turn off. Great for a synced folder.' -X 20 -Y 210 -Width 680 -Height 18 -Font $script:FontBodySmall -Color $script:P.Subtle
+$storageCard.Controls.Add($autoExportHint)
+
+$configLabel = New-StudioLabel -Text 'CONFIG FILE' -X 20 -Y 234 -Width 160 -Height 16 -Font $script:FontMono -Color $script:P.Subtle
 $storageCard.Controls.Add($configLabel)
-$configPath = New-StudioLabel -Text '' -X 20 -Y 176 -Width 700 -Height 20 -Font $script:FontMono -Color $script:P.Muted
+$configPath = New-StudioLabel -Text '' -X 20 -Y 252 -Width 700 -Height 20 -Font $script:FontMono -Color $script:P.Muted
 $storageCard.Controls.Add($configPath)
 $script:Ui.ConfigPath = $configPath
-$openConfig = New-StudioButton -Text 'Open config' -X 20 -Y 204 -Width 140 -Height 32 -Glyph ''
+$openConfig = New-StudioButton -Text 'Open config' -X 20 -Y 280 -Width 140 -Height 32 -Glyph ''
 $openConfig.Add_Click({
     $path = Get-SRConfigPath
     if (Test-Path -LiteralPath $path) { Start-Process -FilePath 'notepad.exe' -ArgumentList ('\"{0}\"' -f $path) | Out-Null }
 })
 $storageCard.Controls.Add($openConfig)
-$openLogs = New-StudioButton -Text 'Open logs' -X 172 -Y 204 -Width 140 -Height 32 -Glyph ([string][char]0xE838)
+$openLogs = New-StudioButton -Text 'Open logs' -X 172 -Y 280 -Width 140 -Height 32 -Glyph ([string][char]0xE838)
 $openLogs.Add_Click({ Open-StudioPath (Get-SRLogDirectory) })
 $storageCard.Controls.Add($openLogs)
 
@@ -2383,7 +3266,34 @@ function Load-StudioSettings {
     $tabMap = @('Smart', 'Captured', 'Native', 'None')
     $tabIndex = [array]::IndexOf($tabMap, [string]$script:Config.defaultTabMode)
     $comboTabMode.SelectedIndex = if ($tabIndex -ge 0) { $tabIndex } else { 0 }
-    $comboTheme.SelectedIndex = if ([string]$script:Config.theme -eq 'Daylight') { 1 } else { 0 }
+    $savedThemeKey = Resolve-StudioThemeKey -Theme ([string]$script:Config.theme)
+    $themeIndex = 0
+    for ($index = 0; $index -lt $script:ThemeList.Count; $index++) {
+        if ([string]::Equals([string]$script:ThemeList[$index].Key, $savedThemeKey, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $themeIndex = $index
+            break
+        }
+    }
+    $comboTheme.SelectedIndex = $themeIndex
+    $themeHint.Text = $script:ThemeList[$themeIndex].Description + "`r`nSave to apply instantly, without reopening the Studio."
+    $langIndex = 0
+    for ($index = 0; $index -lt $script:LanguageList.Count; $index++) {
+        if ([string]::Equals([string]$script:LanguageList[$index].Key, [string]$script:Config.language, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $langIndex = $index
+            break
+        }
+    }
+    $comboLanguage.SelectedIndex = $langIndex
+    $idleProperty = $script:Config.PSObject.Properties['pauseWhenIdleMinutes']
+    $toggleIdle.Checked = if ($null -ne $idleProperty) { ([int]$idleProperty.Value) -gt 0 } else { $true }
+    $fullscreenProperty = $script:Config.PSObject.Properties['pauseOnFullscreen']
+    $toggleFullscreen.Checked = if ($null -ne $fullscreenProperty) { [bool]$fullscreenProperty.Value } else { $true }
+    $hotkeyProperty = $script:Config.PSObject.Properties['captureHotkey']
+    $toggleHotkey.Checked = if ($null -ne $hotkeyProperty) { [bool]$hotkeyProperty.Value } else { $true }
+    $autoExportProperty = $script:Config.PSObject.Properties['autoExportFolder']
+    if ($null -ne $script:Ui.AutoExportBox) {
+        $script:Ui.AutoExportBox.Text = if ($null -ne $autoExportProperty) { [string]$autoExportProperty.Value } else { '' }
+    }
     $toggleRestoreBrowsers.Checked = [bool]$script:Config.restoreBrowsers
     $toggleCaptureBrowsers.Checked = [bool]$script:Config.captureBrowserTabs
     $toggleApprox.Checked = [bool]$script:Config.captureApproximateTabs
@@ -2410,7 +3320,23 @@ function Save-StudioSettings {
         $config.promptOnLogon = $promptMap[[Math]::Max(0, $comboPrompt.SelectedIndex)]
         $tabMap = @('Smart', 'Captured', 'Native', 'None')
         $config.defaultTabMode = $tabMap[[Math]::Max(0, $comboTabMode.SelectedIndex)]
-        $config.theme = if ($comboTheme.SelectedIndex -eq 1) { 'Daylight' } else { 'Aurora' }
+        $themeIndex = [Math]::Max(0, [Math]::Min(($script:ThemeList.Count - 1), $comboTheme.SelectedIndex))
+        $selectedThemeKey = [string]$script:ThemeList[$themeIndex].Key
+        $config.theme = $selectedThemeKey
+        $langIndex = [Math]::Max(0, [Math]::Min(($script:LanguageList.Count - 1), $comboLanguage.SelectedIndex))
+        $selectedLanguage = [string]$script:LanguageList[$langIndex].Key
+        $languageChanged = ($selectedLanguage -ne $script:Lang)
+        $config.language = $selectedLanguage
+        $config.pauseWhenIdleMinutes = if ($toggleIdle.Checked) { 15 } else { 0 }
+        $config.pauseOnFullscreen = [bool]$toggleFullscreen.Checked
+        $config.captureHotkey = [bool]$toggleHotkey.Checked
+        if ($null -ne $script:Ui.AutoExportBox) {
+            $exportPath = $script:Ui.AutoExportBox.Text.Trim()
+            if (-not [string]::IsNullOrWhiteSpace($exportPath) -and -not (Test-Path -LiteralPath $exportPath)) {
+                try { New-Item -ItemType Directory -Path $exportPath -Force | Out-Null } catch { }
+            }
+            $config.autoExportFolder = $exportPath
+        }
         $config.restoreBrowsers = [bool]$toggleRestoreBrowsers.Checked
         $config.captureBrowserTabs = [bool]$toggleCaptureBrowsers.Checked
         $config.captureApproximateTabs = [bool]$toggleApprox.Checked
@@ -2420,6 +3346,22 @@ function Save-StudioSettings {
         $config.desktopShortcut = [bool]$toggleDesktop.Checked
         Save-SRConfig -Config $config
         $script:Config = $config
+
+        $themeChanged = ($selectedThemeKey -ne $script:ThemeKey)
+        if ($themeChanged) {
+            [void](Apply-StudioTheme -Theme $selectedThemeKey -Root $form)
+        }
+        if ($languageChanged) {
+            # Re-localize the whole UI live: rebuild the reverse lookup from
+            # English to the new language, mirror the layout for RTL, and
+            # refresh the dynamic labels.
+            Initialize-StudioLanguage -Language $selectedLanguage -Root $form
+            Refresh-StudioData
+            Show-StudioPage -Name $script:CurrentPage -Force
+        }
+        if ($null -ne $script:Ui.ThemeHint) {
+            $script:Ui.ThemeHint.Text = $script:ThemeList[$themeIndex].Description + "`r`nTheme applied. Choose another and save to switch."
+        }
 
         $startupOk = Set-StudioStartWithWindows -Enabled ([bool]$toggleStartup.Checked)
         $desktopOk = Set-StudioDesktopShortcut -Enabled ([bool]$toggleDesktop.Checked)
@@ -2431,13 +3373,19 @@ function Save-StudioSettings {
             $config.desktopShortcut = $false
             $toggleDesktop.Checked = $false
             Set-StudioStatus 'Settings saved, but the desktop shortcut could not be created.' $script:P.Amber
+        } elseif ($themeChanged) {
+            Set-StudioStatus 'Settings saved. The new theme is applied.' $script:P.Green
         } else {
             Set-StudioStatus 'Settings saved. Background protection will pick them up automatically.' $script:P.Green
         }
         Save-SRConfig -Config $config
         $script:Config = $config
         Refresh-StudioData
-        Show-StudioToast 'Settings saved.' $script:P.Green
+        if ($themeChanged) {
+            Show-StudioToast 'Settings saved. Theme applied.' $script:P.Green
+        } else {
+            Show-StudioToast 'Settings saved.' $script:P.Green
+        }
     } catch {
         Set-StudioStatus ('Could not save settings: ' + $_.Exception.Message) $script:P.Red
         Show-StudioToast ('Could not save settings: ' + $_.Exception.Message) $script:P.Red
@@ -2498,9 +3446,12 @@ $script:Ui.DiagFlow = $diagFlow
 $diagHealthCard = New-StudioSettingsCard -Title 'System health' -Description 'A local check of snapshots, background protection and browser capture.' -Height 160
 $diagFlow.Controls.Add($diagHealthCard)
 $diagHealthTitle = New-StudioLabel -Text 'Checking...' -X 20 -Y 70 -Width 500 -Height 30 -Font $script:FontTitle -Color $script:P.Text
+# Long headlines must ellipsize instead of running under the Run checks button.
+$diagHealthTitle.AutoEllipsis = $true
 $diagHealthCard.Controls.Add($diagHealthTitle)
 $script:Ui.DiagHealthTitle = $diagHealthTitle
 $diagHealthDetail = New-StudioLabel -Text 'Reading local status...' -X 20 -Y 108 -Width 520 -Height 32 -Font $script:FontBodySmall -Color $script:P.Muted
+$diagHealthDetail.AutoEllipsis = $true
 $diagHealthCard.Controls.Add($diagHealthDetail)
 $script:Ui.DiagHealthDetail = $diagHealthDetail
 
@@ -2523,6 +3474,7 @@ $diagRefresh = New-StudioButton -Text 'Run checks' -X 430 -Y 70 -Width 160 -Heig
 $diagRefresh.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
 $diagRefresh.Add_Click({ Refresh-StudioDiagnostics })
 $diagHealthCard.Controls.Add($diagRefresh)
+$script:Ui.DiagRefresh = $diagRefresh
 
 $diagChecksCard = New-StudioSettingsCard -Title 'Checks' -Description 'No cloud services and no account. These checks run against this PC only.' -Height 202
 $diagFlow.Controls.Add($diagChecksCard)
@@ -2595,6 +3547,34 @@ function Add-StudioDiagnosticRow {
     $script:DiagnosticRows += $row
 }
 
+function Show-StudioDiagnosticsLoading {
+    if (-not $script:Ui.DiagCheckFlow) { return }
+    foreach ($row in $script:DiagnosticRows) { $row.Dispose() }
+    $script:DiagnosticRows = @()
+    $script:Ui.DiagCheckFlow.Controls.Clear()
+    $messages = @(
+        'Reading local configuration...',
+        'Checking snapshots and background protection...',
+        'Detecting supported browsers...'
+    )
+    foreach ($message in $messages) {
+        $row = New-Object System.Windows.Forms.Panel
+        $row.Height = 24
+        $row.Width = [Math]::Max(200, $script:Ui.DiagCheckFlow.ClientSize.Width - 8)
+        $row.BackColor = $script:P.Card
+        $row.Margin = New-Object System.Windows.Forms.Padding(0)
+        $icon = New-StudioLabel -Text ([string][char]0xE823) -X 4 -Y 2 -Width 20 -Height 20 -Font (New-Object System.Drawing.Font('Segoe MDL2 Assets', 10)) -Color $script:P.Subtle -Align 'MiddleCenter'
+        $row.Controls.Add($icon)
+        $label = New-StudioLabel -Text $message -X 28 -Y 2 -Width ($row.Width - 32) -Height 20 -Font $script:FontBodySmall -Color $script:P.Muted
+        $label.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+        $row.Controls.Add($label)
+        [void]$script:Ui.DiagCheckFlow.Controls.Add($row)
+        $script:DiagnosticRows += $row
+    }
+    $script:Ui.DiagBrowserLabel.Text = 'Checking installed browsers...'
+    $script:Ui.DiagLogText.Text = 'Reading recent activity...'
+}
+
 function Render-StudioDiagnostics {
     param($Diag)
     if (-not $script:Ui.DiagHealthTitle) { return }
@@ -2618,51 +3598,57 @@ function Render-StudioDiagnostics {
         if ($score -ge 80) {
             $script:Ui.DiagRing.ProgressColor = $script:P.Green
             $script:Ui.DiagRing.ProgressEndColor = $script:P.Accent2
-            $script:Ui.DiagHealthTitle.Text = 'Everything looks healthy'
+            $script:Ui.DiagHealthTitle.Text = (T 'Healthy' 'Everything looks healthy')
             $script:Ui.DiagHealthTitle.ForeColor = $script:P.Text
         } elseif ($score -ge 50) {
             $script:Ui.DiagRing.ProgressColor = $script:P.Amber
             $script:Ui.DiagRing.ProgressEndColor = $script:P.Amber
-            $script:Ui.DiagHealthTitle.Text = 'A little attention is needed'
+            $script:Ui.DiagHealthTitle.Text = (T 'AttentionNeeded' 'A little attention is needed')
             $script:Ui.DiagHealthTitle.ForeColor = $script:P.Amber
         } else {
             $script:Ui.DiagRing.ProgressColor = $script:P.Red
             $script:Ui.DiagRing.ProgressEndColor = $script:P.Red
-            $script:Ui.DiagHealthTitle.Text = 'Protection needs attention'
+            $script:Ui.DiagHealthTitle.Text = (T 'ProtectionAttention' 'Protection needs attention')
             $script:Ui.DiagHealthTitle.ForeColor = $script:P.Red
         }
-        $script:Ui.DiagHealthDetail.Text = ('{0} snapshot(s)  •  {1}  •  {2} browser(s) detected' -f $diag.SnapshotCount, [string]$diag.ScheduleMode, @($diag.Browsers).Count)
+        $script:Ui.DiagHealthDetail.Text = ((T 'DiagSummary' '{0} snapshot(s)  •  {1}  •  {2} browser(s) detected') -f $diag.SnapshotCount, [string]$diag.ScheduleMode, @($diag.Browsers).Count)
 
         foreach ($row in $script:DiagnosticRows) { $row.Dispose() }
         $script:DiagnosticRows = @()
         $script:Ui.DiagCheckFlow.Controls.Clear()
 
         if ($diag.ConfigValid) {
-            Add-StudioDiagnosticRow -Ok $true -Text 'Configuration is valid' -Detail (Split-Path -Leaf ([string]$diag.ConfigPath))
+            Add-StudioDiagnosticRow -Ok $true -Text (T 'CheckConfigOk' 'Configuration is valid') -Detail (Split-Path -Leaf ([string]$diag.ConfigPath))
         } else {
-            Add-StudioDiagnosticRow -Ok $false -Text 'Configuration needs attention' -Detail ([string]$diag.ConfigError)
+            Add-StudioDiagnosticRow -Ok $false -Text (T 'CheckConfigBad' 'Configuration needs attention') -Detail ([string]$diag.ConfigError)
         }
         if ($null -eq $age) {
-            Add-StudioDiagnosticRow -Ok $false -Text 'No snapshots saved yet' -Detail 'Use Capture now to make the first one.'
+            Add-StudioDiagnosticRow -Ok $false -Text (T 'NoSnapshotSaved' 'No snapshot has been saved yet.') -Detail (T 'CaptureMomentHint' 'Use Capture now to make the first one.')
         } elseif ($age -le ($interval * 2.5)) {
-            Add-StudioDiagnosticRow -Ok $true -Text 'Latest snapshot is fresh' -Detail (Format-StudioAge -CapturedAt ([datetime]$diag.LatestSnapshotAt))
+            Add-StudioDiagnosticRow -Ok $true -Text (T 'CheckFresh' 'Latest snapshot is fresh') -Detail (Format-StudioAge -CapturedAt ([datetime]$diag.LatestSnapshotAt))
         } else {
-            Add-StudioDiagnosticRow -Ok $false -Text 'Latest snapshot is older than expected' -Detail (Format-StudioAge -CapturedAt ([datetime]$diag.LatestSnapshotAt))
+            Add-StudioDiagnosticRow -Ok $false -Text (T 'CheckStale' 'Latest snapshot is older than expected') -Detail (Format-StudioAge -CapturedAt ([datetime]$diag.LatestSnapshotAt))
         }
         if ([string]$diag.ScheduleMode -eq 'Not running') {
-            Add-StudioDiagnosticRow -Ok $false -Text 'Background protection is not running' -Detail 'Start the background app from Settings.'
+            $disabledTask = @($diag.ScheduledTasks | Where-Object { -not [bool]$_.Enabled }).Count -gt 0
+            $detail = if ($disabledTask) {
+                'The Windows task is disabled. Enable it or start the background app.'
+            } else {
+                'Start the background app from Settings.'
+            }
+            Add-StudioDiagnosticRow -Ok $false -Text (T 'CheckBgNone' 'Background protection is not running') -Detail $detail
         } else {
-            Add-StudioDiagnosticRow -Ok $true -Text 'Background protection is active' -Detail ([string]$diag.ScheduleMode)
+            Add-StudioDiagnosticRow -Ok $true -Text (T 'CheckBgOk' 'Background protection is active') -Detail ([string]$diag.ScheduleMode)
         }
         if (@($diag.Browsers).Count -gt 0) {
-            Add-StudioDiagnosticRow -Ok $true -Text 'Supported browsers detected' -Detail (@($diag.Browsers | ForEach-Object { $_.Name }) -join ', ')
+            Add-StudioDiagnosticRow -Ok $true -Text (T 'CheckBrowsersOk' 'Supported browsers detected') -Detail (@($diag.Browsers | ForEach-Object { $_.Name }) -join ', ')
         } else {
-            Add-StudioDiagnosticRow -Ok $false -Text 'No supported browsers detected' -Detail 'Chrome, Edge, Brave or Firefox can be captured when installed.'
+            Add-StudioDiagnosticRow -Ok $false -Text (T 'CheckBrowsersNone' 'No supported browsers detected') -Detail (T 'NoBrowsersDetected' 'Chrome, Edge, Brave or Firefox can be captured when installed.')
         }
         if (Test-Path -LiteralPath ([string]$diag.SnapshotDirectory)) {
-            Add-StudioDiagnosticRow -Ok $true -Text 'Snapshot storage is writable' -Detail (Format-StudioBytes -Bytes ([int64]$diag.SnapshotBytes))
+            Add-StudioDiagnosticRow -Ok $true -Text (T 'CheckStorageOk' 'Snapshot storage is writable') -Detail (Format-StudioBytes -Bytes ([int64]$diag.SnapshotBytes))
         } else {
-            Add-StudioDiagnosticRow -Ok $false -Text 'Snapshot folder is missing' -Detail ([string]$diag.SnapshotDirectory)
+            Add-StudioDiagnosticRow -Ok $false -Text (T 'CheckStorageNone' 'Snapshot folder is missing') -Detail ([string]$diag.SnapshotDirectory)
         }
 
         $browsers = @($diag.Browsers)
@@ -2688,6 +3674,7 @@ function Render-StudioDiagnostics {
             'Snapshot count: ' + $diag.SnapshotCount,
             'Latest snapshot age (min): ' + $diag.LatestSnapshotAgeMinutes,
             'Schedule mode: ' + $diag.ScheduleMode,
+            'Scheduled tasks: ' + ((@($diag.ScheduledTasks) | ForEach-Object { '{0} ({1})' -f $_.Name, $_.State }) -join ', '),
             'Browsers: ' + (($browsers | ForEach-Object { $_.Name }) -join ', '),
             'Log: ' + $diag.LogPath
         ) -join "`r`n"
@@ -2702,6 +3689,13 @@ function Render-StudioDiagnostics {
     }
 }
 
+function Stop-StudioDiagnosticsLoading {
+    if ($script:DiagLoadingTimer) {
+        try { $script:DiagLoadingTimer.Stop() } catch { }
+    }
+    if ($script:Ui.DiagRefresh) { $script:Ui.DiagRefresh.Enabled = $true }
+}
+
 function Start-StudioDiagnosticsRefresh {
     param([switch]$Force)
     if (-not $script:Ui.DiagHealthTitle) { return }
@@ -2709,20 +3703,61 @@ function Start-StudioDiagnosticsRefresh {
     if (-not $Force -and -not $script:DiagnosticsDirty -and $null -ne $script:Diagnostics) { return }
     $script:DiagnosticsDirty = $true
     $script:DiagnosticsLoading = $true
-    $script:Ui.DiagHealthTitle.Text = 'Checking local health...'
+    $script:DiagStartedAt = Get-Date
+    $script:DiagTitleBase = (T 'CheckingHealth' 'Checking local health')
+    $script:Ui.DiagHealthTitle.Text = $script:DiagTitleBase
     $script:Ui.DiagHealthTitle.ForeColor = $script:P.Text
-    $script:Ui.DiagHealthDetail.Text = 'Reading snapshots, tasks and browser information in the background.'
-    $script:Ui.DiagRing.Value = 0
+    $script:Ui.DiagHealthDetail.Text = (T 'ReadingChecks' 'Reading snapshots, tasks and browser information in the background.')
+    $script:Ui.DiagRing.Value = 8
     $script:Ui.DiagRing.CenterText = '...'
+    if ($script:Ui.DiagRefresh) { $script:Ui.DiagRefresh.Enabled = $false }
+    Show-StudioDiagnosticsLoading
+
+    # Keep the wait visibly alive: sweep the health ring and cycle the dots,
+    # and never let a stuck check freeze the page forever.
+    if ($null -eq $script:DiagLoadingTimer) {
+        $script:DiagPhase = 0
+        $script:DiagLoadingTimer = New-Object System.Windows.Forms.Timer
+        $script:DiagLoadingTimer.Interval = 110
+        $script:DiagLoadingTimer.Add_Tick({
+            $script:DiagPhase = ($script:DiagPhase + 1) % 1000
+            if ($script:Ui.DiagRing) {
+                $script:Ui.DiagRing.Value = (8 + ($script:DiagPhase * 7) % 92)
+            }
+            if ($script:Ui.DiagHealthTitle -and $script:DiagnosticsLoading) {
+                $dots = '.' * ((($script:DiagPhase / 4) % 3) + 1)
+                $script:Ui.DiagHealthTitle.Text = $script:DiagTitleBase + $dots
+            }
+            if (((Get-Date) - $script:DiagStartedAt).TotalSeconds -gt 30) {
+                Stop-StudioWorker -Name 'Diagnostics'
+                $script:DiagnosticsLoading = $false
+                Stop-StudioDiagnosticsLoading
+                $script:DiagnosticsDirty = $true
+                $script:Ui.DiagHealthTitle.Text = (T 'SlowChecks' 'Checks are taking longer than expected')
+                $script:Ui.DiagHealthTitle.ForeColor = $script:P.Amber
+                $script:Ui.DiagHealthDetail.Text = (T 'SlowChecksHint' 'The background check did not finish within 30 seconds. Choose Run checks to try again.')
+                $script:Ui.DiagRing.Value = 0
+                $script:Ui.DiagRing.CenterText = '!'
+            }
+        })
+    }
+    $script:DiagLoadingTimer.Stop()
+    $script:DiagLoadingTimer.Start()
+
     try {
-        Start-StudioWorker -Name 'Diagnostics' -Script {
+        Start-StudioWorker -Name 'Diagnostics' -SharedRunspace -Script {
             param($modulePath)
             $ErrorActionPreference = 'Stop'
-            Import-Module $modulePath -Force -ErrorAction Stop | Out-Null
+            # The shared runspace stays warm, so only the very first check
+            # pays for importing the module.
+            if (-not (Get-Module -Name SessionRecovery -ErrorAction SilentlyContinue)) {
+                Import-Module $modulePath -Force -ErrorAction Stop | Out-Null
+            }
             Get-SRDiagnostics | ConvertTo-Json -Depth 10 -Compress
         } -Arguments @($modulePath)
     } catch {
         $script:DiagnosticsLoading = $false
+        Stop-StudioDiagnosticsLoading
         $script:DiagnosticsDirty = $true
         $script:Ui.DiagHealthTitle.Text = 'Diagnostics could not start'
         $script:Ui.DiagHealthTitle.ForeColor = $script:P.Red
@@ -2737,6 +3772,7 @@ function Refresh-StudioDiagnostics {
 function Complete-StudioDiagnosticsWorker {
     param($Result)
     $script:DiagnosticsLoading = $false
+    Stop-StudioDiagnosticsLoading
     if (-not [string]::IsNullOrWhiteSpace([string]$Result.Error)) {
         $script:DiagnosticsDirty = $true
         $script:Ui.DiagHealthTitle.Text = 'Diagnostics could not run'
@@ -2768,10 +3804,16 @@ function Layout-StudioDiagnostics {
     $diagChecksCard.Width = $width
     $diagBrowserCard.Width = $width
     $diagLogCard.Width = $width
-    $diagHealthDetail.Width = [Math]::Max(240, $width - 230)
-    $diagHealthTitle.Width = [Math]::Max(240, $width - 230)
-    $diagRing.Left = $width - 150
-    $diagRefresh.Left = $diagRing.Left - 176
+    # Ring and button sit at the right edge; the headline and detail texts
+    # must stop well before the button so long headlines can never run
+    # underneath it.
+    $diagRing.Left = $width - $diagRing.Width - 26
+    $diagRing.Top = [Math]::Max(12, [int](($diagHealthCard.Height - $diagRing.Height) / 2))
+    $diagRefresh.Left = $diagRing.Left - $diagRefresh.Width - 16
+    $diagRefresh.Top = $diagRing.Top + [int](($diagRing.Height - $diagRefresh.Height) / 2)
+    $textWidth = [Math]::Max(200, $diagRefresh.Left - 40)
+    $diagHealthTitle.Width = $textWidth
+    $diagHealthDetail.Width = $textWidth
     $diagCheckFlow.Width = [Math]::Max(200, $width - 40)
     $diagBrowserLabel.Width = [Math]::Max(200, $width - 40)
     $diagLogText.Width = [Math]::Max(200, $width - 40)
@@ -2838,9 +3880,9 @@ $aboutFlow.Controls.Add($aboutLocal)
 $aboutLocalText = New-StudioLabel -Text "Snapshots are plain JSON files in your Windows profile. Browser tabs are read locally, and restore opens apps and folders without rewriting files.`r`n`r`nThe background app keeps capturing while you work. Everything can be inspected, backed up or deleted from this Studio." -X 20 -Y 64 -Width 740 -Height 80 -Font $script:FontBody -Color $script:P.Muted
 $aboutLocal.Controls.Add($aboutLocalText)
 
-$aboutNew = New-StudioSettingsCard -Title 'What is new in 2.2' -Description 'Positions, pinning, a light theme and a smoother Studio.' -Height 214
+$aboutNew = New-StudioSettingsCard -Title 'What is new in 2.4' -Description 'Nine languages, smart capture and a faster, calmer Studio.' -Height 214
 $aboutFlow.Controls.Add($aboutNew)
-$aboutNewText = New-StudioLabel -Text "• Restored apps return to their captured position, size and maximized state.`r`n• A playing video in VLC reopens at the moment it was playing.`r`n• Pin important snapshots so retention never deletes them.`r`n• Export and import snapshots as JSON files for backup or another PC.`r`n• Daylight light theme and snapshot search across apps, folders and tabs.`r`n• Chromium and Opera GX join the supported browsers.`r`n• Non-blocking capture, live restore progress, and Pause for 1 hour in the tray." -X 20 -Y 64 -Width 740 -Height 150 -Font $script:FontBody -Color $script:P.Muted
+$aboutNewText = New-StudioLabel -Text "• Nine languages: English, Arabic (right-to-left), French, Spanish, German, Portuguese, Russian, Chinese and Turkish.`r`n• Smart capture: snapshots pause while the PC is idle or a fullscreen app is in front.`r`n• Ctrl+Alt+S captures a snapshot from anywhere while the background app runs.`r`n• Snapshots show what changed since the previous one: new, closed and tabs.`r`n• Playing media reopens where it was: VLC, MPC-HC, MPC-BE, mpv, PotPlayer, Windows Media Player.`r`n• Fourteen studio themes, light and dark, with clearer text everywhere.`r`n• Vivaldi, Chromium, Opera, Opera GX, Waterfox and LibreWolf join the supported browsers.`r`n• Automatic snapshots are completely silent: no popups, no sounds." -X 20 -Y 64 -Width 740 -Height 150 -Font $script:FontBody -Color $script:P.Muted
 $aboutNew.Controls.Add($aboutNewText)
 
 $aboutUpdates = New-StudioSettingsCard -Title 'Application updates' -Description 'Check the private GitHub release channel for a newer build.' -Height 218
@@ -3202,9 +4244,9 @@ function Layout-Studio {
 }
 
 function Show-StudioPage {
-    param([string]$Name)
+    param([string]$Name, [switch]$Force)
     if (-not $script:Pages.Contains($Name)) { $Name = 'Dashboard' }
-    if ($Name -eq $script:CurrentPage -and $script:PageLoaded.ContainsKey($Name)) { return }
+    if (-not $Force -and $Name -eq $script:CurrentPage -and $script:PageLoaded.ContainsKey($Name)) { return }
 
     $previous = $script:CurrentPage
     $script:CurrentPage = $Name
@@ -3246,6 +4288,8 @@ function Show-StudioPage {
         $captureButton.Visible = ($Name -eq 'Dashboard' -or $Name -eq 'Snapshots')
         $refreshButton.Visible = ($Name -eq 'Diagnostics')
         Layout-StudioHeader
+        $pageTitle.Text = [string](Localize-StudioString $pageTitle.Text)
+        $pageSubtitle.Text = [string](Localize-StudioString $pageSubtitle.Text)
         if ($script:PageHost.ClientSize.Width -gt 0) {
             $target.Size = $script:PageHost.ClientSize
         }
@@ -3268,8 +4312,48 @@ function Show-StudioPage {
     $script:PageLoaded[$Name] = $true
 }
 
+function Wait-StudioRenderPump {
+    param(
+        [int]$Milliseconds = 350,
+        [scriptblock]$Until = $null,
+        [int]$TimeoutMilliseconds = 9000
+    )
+    $elapsed = 0
+    while ($elapsed -lt [Math]::Max(0, $Milliseconds)) {
+        [System.Windows.Forms.Application]::DoEvents()
+        try { Update-StudioWorkers } catch { }
+        Start-Sleep -Milliseconds 40
+        $elapsed += 40
+    }
+    if ($null -ne $Until) {
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($watch.ElapsedMilliseconds -lt $TimeoutMilliseconds) {
+            [System.Windows.Forms.Application]::DoEvents()
+            try { Update-StudioWorkers } catch { }
+            $done = $false
+            try { $done = [bool](& $Until) } catch { $done = $true }
+            if ($done) { break }
+            Start-Sleep -Milliseconds 40
+        }
+    }
+}
+
+$form.Add_ResizeBegin({
+    if ($script:UiReady -and -not $script:RenderMode) {
+        $script:FormResizing = $true
+        $form.SuspendLayout()
+    }
+})
+$form.Add_ResizeEnd({
+    if ($script:FormResizing) {
+        $script:FormResizing = $false
+        try { $form.ResumeLayout($true) } catch { }
+        Layout-Studio
+        $form.Invalidate($true)
+    }
+})
 $form.Add_Resize({
-    if ($script:UiReady) { Layout-Studio }
+    if ($script:UiReady -and -not $script:FormResizing) { Layout-Studio }
 })
 $form.Add_KeyDown({
     param($sender, $eventArgs)
@@ -3300,7 +4384,7 @@ $statusTimer.Add_Tick({
     try {
         Refresh-StudioSidebar
         if ($script:CurrentPage -eq 'Dashboard') {
-            $script:Ui.HeroNext.Text = 'Next automatic snapshot  •  ' + (Format-StudioNext)
+            $script:Ui.HeroNext.Text = ((T 'NextSnapshot' 'Next automatic snapshot') + '  •  ' + (Format-StudioNext))
         }
     } catch { }
 })
@@ -3326,6 +4410,11 @@ $form.Add_FormClosing({
     try { $statusTimer.Stop(); $statusTimer.Dispose() } catch { }
     if ($script:StudioTaskTimer) { try { $script:StudioTaskTimer.Stop(); $script:StudioTaskTimer.Dispose() } catch { } }
     foreach ($workerName in @($script:StudioJobs.Keys)) { Stop-StudioWorker -Name $workerName }
+    if ($script:DiagLoadingTimer) { try { $script:DiagLoadingTimer.Stop(); $script:DiagLoadingTimer.Dispose() } catch { } }
+    if ($script:SharedWorkerRunspace) {
+        try { $script:SharedWorkerRunspace.Close(); $script:SharedWorkerRunspace.Dispose() } catch { }
+        $script:SharedWorkerRunspace = $null
+    }
     if ($script:SnapshotBuildTimer) { try { $script:SnapshotBuildTimer.Stop(); $script:SnapshotBuildTimer.Dispose() } catch { } }
     if ($script:SnapshotDetailsTimer) { try { $script:SnapshotDetailsTimer.Stop(); $script:SnapshotDetailsTimer.Dispose() } catch { } }
     if ($script:SnapshotLayoutTimer) { try { $script:SnapshotLayoutTimer.Stop(); $script:SnapshotLayoutTimer.Dispose() } catch { } }
@@ -3333,22 +4422,51 @@ $form.Add_FormClosing({
     if ($script:CapturePollTimer) { try { $script:CapturePollTimer.Stop(); $script:CapturePollTimer.Dispose() } catch { } }
 })
 
+# One pass over the finished tree removes flicker from the panels that do not
+# opt into double buffering themselves.
+Enable-StudioDoubleBufferTree -Control $form
+
+# Translate the built UI once and mirror it for right-to-left languages.
+Initialize-StudioLanguage -Language $studioLanguage -Root $form
+
 if (-not [string]::IsNullOrWhiteSpace($RenderDir)) {
     $script:RenderMode = $true
     $form.ShowInTaskbar = $false
     $form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
     $form.Location = New-Object System.Drawing.Point(-4000, -4000)
+    # Optional render-time client size (WxH) for layout testing at other
+    # window sizes, for example a maximized 1366x768 screen.
+    if (-not [string]::IsNullOrWhiteSpace($env:SESSIONRECOVERY_RENDER_SIZE)) {
+        try {
+            $parts = ([string]$env:SESSIONRECOVERY_RENDER_SIZE).Split('x')
+            $form.ClientSize = New-Object System.Drawing.Size([int]$parts[0], [int]$parts[1])
+        } catch { }
+    }
     $form.Show()
     $script:UiReady = $true
     Layout-Studio
     Refresh-StudioData
+    # Optional: exercise the live theme switch used by the Settings page.
+    if (-not [string]::IsNullOrWhiteSpace($env:SESSIONRECOVERY_RENDER_THEME)) {
+        [void](Apply-StudioTheme -Theme ([string]$env:SESSIONRECOVERY_RENDER_THEME) -Root $form)
+    }
     [System.Windows.Forms.Application]::DoEvents()
     if (-not (Test-Path -LiteralPath $RenderDir)) { New-Item -ItemType Directory -Path $RenderDir -Force | Out-Null }
+    # Longer waits let background workers (diagnostics) finish before the
+    # page is captured. Default keeps the old ~600 ms behaviour.
+    $renderWaitMs = 600
+    try {
+        if (-not [string]::IsNullOrWhiteSpace($env:SESSIONRECOVERY_RENDER_MS)) {
+            $renderWaitMs = [Math]::Max(100, [int]$env:SESSIONRECOVERY_RENDER_MS)
+        }
+    } catch { }
     foreach ($renderPage in @('Dashboard', 'Snapshots', 'Exclusions', 'Settings', 'Diagnostics', 'About')) {
         Show-StudioPage -Name $renderPage
-        for ($pump = 0; $pump -lt 12; $pump++) {
+        $renderDeadline = [DateTime]::UtcNow.AddMilliseconds($renderWaitMs)
+        while ([DateTime]::UtcNow -lt $renderDeadline) {
             [System.Windows.Forms.Application]::DoEvents()
             Start-Sleep -Milliseconds 50
+            [System.Windows.Forms.Application]::DoEvents()
         }
         $bitmap = New-Object System.Drawing.Bitmap($form.ClientSize.Width, $form.ClientSize.Height)
         $rect = New-Object System.Drawing.Rectangle(0, 0, $bitmap.Width, $bitmap.Height)
@@ -3356,6 +4474,17 @@ if (-not [string]::IsNullOrWhiteSpace($RenderDir)) {
         $renderPath = Join-Path $RenderDir ($renderPage + '.png')
         $bitmap.Save($renderPath, [System.Drawing.Imaging.ImageFormat]::Png)
         $bitmap.Dispose()
+        if ($renderPage -eq 'Diagnostics' -and -not [string]::IsNullOrWhiteSpace($env:SESSIONRECOVERY_RENDER_DUMP)) {
+            $dump = New-Object System.Collections.Generic.List[string]
+            $dump.Add(('form client: {0}x{1}' -f $form.ClientSize.Width, $form.ClientSize.Height))
+            $dump.Add(('diagFlow client: {0}x{1}  scroll: {2}x{3}' -f $script:Ui.DiagFlow.ClientSize.Width, $script:Ui.DiagFlow.ClientSize.Height, $script:Ui.DiagFlow.DisplayRectangle.Width, $script:Ui.DiagFlow.DisplayRectangle.Height))
+            $dump.Add(('healthCard: {0}' -f $diagHealthCard.Bounds))
+            $dump.Add(('ring: {0}' -f $script:Ui.DiagRing.Bounds))
+            $dump.Add(('refresh: {0}' -f $script:Ui.DiagRefresh.Bounds))
+            $dump.Add(('headline: {0}' -f $script:Ui.DiagHealthTitle.Bounds))
+            $dump.Add(('detail: {0}' -f $script:Ui.DiagHealthDetail.Bounds))
+            [System.IO.File]::WriteAllLines($env:SESSIONRECOVERY_RENDER_DUMP, $dump)
+        }
     }
     $form.Close()
     $form.Dispose()

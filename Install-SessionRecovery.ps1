@@ -318,7 +318,7 @@ function Register-SRTasks {
     param([int]$Minutes)
 
     $snapshotAction = New-ScheduledTaskAction -Execute $hostPath `
-        -Argument '--snapshot' -WorkingDirectory $InstallDirectory
+        -Argument '--snapshot-quiet' -WorkingDirectory $InstallDirectory
     $restoreAction = New-ScheduledTaskAction -Execute $hostPath `
         -Argument '--restore-prompt' -WorkingDirectory $InstallDirectory
 

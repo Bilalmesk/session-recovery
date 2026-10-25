@@ -1067,6 +1067,11 @@ function Get-SRDefaultConfig {
         startWithWindows        = $true
         desktopShortcut         = $true
         theme                   = 'Aurora'
+        language                = 'en'
+        pauseWhenIdleMinutes    = 15
+        pauseOnFullscreen       = $true
+        captureHotkey           = $true
+        autoExportFolder        = ''
         excludeApps             = @()
         excludeFolders          = @()
         excludeUrls             = @()
@@ -1138,6 +1143,38 @@ function Get-SRProcessMap {
         Write-SRLog -Level WARN -Message "Could not enumerate processes: $($_.Exception.Message)"
     }
     return $map
+}
+
+function Get-SRAppPath {
+    # Reading App Paths through the registry provider is slow because it loads
+    # the provider for every lookup. Direct registry access keeps diagnostics
+    # and browser capture quick even when several browsers are installed.
+    param([Parameter(Mandatory = $true)][string]$ExeName)
+    if ([string]::IsNullOrWhiteSpace($ExeName)) { return $null }
+    $subKey = 'SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\' + $ExeName
+    $locations = @(
+        @{ Hive = [Microsoft.Win32.RegistryHive]::CurrentUser; View = [Microsoft.Win32.RegistryView]::Default },
+        @{ Hive = [Microsoft.Win32.RegistryHive]::LocalMachine; View = [Microsoft.Win32.RegistryView]::Default },
+        @{ Hive = [Microsoft.Win32.RegistryHive]::LocalMachine; View = [Microsoft.Win32.RegistryView]::Registry32 }
+    )
+    foreach ($location in $locations) {
+        $base = $null
+        $key = $null
+        try {
+            $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey($location.Hive, $location.View)
+            $key = $base.OpenSubKey($subKey)
+            if ($null -eq $key) { continue }
+            $value = [string]$key.GetValue('')
+            if (-not [string]::IsNullOrWhiteSpace($value) -and (Test-Path -LiteralPath $value)) {
+                return $value
+            }
+        } catch {
+        } finally {
+            if ($null -ne $key) { try { $key.Dispose() } catch { } }
+            if ($null -ne $base) { try { $base.Dispose() } catch { } }
+        }
+    }
+    return $null
 }
 
 function Get-SRLogonTime {
@@ -1369,7 +1406,7 @@ function Get-SRApplications {
         '\Windows\System32\TextInputHost.exe',
         '\Windows\System32\LockApp.exe'
     )
-    $browserNames = @('chrome', 'msedge', 'brave', 'vivaldi', 'opera', 'chromium', 'firefox')
+    $browserNames = @('chrome', 'msedge', 'brave', 'vivaldi', 'opera', 'chromium', 'firefox', 'waterfox', 'librewolf')
 
     $groups = @{}
 
@@ -1610,6 +1647,30 @@ function Get-SRBrowserDefinitions {
                 (Join-Path $programFilesX86 'Mozilla Firefox\firefox.exe'),
                 (Join-Path $localAppData 'Mozilla Firefox\firefox.exe')
             )
+        },
+        [pscustomobject]@{
+            key          = 'waterfox'
+            name         = 'Waterfox'
+            processNames = @('waterfox')
+            kind         = 'firefox'
+            userDataDir  = (Join-Path $roaming 'Waterfox')
+            candidates   = @(
+                (Join-Path $programFiles 'Waterfox\waterfox.exe'),
+                (Join-Path $programFilesX86 'Waterfox\waterfox.exe'),
+                (Join-Path $localAppData 'Waterfox\waterfox.exe')
+            )
+        },
+        [pscustomobject]@{
+            key          = 'librewolf'
+            name         = 'LibreWolf'
+            processNames = @('librewolf')
+            kind         = 'firefox'
+            userDataDir  = (Join-Path $roaming 'LibreWolf')
+            candidates   = @(
+                (Join-Path $programFiles 'LibreWolf\librewolf.exe'),
+                (Join-Path $programFilesX86 'LibreWolf\librewolf.exe'),
+                (Join-Path $localAppData 'LibreWolf\librewolf.exe')
+            )
         }
     )
 }
@@ -1639,6 +1700,69 @@ function Test-SRBrowserProcess {
     return $false
 }
 
+function Get-SRShortcutTarget {
+    param([Parameter(Mandatory = $true)][string]$ShortcutPath)
+    $shell = $null
+    try {
+        $shell = New-Object -ComObject WScript.Shell
+        $shortcut = $shell.CreateShortcut($ShortcutPath)
+        $target = [string]$shortcut.TargetPath
+        if (-not [string]::IsNullOrWhiteSpace($target) -and (Test-Path -LiteralPath $target)) { return $target }
+    } catch {
+    } finally {
+        if ($null -ne $shell) { try { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell) } catch { } }
+    }
+    return $null
+}
+
+function Resolve-SRBrowserFromShortcuts {
+    # Some browsers install to unusual folders with no registry entry. Their
+    # Start Menu shortcut is then the only reliable pointer to the exe.
+    param([Parameter(Mandatory = $true)]$Definition)
+
+    $nameHints = @()
+    foreach ($processName in @($Definition.processNames)) {
+        $hint = [System.IO.Path]::GetFileNameWithoutExtension($processName)
+        if ($nameHints -notcontains $hint) { $nameHints += $hint }
+    }
+    $patterns = @()
+    $patternProperty = $Definition.PSObject.Properties['processPathPatterns']
+    if ($null -ne $patternProperty) { $patterns = @($patternProperty.Value) }
+
+    $menuRoots = @(
+        (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'),
+        (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs')
+    )
+    foreach ($root in $menuRoots) {
+        if ([string]::IsNullOrWhiteSpace($root) -or -not (Test-Path -LiteralPath $root)) { continue }
+        $links = @()
+        try {
+            $links = @(Get-ChildItem -LiteralPath $root -Recurse -Filter '*.lnk' -File -ErrorAction SilentlyContinue)
+        } catch { continue }
+        foreach ($link in $links) {
+            $base = [System.IO.Path]::GetFileNameWithoutExtension($link.Name)
+            $nameMatch = $false
+            foreach ($hint in $nameHints) {
+                if ($base -like ('*' + $hint + '*')) { $nameMatch = $true; break }
+            }
+            if (-not $nameMatch) { continue }
+            $target = Get-SRShortcutTarget -ShortcutPath $link.FullName
+            if ([string]::IsNullOrWhiteSpace($target)) { continue }
+            # Opera and Opera GX both run opera.exe; keep the shortcut that
+            # matches this definition's install folder.
+            if ($patterns.Count -gt 0) {
+                $pathMatch = $false
+                foreach ($pattern in $patterns) {
+                    if ($target -like [string]$pattern) { $pathMatch = $true; break }
+                }
+                if (-not $pathMatch) { continue }
+            }
+            return $target
+        }
+    }
+    return $null
+}
+
 function Resolve-SRBrowserExe {
     param(
         [Parameter(Mandatory = $true)]$Definition,
@@ -1661,13 +1785,11 @@ function Resolve-SRBrowserExe {
     }
 
     $exeName = $Definition.processNames[0] + '.exe'
-    foreach ($hive in @('HKCU:', 'HKLM:')) {
-        try {
-            $key = "$hive\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\$exeName"
-            $value = (Get-ItemProperty -LiteralPath $key -ErrorAction Stop).'(default)'
-            if ($value -and (Test-Path -LiteralPath $value)) { return $value }
-        } catch { }
-    }
+    $value = Get-SRAppPath -ExeName $exeName
+    if (-not [string]::IsNullOrWhiteSpace($value)) { return $value }
+
+    $fromShortcut = Resolve-SRBrowserFromShortcuts -Definition $Definition
+    if (-not [string]::IsNullOrWhiteSpace($fromShortcut)) { return $fromShortcut }
     return $null
 }
 
@@ -2240,6 +2362,103 @@ function Get-SRBrowsers {
 # Media players (VLC first: file resolution + playback position tracking)
 # ---------------------------------------------------------------------------
 
+# Players beyond VLC. Their window title names the file being played; the
+# position is dead-reckoned from the first sighting (same idea as the VLC
+# fallback) and players that accept a start-position argument resume there.
+function Get-SRMediaPlayerDefinitions {
+    return @(
+        [pscustomobject]@{
+            key         = 'mpc-hc'
+            processes   = @('mpc-hc64', 'mpc-hc')
+            # Window title when nothing is open.
+            idleTitle   = '(?i)^(media player classic|mpc-hc|mpc-be)\b.*'
+            titleTokens = 'MPC-HC|MPC-BE|Media Player Classic'
+            seekKind    = 'none'
+        },
+        [pscustomobject]@{
+            key         = 'mpc-be'
+            processes   = @('mpc-be64', 'mpc-be')
+            idleTitle   = '(?i)^(media player classic|mpc-be)\b.*'
+            titleTokens = 'MPC-BE|Media Player Classic'
+            seekKind    = 'startpos'
+        },
+        [pscustomobject]@{
+            key         = 'mpv'
+            processes   = @('mpv')
+            idleTitle   = '(?i)^mpv$'
+            titleTokens = 'mpv'
+            seekKind    = 'start'
+        },
+        [pscustomobject]@{
+            key         = 'potplayer'
+            processes   = @('potplayermini64', 'potplayermini', 'potplayer')
+            idleTitle   = '(?i)^potplayer$'
+            titleTokens = 'PotPlayer|Daum PotPlayer'
+            seekKind    = 'seek'
+        },
+        [pscustomobject]@{
+            key         = 'wmplayer'
+            processes   = @('wmplayer')
+            idleTitle   = '(?i)^(windows media player|media player)$'
+            titleTokens = 'Windows Media Player'
+            seekKind    = 'none'
+        }
+    )
+}
+
+function ConvertTo-SRPlayerMediaTitle {
+    # "song.mp3 - MPC-HC", "movie.mkv — mpv" and "PotPlayer - clip.mp4" all
+    # reduce to the file name once the player token is stripped.
+    param(
+        [Parameter(Mandatory = $true)][string]$Title,
+        [Parameter(Mandatory = $true)][string]$TitleTokens
+    )
+    if ([string]::IsNullOrWhiteSpace($Title)) { return $null }
+    $t = $Title.Trim()
+    $t = [regex]::Replace($t, ('\s*[-–—]\s*(?:' + $TitleTokens + ')\s*$'), '', 'IgnoreCase')
+    $t = [regex]::Replace($t, ('^(?:' + $TitleTokens + ')\s*[-–—]\s*'), '', 'IgnoreCase')
+    if ([string]::IsNullOrWhiteSpace($t)) { return $null }
+    return $t
+}
+
+function Resolve-SRMediaFileFromTitle {
+    # Resolve a bare file name from a player title to a full path: first the
+    # Windows Recent items (they point at the actual opened files), then a
+    # shallow search of the usual media libraries.
+    param([string]$Title)
+    if ([string]::IsNullOrWhiteSpace($Title)) { return $null }
+    if ($Title -match '^[A-Za-z]:\\' -and (Test-Path -LiteralPath $Title)) { return $Title }
+
+    $leaf = Split-Path -Leaf $Title
+    $recentDir = Join-Path $env:APPDATA 'Microsoft\Windows\Recent'
+    try {
+        $links = @(Get-ChildItem -LiteralPath $recentDir -Filter '*.lnk' -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -ieq ($leaf + '.lnk') } |
+            Sort-Object -Property LastWriteTime -Descending)
+        foreach ($link in $links) {
+            $target = Get-SRShortcutTarget -ShortcutPath $link.FullName
+            if (-not [string]::IsNullOrWhiteSpace($target)) { return $target }
+        }
+    } catch { }
+
+    $roots = @(
+        [Environment]::GetFolderPath('MyVideos'),
+        [Environment]::GetFolderPath('MyMusic'),
+        [Environment]::GetFolderPath('MyDocuments'),
+        (Join-Path $env:USERPROFILE 'Downloads'),
+        [Environment]::GetFolderPath('Desktop')
+    )
+    foreach ($root in $roots) {
+        if ([string]::IsNullOrWhiteSpace($root) -or -not (Test-Path -LiteralPath $root)) { continue }
+        try {
+            $hit = Get-ChildItem -LiteralPath $root -Recurse -Depth 2 -File -Filter $leaf -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+            if ($null -ne $hit) { return $hit.FullName }
+        } catch { }
+    }
+    return $null
+}
+
 # VLC keeps its recent files and resume positions in vlc-qt-interface.ini.
 # The flat format is:  list=<uri>, <uri>, ...   times=<ms>, <ms>, ...
 # (parallel arrays; index 0 is the most recent). Older builds used numbered
@@ -2560,6 +2779,85 @@ function Get-SRMediaPlayerMedia {
         $state.players.Remove('vlc')
         $stateDirty = $true
     }
+
+    # Other players: the window title names the file, and the position is
+    # dead-reckoned from the first sighting of that file.
+    $knownPlayerKeys = @{}
+    foreach ($player in Get-SRMediaPlayerDefinitions) {
+        foreach ($processName in @($player.processes)) { $knownPlayerKeys[$processName] = $player }
+    }
+    $seenKeys = @{}
+    foreach ($app in @($Apps)) {
+        if ($null -eq $app -or $null -ne $app.PSObject.Properties['media']) { continue }
+        $player = $knownPlayerKeys[([string]$app.name).ToLowerInvariant()]
+        if ($null -eq $player) { continue }
+
+        $rawTitle = $null
+        foreach ($window in @($app.windows)) {
+            $candidate = ([string]$window.title).Trim()
+            if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+            if ($candidate -match [string]$player.idleTitle) { continue }
+            $rawTitle = $candidate
+            break
+        }
+        if ($null -eq $rawTitle) { continue }
+
+        $title = ConvertTo-SRPlayerMediaTitle -Title $rawTitle -TitleTokens ([string]$player.titleTokens)
+        if ([string]::IsNullOrWhiteSpace($title)) { continue }
+        $file = Resolve-SRMediaFileFromTitle -Title $title
+        if ([string]::IsNullOrWhiteSpace($file)) { continue }
+        $seenKeys[[string]$player.key] = $true
+
+        $entry = $null
+        if ($state.players.ContainsKey([string]$player.key)) { $entry = $state.players[[string]$player.key] }
+        $anchorMs = [long]0
+        $anchorAt = $now
+        if ($null -ne $entry -and [string]$entry.file -eq $file) {
+            try {
+                $anchorMs = [long][double]$entry.anchorPositionMs
+                $anchorAt = [datetime]::Parse([string]$entry.anchorAt, [System.Globalization.CultureInfo]::InvariantCulture)
+                if ($anchorAt -ge $now -or $anchorAt -eq [datetime]::MinValue) { $anchorAt = $now; $anchorMs = 0 }
+            } catch {
+                $anchorMs = [long]0
+                $anchorAt = $now
+            }
+        }
+
+        $durationSeconds = Get-SRMediaDurationSeconds -Path $file
+        $positionMs = $anchorMs + [int64](($now - $anchorAt).TotalMilliseconds)
+        if ($positionMs -lt 0) { $positionMs = 0 }
+        if ($null -ne $durationSeconds -and $durationSeconds -gt 0) {
+            $capMs = [int64]($durationSeconds * 1000) - 5000
+            if ($capMs -lt 0) { $capMs = 0 }
+            if ($positionMs -gt $capMs) { $positionMs = $capMs }
+        }
+
+        $media = [pscustomobject]@{
+            file            = $file
+            title           = Split-Path -Leaf $file
+            positionSeconds = [Math]::Round($positionMs / 1000.0, 1)
+            durationSeconds = $durationSeconds
+            estimated       = $true
+        }
+        $app | Add-Member -NotePropertyName media -NotePropertyValue $media -Force
+        $state.players[[string]$player.key] = [pscustomobject]@{
+            file             = $file
+            savedPositionMs  = [long]0
+            anchorPositionMs = $positionMs
+            anchorAt         = $now.ToString('o')
+            lastSeenAt       = $now.ToString('o')
+            durationSeconds  = $durationSeconds
+        }
+        $stateDirty = $true
+        Write-SRLog -Level DEBUG -Message ("{0} media captured: {1} at {2}s" -f $player.key, $file, $media.positionSeconds)
+    }
+    foreach ($player in Get-SRMediaPlayerDefinitions) {
+        if (-not $seenKeys.ContainsKey([string]$player.key) -and $state.players.ContainsKey([string]$player.key)) {
+            $state.players.Remove([string]$player.key)
+            $stateDirty = $true
+        }
+    }
+
     if ($stateDirty) { Save-SRMediaState -State $state }
 }
 
@@ -2583,6 +2881,27 @@ function Get-SRMediaLaunchArguments {
             $arguments.Add('--qt-continue=2')
             $arguments.Add(('--start-time={0}' -f [int][Math]::Floor($position)))
         }
+        $arguments.Add($file)
+        return $arguments.ToArray()
+    }
+    if ($leaf -eq 'mpv') {
+        $arguments = New-Object System.Collections.Generic.List[string]
+        if ($position -ge 10) { $arguments.Add(('--start={0}' -f [int][Math]::Floor($position))) }
+        $arguments.Add($file)
+        return $arguments.ToArray()
+    }
+    if ($leaf -like 'potplayer*') {
+        $arguments = New-Object System.Collections.Generic.List[string]
+        if ($position -ge 10) {
+            $span = [timespan]::FromSeconds([int][Math]::Floor($position))
+            $arguments.Add(('/seek={0:00}:{1:00}:{2:00}' -f [int]$span.TotalHours, $span.Minutes, $span.Seconds))
+        }
+        $arguments.Add($file)
+        return $arguments.ToArray()
+    }
+    if ($leaf -eq 'mpc-be' -or $leaf -eq 'mpc-be64') {
+        $arguments = New-Object System.Collections.Generic.List[string]
+        if ($position -ge 10) { $arguments.Add(('/startpos {0}' -f [int][Math]::Floor($position))) }
         $arguments.Add($file)
         return $arguments.ToArray()
     }
@@ -2726,10 +3045,103 @@ function Remove-OldSRSnapshots {
     }
 }
 
+function Get-SRIdleSeconds {
+    # Minutes since the last keyboard/mouse input, via GetLastInputInfo.
+    try {
+        if ($null -eq $script:SRGetIdleSeconds) {
+            $source = @'
+using System;
+using System.Runtime.InteropServices;
+public static class SRIdleInput {
+    [StructLayout(LayoutKind.Sequential)]
+    struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
+    [DllImport("user32.dll")] static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+    public static double GetIdleSeconds() {
+        LASTINPUTINFO info = new LASTINPUTINFO();
+        info.cbSize = (uint)Marshal.SizeOf(info);
+        if (!GetLastInputInfo(ref info)) { return -1; }
+        uint tick = (uint)Environment.TickCount;
+        uint elapsed = tick - info.dwTime;
+        return elapsed / 1000.0;
+    }
+}
+'@
+            Add-Type -TypeDefinition $source -ErrorAction Stop
+        }
+        return [SRIdleInput]::GetIdleSeconds()
+    } catch { return -1 }
+}
+$script:SRGetIdleSeconds = $null
+
+function Test-SRFullscreenActive {
+    # True when the foreground window covers a full screen (games, video).
+    try {
+        if ($null -eq $script:SRScreens) {
+            Add-Type -AssemblyName System.Windows.Forms
+            $script:SRScreens = @([System.Windows.Forms.Screen]::AllScreens)
+        }
+        $source = @'
+using System;
+using System.Runtime.InteropServices;
+public static class SRForeground {
+    [StructLayout(LayoutKind.Sequential)]
+    struct RECT { public int Left, Top, Right, Bottom; }
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+    [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+    public static bool IsFullscreen(int screenWidth, int screenHeight) {
+        IntPtr handle = GetForegroundWindow();
+        if (handle == IntPtr.Zero) { return false; }
+        // Skip maximized desktop windows: they are common and harmless.
+        const int GWL_STYLE = -16;
+        const int WS_CAPTION = 0x00C00000;
+        int style = GetWindowLong(handle, GWL_STYLE);
+        if ((style & WS_CAPTION) != 0) { return false; }
+        RECT rect;
+        if (!GetWindowRect(handle, out rect)) { return false; }
+        return (rect.Right - rect.Left) >= screenWidth && (rect.Bottom - rect.Top) >= screenHeight;
+    }
+}
+'@
+        if ($null -eq $script:SRForegroundChecked) {
+            Add-Type -TypeDefinition $source -ErrorAction Stop
+            $script:SRForegroundChecked = $true
+        }
+        foreach ($screen in $script:SRScreens) {
+            $bounds = $screen.Bounds
+            if ([SRForeground]::IsFullscreen($bounds.Width, $bounds.Height)) { return $true }
+        }
+        return $false
+    } catch { return $false }
+}
+$script:SRScreens = $null
+$script:SRForegroundChecked = $null
+
 function Save-SRSnapshot {
+    param([switch]$Force)
     $config = Get-SRConfig
     if (-not (Test-Path -LiteralPath $script:SRSnapshotDir)) {
         New-Item -ItemType Directory -Path $script:SRSnapshotDir -Force | Out-Null
+    }
+
+    # Smart capture: skip pointless or intrusive snapshots. Manual captures
+    # (from the tray or the hotkey) always run.
+    if (-not $Force) {
+        $idleMinutes = 0
+        try { $idleMinutes = [int]$config.pauseWhenIdleMinutes } catch { $idleMinutes = 0 }
+        if ($idleMinutes -gt 0) {
+            $idle = Get-SRIdleSeconds
+            if ($idle -ge 0 -and $idle -ge ($idleMinutes * 60)) {
+                Write-SRLog -Level DEBUG -Message ("Skipped snapshot: idle for {0:N0} minutes." -f ($idle / 60))
+                return $null
+            }
+        }
+        $pauseFullscreen = $true
+        try { $pauseFullscreen = [bool]$config.pauseOnFullscreen } catch { }
+        if ($pauseFullscreen -and (Test-SRFullscreenActive)) {
+            Write-SRLog -Level DEBUG -Message 'Skipped snapshot: a fullscreen app is in front.'
+            return $null
+        }
     }
 
     $lockPath = Join-Path $script:SRSnapshotDir '.save.lock'
@@ -2756,6 +3168,26 @@ function Save-SRSnapshot {
         [System.IO.File]::WriteAllText($path, $json, (New-Object System.Text.UTF8Encoding($false)))
         Remove-OldSRSnapshots -Keep ([int]$config.keepSnapshots) -MaxAgeDays ([int]$config.keepSnapshotDays) -Pinned @($config.pinnedSnapshots)
         Write-SRLog -Message ("Snapshot saved: {0} ({1} apps, {2} folders, {3} browsers, {4} tabs)" -f $path, $snapshot.stats.apps, $snapshot.stats.folders, $snapshot.stats.browsers, $snapshot.stats.tabs)
+        try {
+            $exportFolder = [string]$config.autoExportFolder
+            if (-not [string]::IsNullOrWhiteSpace($exportFolder)) {
+                # Auto-backup: keep the newest snapshots as plain JSON copies
+                # so OneDrive/Dropbox-style folders can carry them elsewhere.
+                if (-not (Test-Path -LiteralPath $exportFolder)) {
+                    New-Item -ItemType Directory -Path $exportFolder -Force | Out-Null
+                }
+                Copy-Item -LiteralPath $path -Destination (Join-Path $exportFolder (Split-Path -Leaf $path)) -Force
+                $exports = @(Get-ChildItem -LiteralPath $exportFolder -Filter 'session-*.json' -File -ErrorAction SilentlyContinue |
+                    Sort-Object -Property LastWriteTime -Descending)
+                if ($exports.Count -gt 10) {
+                    foreach ($old in ($exports | Select-Object -Skip 10)) {
+                        try { Remove-Item -LiteralPath $old.FullName -Force -ErrorAction SilentlyContinue } catch { }
+                    }
+                }
+            }
+        } catch {
+            Write-SRLog -Level WARN -Message ("Auto-backup export failed: {0}" -f $_.Exception.Message)
+        }
         return $path
     } catch {
         Write-SRLog -Level ERROR -Message "Snapshot failed: $($_.Exception.Message)"
@@ -3564,7 +3996,7 @@ function Repair-SRLegacyTasks {
     $workingDirectory = Split-Path -Parent $hostPath
     $repaired = New-Object System.Collections.Generic.List[string]
     $definitions = @(
-        @{ Name = 'SessionRecovery-Snapshot'; Argument = '--snapshot'; Marker = 'Save-Session|RunHidden' },
+        @{ Name = 'SessionRecovery-Snapshot'; Argument = '--snapshot-quiet'; Marker = 'Save-Session|RunHidden' },
         @{ Name = 'SessionRecovery-RestorePrompt'; Argument = '--restore-prompt'; Marker = 'Restore-Session' }
     )
     foreach ($definition in $definitions) {
@@ -3578,6 +4010,9 @@ function Repair-SRLegacyTasks {
                 $execute = [string]$action.Execute
                 $arguments = [string]$action.Arguments
                 if ($execute -match '(?i)powershell(?:\.exe)?$|wscript(?:\.exe)?$' -and $arguments -match ('(?i)' + $definition.Marker)) {
+                    $needsRepair = $true
+                }
+                if ($name -eq 'SessionRecovery-Snapshot' -and $execute -match '(?i)SessionRecovery\.exe$' -and $arguments -match '(?i)--snapshot(?!-quiet)') {
                     $needsRepair = $true
                 }
             }
@@ -3610,6 +4045,62 @@ function Start-SRUpdateInstall {
     return (Start-Process -FilePath 'msiexec.exe' -ArgumentList $arguments -PassThru)
 }
 
+function Get-SRScheduledTaskStatus {
+    param(
+        [string[]]$TaskName = @('SessionRecovery-Snapshot', 'SessionRecovery-RestorePrompt')
+    )
+
+    # Schedule.Service is significantly faster than Get-ScheduledTask and works
+    # on the Studio UI thread. Only enabled, non-disabled tasks count as active
+    # protection so a disabled task does not block the tray snapshot owner.
+    $results = New-Object System.Collections.Generic.List[object]
+    $service = $null
+    $folder = $null
+    try {
+        $service = New-Object -ComObject Schedule.Service
+        $service.Connect()
+        $folder = $service.GetFolder('\')
+        foreach ($name in @($TaskName)) {
+            $task = $null
+            try {
+                $task = $folder.GetTask([string]$name)
+                $stateCode = [int]$task.State
+                $state = switch ($stateCode) {
+                    1 { 'Disabled' }
+                    2 { 'Queued' }
+                    3 { 'Ready' }
+                    4 { 'Running' }
+                    default { 'Unknown' }
+                }
+                $enabled = $true
+                try { $enabled = [bool]$task.Enabled } catch { $enabled = ($stateCode -ne 1) }
+                $results.Add([pscustomobject]@{
+                    Name      = [string]$name
+                    State     = [string]$state
+                    StateCode = [int]$stateCode
+                    Enabled   = [bool]$enabled
+                    Active    = [bool]($enabled -and $stateCode -ne 1)
+                })
+            } catch {
+                # A missing task is not an error; simply leave it out.
+            } finally {
+                if ($null -ne $task) {
+                    try { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($task) } catch { }
+                }
+            }
+        }
+    } catch {
+    } finally {
+        if ($null -ne $folder) {
+            try { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($folder) } catch { }
+        }
+        if ($null -ne $service) {
+            try { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($service) } catch { }
+        }
+    }
+    return $results.ToArray()
+}
+
 function Get-SRDiagnostics {
     $root = Get-SRRoot
     $snapshotDir = Get-SRSnapshotDirectory
@@ -3628,59 +4119,97 @@ function Get-SRDiagnostics {
         }
     }
 
-    $snapshots = @(Get-SRSnapshots)
-    $latest = $null
-    if ($snapshots.Count -gt 0) { $latest = $snapshots[0] }
-
+    # Diagnostics only needs the newest snapshot. Parsing the whole timeline
+    # was the slowest part of this check on long-running installs.
+    $snapshotFiles = @(Get-ChildItem -LiteralPath $snapshotDir -Filter 'session-*.json' -File -ErrorAction SilentlyContinue |
+        Sort-Object -Property LastWriteTime -Descending)
+    $snapshotCount = $snapshotFiles.Count
     $latestPath = $null
     $latestAt = $null
     $latestAgeMinutes = $null
-    if ($null -ne $latest) {
-        $latestPath = [string]$latest.Path
-        $latestAt = ([datetimeoffset]$latest.CapturedAt).ToString('o')
-        $latestAgeMinutes = [Math]::Round(((Get-Date) - $latest.CapturedAt).TotalMinutes, 1)
+    if ($snapshotFiles.Count -gt 0) {
+        $latestFile = $snapshotFiles[0]
+        $latestPath = [string]$latestFile.FullName
+        $latestCaptured = $latestFile.LastWriteTime
+        try {
+            # Reading just the head of the file is much cheaper than parsing a
+            # potentially large snapshot JSON only to read one timestamp.
+            $stream = [System.IO.File]::OpenText($latestFile.FullName)
+            try {
+                $chunk = New-Object System.Text.StringBuilder
+                $buffer = New-Object char[] 4096
+                while ($chunk.Length -lt 4096) {
+                    $read = $stream.Read($buffer, 0, $buffer.Length)
+                    if ($read -le 0) { break }
+                    [void]$chunk.Append($buffer, 0, $read)
+                }
+                $match = [regex]::Match($chunk.ToString(), '"capturedAt"\s*:\s*"([^"]+)"')
+                if ($match.Success) {
+                    $latestCaptured = [DateTimeOffset]::Parse(
+                        $match.Groups[1].Value,
+                        [System.Globalization.CultureInfo]::InvariantCulture).LocalDateTime
+                }
+            } finally { $stream.Dispose() }
+        } catch { }
+        $latestAt = $latestCaptured.ToString('o')
+        $latestAgeMinutes = [Math]::Round(((Get-Date) - $latestCaptured).TotalMinutes, 1)
     }
 
-    $snapshotFiles = @(Get-ChildItem -LiteralPath $snapshotDir -Filter 'session-*.json' -File -ErrorAction SilentlyContinue)
     $snapshotBytes = [int64]0
     if ($snapshotFiles.Count -gt 0) {
         $measured = $snapshotFiles | Measure-Object -Property Length -Sum
         if ($null -ne $measured.Sum) { $snapshotBytes = [int64]$measured.Sum }
     }
 
+    $tasks = @(Get-SRScheduledTaskStatus -TaskName @('SessionRecovery-Snapshot', 'SessionRecovery-RestorePrompt'))
+    $activeTasks = @($tasks | Where-Object { $_.Active })
+
     $watcherPids = @()
-    try {
-        $watcherPids = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object {
-            $_.CommandLine -and ($_.CommandLine -match '(?i)Watch-Session\.ps1')
-        } | ForEach-Object { [int]$_.ProcessId })
-    } catch { }
-
     $trayPids = @()
-    try {
-        $trayPids = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object {
-            $_.CommandLine -and ($_.CommandLine -match '(?i)Tray-SessionRecovery\.ps1')
-        } | ForEach-Object { [int]$_.ProcessId })
-    } catch { }
-
-    $tasks = New-Object System.Collections.Generic.List[object]
-    foreach ($name in @('SessionRecovery-Snapshot', 'SessionRecovery-RestorePrompt')) {
+    $nativeProcesses = @(Get-Process -Name 'SessionRecovery' -ErrorAction SilentlyContinue)
+    if ($nativeProcesses.Count -gt 0) {
         try {
-            $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
-            if ($null -ne $task) {
-                $tasks.Add([pscustomobject]@{
-                    Name  = [string]$task.TaskName
-                    State = [string]$task.State
-                })
+            $trayPids = @(Get-CimInstance Win32_Process -Filter "Name='SessionRecovery.exe'" -ErrorAction SilentlyContinue | Where-Object {
+                $_.CommandLine -and ($_.CommandLine -match '(?i)--tray')
+            } | ForEach-Object { [int]$_.ProcessId })
+        } catch { }
+    }
+
+    # Legacy PowerShell tray/watcher processes only need a slow CIM lookup when
+    # no native tray and no active scheduled task already explains the mode.
+    if ($trayPids.Count -eq 0 -and $activeTasks.Count -eq 0) {
+        try {
+            $legacyProcesses = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object {
+                $_.CommandLine -and ($_.CommandLine -match '(?i)Watch-Session\.ps1|Tray-SessionRecovery\.ps1')
+            })
+            foreach ($process in $legacyProcesses) {
+                if ($process.CommandLine -match '(?i)Tray-SessionRecovery\.ps1') {
+                    $trayPids += [int]$process.ProcessId
+                } else {
+                    $watcherPids += [int]$process.ProcessId
+                }
             }
         } catch { }
     }
 
     $browsers = New-Object System.Collections.Generic.List[object]
     try {
-        $processMap = Get-SRProcessMap
-        foreach ($definition in @(Get-SRBrowserDefinitions)) {
+        $definitions = @(Get-SRBrowserDefinitions)
+        $browserNames = @($definitions | ForEach-Object { $_.processNames } | Sort-Object -Unique)
+        $browserProcessMap = @{}
+        foreach ($process in @(Get-Process -Name $browserNames -ErrorAction SilentlyContinue)) {
+            $executablePath = ''
+            try { $executablePath = [string]$process.Path } catch { }
+            $browserProcessMap[[int]$process.Id] = [pscustomobject]@{
+                ProcessId      = [int]$process.Id
+                Name           = [string]$process.ProcessName
+                ExecutablePath = $executablePath
+                CommandLine    = ''
+            }
+        }
+        foreach ($definition in $definitions) {
             try {
-                $exe = Resolve-SRBrowserExe -Definition $definition -ProcessMap $processMap
+                $exe = Resolve-SRBrowserExe -Definition $definition -ProcessMap $browserProcessMap
                 if (-not [string]::IsNullOrWhiteSpace([string]$exe)) {
                     $browsers.Add([pscustomobject]@{
                         Name = [string]$definition.name
@@ -3701,7 +4230,7 @@ function Get-SRDiagnostics {
     }
 
     $scheduleMode = 'Not running'
-    if ($tasks.Count -gt 0) {
+    if ($activeTasks.Count -gt 0) {
         $scheduleMode = if ($trayPids.Count -gt 0) { 'Scheduled tasks + tray' } else { 'Scheduled tasks' }
     } elseif ($trayPids.Count -gt 0) {
         $scheduleMode = 'Background tray'
@@ -3721,7 +4250,7 @@ function Get-SRDiagnostics {
         ConfigValid              = [bool]$configValid
         ConfigError              = $configError
         SnapshotDirectory        = $snapshotDir
-        SnapshotCount            = $snapshots.Count
+        SnapshotCount            = [int]$snapshotCount
         LatestSnapshot           = $latestPath
         LatestSnapshotAt         = $latestAt
         LatestSnapshotAgeMinutes = $latestAgeMinutes
@@ -3730,7 +4259,7 @@ function Get-SRDiagnostics {
         ScheduleMode             = $scheduleMode
         WatcherPids              = @($watcherPids)
         TrayPids                 = @($trayPids)
-        ScheduledTasks           = $tasks.ToArray()
+        ScheduledTasks           = @($tasks)
         Browsers                 = $browsers.ToArray()
         Settings                 = [pscustomobject]@{
             IntervalMinutes     = [int]$config.snapshotIntervalMinutes

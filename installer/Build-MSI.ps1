@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
     Build-MSI.ps1
     Builds the per-user Session Recovery MSI with WiX.
@@ -13,7 +13,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string]$Version = '2.2.0',
+    [string]$Version = '2.4.0',
     [switch]$NoRestore
 )
 
@@ -75,20 +75,26 @@ Session Recovery {0}
 Reopen the apps, File Explorer folders and browser tabs that were open before
 a crash, power cut or unexpected restart.
 
-What's new in 2.2
+What's new in 2.4
 -----------------
-- Restored apps return to their captured position, size and maximized state,
-  clamped to the current monitors. Turn it off with restoreWindowPositions.
-- VLC playback restore: the playing video reopens at (or within one snapshot
-  interval of) the moment it was playing.
-- Pin important snapshots so retention never deletes them.
-- Export and import snapshots as JSON files for backup or another PC.
-- Daylight light theme for the Studio, and snapshot search across app names,
-  folders, tab titles and URLs.
-- Chromium and Opera GX join the supported browsers.
-- Smoother Studio: capture runs without freezing the window, and the restore
-  window shows live progress plus per-item results instead of a pop-up.
-- Tray: Pause for 1 hour resumes snapshots automatically.
+- Nine languages: English, Arabic (with right-to-left layout), French,
+  Spanish, German, Portuguese, Russian, Chinese and Turkish. Pick the
+  language in Settings > Appearance; the whole UI switches instantly.
+- Smart capture: automatic snapshots pause while the PC is idle or a
+  fullscreen app or game is in front. Manual captures always run.
+- Global hotkey: Ctrl+Alt+S takes a snapshot from anywhere while the
+  background app is running.
+- Snapshots now show what changed since the previous one: applications
+  opened or closed, and browser tab movement.
+- Optional auto-backup folder: every new snapshot is copied to a folder
+  you choose (for example a OneDrive folder), keeping the latest ten.
+- Media restore beyond VLC: MPC-HC, MPC-BE, mpv, PotPlayer and Windows
+  Media Player reopen the file that was playing, resuming where supported.
+- Browser detection covers Vivaldi, Chromium, Opera, Opera GX, Waterfox
+  and LibreWolf, including installs outside the usual folders.
+- Fourteen studio themes with audited text contrast, faster animated
+  Diagnostics checks with a hang watchdog, and completely silent
+  automatic snapshots: no popups, no sounds.
 
 Install
 -------

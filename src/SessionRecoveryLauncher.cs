@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -15,8 +15,8 @@ using WinFormsTimer = System.Windows.Forms.Timer;
 [assembly: AssemblyDescription("Session Recovery desktop host")]
 [assembly: AssemblyProduct("Session Recovery")]
 [assembly: AssemblyCompany("Bilalmesk")]
-[assembly: AssemblyVersion("2.2.0.0")]
-[assembly: AssemblyFileVersion("2.2.0.0")]
+[assembly: AssemblyVersion("2.4.0.0")]
+[assembly: AssemblyFileVersion("2.4.0.0")]
 
 namespace SessionRecoveryLauncher
 {
@@ -52,9 +52,29 @@ namespace SessionRecoveryLauncher
                 case "--snapshot":
                 case "--save":
                     scriptName = "Save-Session.ps1";
+                    // Manual capture: runs even during smart-capture pauses.
+                    scriptArguments = "-Quiet -Force";
+                    showErrors = false;
+                    // Manual snapshot (Start Menu shortcut): confirm with a
+                    // toast when desktop notifications are enabled.
+                    notifySnapshot = true;
+                    break;
+                case "--snapshot-quiet":
+                case "--save-quiet":
+                    // Scheduled/automatic snapshots must stay completely
+                    // silent, and respect idle/fullscreen smart-capture skips.
+                    scriptName = "Save-Session.ps1";
                     scriptArguments = "-Quiet";
                     showErrors = false;
-                    notifySnapshot = true;
+                    notifySnapshot = false;
+                    break;
+                case "--snapshot-studio":
+                    // Manual capture from the Studio: forced, but the Studio
+                    // shows its own progress and result toast.
+                    scriptName = "Save-Session.ps1";
+                    scriptArguments = "-Quiet -Force";
+                    showErrors = false;
+                    notifySnapshot = false;
                     break;
                 case "--restore":
                 case "--restore-prompt":

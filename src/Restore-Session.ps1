@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
     Restore-Session.ps1
     Shows the restore prompt after an unexpected shutdown, or restores a
@@ -50,6 +50,23 @@ $ErrorActionPreference = 'Stop'
 
 $modulePath = Join-Path $PSScriptRoot 'SessionRecovery.psm1'
 Import-Module $modulePath -Force -ErrorAction Stop
+. (Join-Path $PSScriptRoot 'Strings.ps1')
+try {
+    $restoreLanguage = 'en'
+    $restoreConfig = Get-SRConfig
+    $restoreLanguageProperty = $restoreConfig.PSObject.Properties['language']
+    if ($null -ne $restoreLanguageProperty -and -not [string]::IsNullOrWhiteSpace([string]$restoreLanguageProperty.Value)) {
+        $restoreLanguage = [string]$restoreLanguageProperty.Value
+    }
+} catch { $restoreLanguage = 'en' }
+$script:RestoreStrings = Get-SRStrings -Language $restoreLanguage
+function T {
+    param([Parameter(Mandatory = $true)][string]$Key, [string]$Default = '')
+    if ($script:RestoreStrings -and $script:RestoreStrings.ContainsKey($Key) -and -not [string]::IsNullOrWhiteSpace([string]$script:RestoreStrings[$Key])) {
+        return [string]$script:RestoreStrings[$Key]
+    }
+    return $Default
+}
 Hide-SRConsoleWindow
 
 # Pre-2.0 tasks launch this script directly with Windows PowerShell. Hand the
@@ -841,7 +858,7 @@ $brandName.Location = New-Object System.Drawing.Point(80, 18)
 $header.Controls.Add($brandName)
 
 $brandMeta = New-Object System.Windows.Forms.Label
-$brandMeta.Text = 'LOCAL SNAPSHOTS  /  V2.2.0'
+$brandMeta.Text = 'LOCAL SNAPSHOTS  /  V2.4.0'
 $brandMeta.Font = New-Object System.Drawing.Font('Consolas', 7.5)
 $brandMeta.ForeColor = $rsMuted
 $brandMeta.AutoSize = $true
@@ -860,7 +877,7 @@ $privacyLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Win
 $header.Controls.Add($privacyLabel)
 
 $titleLabel = New-Object System.Windows.Forms.Label
-$titleLabel.Text = 'Restore your previous session'
+$titleLabel.Text = (T 'RstTitle' 'Restore your previous session')
 $titleLabel.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 20)
 $titleLabel.ForeColor = $rsInk
 $titleLabel.AutoSize = $true
@@ -868,7 +885,7 @@ $titleLabel.Location = New-Object System.Drawing.Point(34, 62)
 $header.Controls.Add($titleLabel)
 
 $subtitleLabel = New-Object System.Windows.Forms.Label
-$subtitleLabel.Text = 'Choose what to reopen. Everything stays on this PC.'
+$subtitleLabel.Text = (T 'RstSubtitle' 'Choose what to reopen. Everything stays on this PC.')
 $subtitleLabel.Font = New-Object System.Drawing.Font('Segoe UI', 9.5)
 $subtitleLabel.ForeColor = $rsMuted
 $subtitleLabel.AutoSize = $true
@@ -927,7 +944,7 @@ $listCard.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows
 $content.Controls.Add($listCard)
 
 $listHeading = New-Object System.Windows.Forms.Label
-$listHeading.Text = 'ITEMS TO REOPEN'
+$listHeading.Text = (T 'RstItems' 'ITEMS TO REOPEN')
 $listHeading.Font = New-Object System.Drawing.Font('Consolas', 7.5)
 $listHeading.ForeColor = $rsMuted
 $listHeading.BackColor = $rsWhite
@@ -936,7 +953,7 @@ $listHeading.Location = New-Object System.Drawing.Point(18, 12)
 $listCard.Controls.Add($listHeading)
 
 $selectAll = New-Object System.Windows.Forms.CheckBox
-$selectAll.Text = 'Select all'
+$selectAll.Text = (T 'RstSelectAll' 'Select all')
 $selectAll.Checked = $true
 $selectAll.AutoSize = $false
 $selectAll.Size = New-Object System.Drawing.Size(94, 22)
@@ -964,7 +981,7 @@ $itemHeader.Location = New-Object System.Drawing.Point(18, 46)
 $listCard.Controls.Add($itemHeader)
 
 $detailsHeader = New-Object System.Windows.Forms.Label
-$detailsHeader.Text = 'DETAILS'
+$detailsHeader.Text = (T 'RstDetails' 'DETAILS')
 $detailsHeader.Font = New-Object System.Drawing.Font('Consolas', 7.5)
 $detailsHeader.ForeColor = $rsMuted
 $detailsHeader.BackColor = $rsWhite
@@ -1015,7 +1032,7 @@ $optionsCard.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.W
 $content.Controls.Add($optionsCard)
 
 $optionsHeading = New-Object System.Windows.Forms.Label
-$optionsHeading.Text = 'RESTORE OPTIONS'
+$optionsHeading.Text = (T 'RstOptions' 'RESTORE OPTIONS')
 $optionsHeading.Font = New-Object System.Drawing.Font('Consolas', 7.5)
 $optionsHeading.ForeColor = $rsMuted
 $optionsHeading.BackColor = $rsWhite
@@ -1024,7 +1041,7 @@ $optionsHeading.Location = New-Object System.Drawing.Point(18, 10)
 $optionsCard.Controls.Add($optionsHeading)
 
 $tabModeLabel = New-Object System.Windows.Forms.Label
-$tabModeLabel.Text = 'Browser tabs'
+$tabModeLabel.Text = (T 'RstBrowserTabs' 'Browser tabs')
 $tabModeLabel.Font = New-Object System.Drawing.Font('Segoe UI', 9)
 $tabModeLabel.ForeColor = $rsInk
 $tabModeLabel.BackColor = $rsWhite
@@ -1054,7 +1071,7 @@ switch ($TabMode) {
 $optionsCard.Controls.Add($tabModeCombo)
 
 $forceCheck = New-Object System.Windows.Forms.CheckBox
-$forceCheck.Text = 'Start applications even when they are already running'
+$forceCheck.Text = (T 'RstStartAnyway' 'Start applications even when they are already running')
 $forceCheck.AutoSize = $true
 $forceCheck.Font = New-Object System.Drawing.Font('Segoe UI', 9)
 $forceCheck.ForeColor = $rsInk
@@ -1096,7 +1113,7 @@ $skipButton.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
 $content.Controls.Add($skipButton)
 
 $restoreButton = New-Object SRButton
-$restoreButton.Text = 'Restore selected'
+$restoreButton.Text = (T 'RstRestoreSelected' 'Restore selected')
 $restoreButton.Size = New-Object System.Drawing.Size(160, 40)
 $restoreButton.Location = New-Object System.Drawing.Point(708, 506)
 $restoreButton.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Right
@@ -1198,7 +1215,7 @@ $restoreButton.Add_Click({
     $selectAll.Enabled = $false
     $tabModeCombo.Enabled = $false
     $forceCheck.Enabled = $false
-    $statusLabel.Text = 'Preparing to restore...'
+    $statusLabel.Text = (T 'RstPreparing' 'Preparing to restore...')
     $progressBar.Value = 0
     $progressBar.Visible = $true
     [System.Windows.Forms.Application]::DoEvents()
@@ -1231,7 +1248,7 @@ $restoreButton.Add_Click({
     # Replace the checklist with the outcome of each item. The window stays
     # open so the summary is readable for as long as the user wants.
     $progressBar.Visible = $false
-    $listHeading.Text = 'RESTORE RESULTS'
+    $listHeading.Text = (T 'RstResults' 'RESTORE RESULTS')
     $selectAll.Visible = $false
     $list.CheckBoxes = $false
     $list.BeginUpdate()

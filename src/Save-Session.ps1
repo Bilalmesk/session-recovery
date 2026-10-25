@@ -8,7 +8,8 @@
 #>
 [CmdletBinding()]
 param(
-    [switch]$Quiet
+    [switch]$Quiet,
+    [switch]$Force
 )
 
 $ErrorActionPreference = 'Stop'
@@ -19,7 +20,7 @@ $exitCode = 0
 try {
     Import-Module $modulePath -Force -ErrorAction Stop
 
-    $path = Save-SRSnapshot
+    $path = Save-SRSnapshot -Force:$Force
     if (-not $Quiet) {
         if ($path) {
             Write-Host "Snapshot saved: $path"

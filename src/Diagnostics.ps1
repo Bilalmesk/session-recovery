@@ -54,7 +54,8 @@ try {
         $lines.Add(('Tray processes: {0}' -f (($diagnostics.TrayPids -join ', '))))
         if (@($diagnostics.ScheduledTasks).Count -gt 0) {
             foreach ($task in @($diagnostics.ScheduledTasks)) {
-                $lines.Add(('Scheduled task: {0} ({1})' -f $task.Name, $task.State))
+                $activeText = if ($task.Active) { 'active' } else { 'inactive' }
+                $lines.Add(('Scheduled task: {0} ({1}, {2})' -f $task.Name, $task.State, $activeText))
             }
         } else {
             $lines.Add('Scheduled tasks: none')
