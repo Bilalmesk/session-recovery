@@ -17,7 +17,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-$script:AppVersion = '2.4.0'
+$script:AppVersion = '2.5.0'
 $script:ScriptDir = $PSScriptRoot
 $script:AppDir = if ($env:SESSIONRECOVERY_HOST_EXE) { Split-Path -Parent $env:SESSIONRECOVERY_HOST_EXE } else { $PSScriptRoot }
 $script:HostExe = $null
@@ -2249,6 +2249,20 @@ $detailSummary = New-StudioLabel -Text 'Capture a moment, then select it here to
 $detailCard.Controls.Add($detailSummary)
 $script:Ui.DetailSummary = $detailSummary
 
+# Optional window thumbnails: one strip of small previews above the text,
+# filled only when the snapshot was captured with thumbnails enabled.
+$detailThumbs = New-Object System.Windows.Forms.FlowLayoutPanel
+$detailThumbs.Location = New-Object System.Drawing.Point(18, 134)
+$detailThumbs.Size = New-Object System.Drawing.Size(340, 0)
+$detailThumbs.Margin = New-Object System.Windows.Forms.Padding(0)
+$detailThumbs.Padding = New-Object System.Windows.Forms.Padding(0)
+$detailThumbs.BackColor = $script:P.Card
+$detailThumbs.AutoScroll = $false
+$detailThumbs.WrapContents = $true
+$detailThumbs.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+$detailCard.Controls.Add($detailThumbs)
+$script:Ui.DetailThumbs = $detailThumbs
+
 $detailText = New-StudioTextBox -X 18 -Y 138 -Width 340 -Height 350
 $detailText.Multiline = $true
 $detailText.ReadOnly = $true
@@ -2312,7 +2326,10 @@ $detailCard.Add_Resize({
     $script:Ui.DetailMeta.Width = $card.ClientSize.Width - 36
     $script:Ui.DetailSummary.Width = $card.ClientSize.Width - 36
     $script:Ui.DetailText.Width = $card.ClientSize.Width - 36
-    $script:Ui.DetailText.Height = [Math]::Max(120, $card.ClientSize.Height - 250)
+    $thumbsExtra = 0
+    try { $thumbsExtra = [int]$script:DetailThumbsHeight } catch { }
+    if ($script:Ui.DetailText.Top -lt (138 + $thumbsExtra)) { $script:Ui.DetailText.Top = 138 + $thumbsExtra + 6 }
+    $script:Ui.DetailText.Height = [Math]::Max(120, $card.ClientSize.Height - $script:Ui.DetailText.Top - 62)
     $script:Ui.DetailPin.Left = $card.ClientSize.Width - 114
     $script:Ui.DetailRestore.Top = $card.ClientSize.Height - 54
     $script:Ui.DetailOpen.Top = $card.ClientSize.Height - 54
@@ -2354,6 +2371,9 @@ function Update-StudioSnapshotDetails {
     if (-not $script:Ui.DetailTitle) { return }
     $entry = Get-StudioSelectedSnapshotEntry
     if ($null -eq $entry) {
+        if ($script:Ui.DetailThumbs) { $script:Ui.DetailThumbs.Controls.Clear(); $script:Ui.DetailThumbs.Height = 0 }
+        $script:DetailThumbsHeight = 0
+        if ($script:Ui.DetailText) { $script:Ui.DetailText.Top = 138 }
         $script:Ui.DetailBadge.Text = 'NO SNAPSHOT'
         $script:Ui.DetailBadge.FillColor = $script:P.CardAlt
         $script:Ui.DetailBadge.TextColor = $script:P.Muted
@@ -2374,6 +2394,47 @@ function Update-StudioSnapshotDetails {
 
     $snapshot = $entry.Snapshot
     $stats = Get-StudioStats -Snapshot $snapshot
+
+    # Window thumbnails (only present when captured with the opt-in setting).
+    $thumbHeight = 0
+    if ($script:Ui.DetailThumbs) {
+        $script:Ui.DetailThumbs.SuspendLayout()
+        $script:Ui.DetailThumbs.Controls.Clear()
+        $thumbPaths = @()
+        foreach ($app in @($snapshot.apps)) {
+            $thumbProperty = $app.PSObject.Properties['thumb']
+            if ($null -ne $thumbProperty -and -not [string]::IsNullOrWhiteSpace([string]$thumbProperty.Value)) { $thumbPaths += [string]$thumbProperty.Value }
+        }
+        foreach ($browser in @($snapshot.browsers)) {
+            $thumbProperty = $browser.PSObject.Properties['thumb']
+            if ($null -ne $thumbProperty -and -not [string]::IsNullOrWhiteSpace([string]$thumbProperty.Value)) { $thumbPaths += [string]$thumbProperty.Value }
+        }
+        $snapshotRoot = Get-SRSnapshotDirectory
+        $shown = 0
+        foreach ($relative in (@($thumbPaths | Select-Object -First 12))) {
+            $thumbFile = Join-Path $snapshotRoot ($relative -replace '/', '\')
+            if (-not (Test-Path -LiteralPath $thumbFile)) { continue }
+            try {
+                $box = New-Object System.Windows.Forms.PictureBox
+                $box.Size = New-Object System.Drawing.Size(106, 62)
+                $box.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
+                $box.BackColor = $script:P.CardAlt
+                $box.Margin = New-Object System.Windows.Forms.Padding(1)
+                $box.Image = [System.Drawing.Image]::FromFile($thumbFile)
+                $script:Ui.DetailThumbs.Controls.Add($box)
+                $shown++
+            } catch { }
+        }
+        $perRow = [Math]::Max(1, [int][Math]::Floor(($script:Ui.DetailThumbs.ClientSize.Width) / 108))
+        $rows = [Math]::Ceiling($shown / $perRow)
+        $thumbHeight = [int]($rows * 64)
+        if ($shown -eq 0) { $thumbHeight = 0 }
+        $script:Ui.DetailThumbs.Height = $thumbHeight
+        $script:Ui.DetailThumbs.ResumeLayout()
+    }
+    $script:DetailThumbsHeight = $thumbHeight
+    if ($script:Ui.DetailText) { $script:Ui.DetailText.Top = 138 + $thumbHeight + 6 }
+
     $bytes = Get-StudioSnapshotBytes -Entry $entry
     $isPinned = ($script:SnapshotPinnedNames -and $script:SnapshotPinnedNames.Contains((Split-Path -Leaf $entry.Path)))
     $script:Ui.DetailBadge.Text = if ($isPinned) { 'PINNED' } else { 'READY TO RESTORE' }
@@ -3075,7 +3136,7 @@ $comboTabMode.SelectedIndex = 0
 $restoreCard.Controls.Add($comboTabMode)
 
 # Card: browser capture
-$browserCard = New-StudioSettingsCard -Title 'Browser capture' -Description 'Chrome, Edge, Brave and other Chromium browsers use a safe live fallback when their session files are empty.' -Height 206
+$browserCard = New-StudioSettingsCard -Title 'Browser capture' -Description 'Chrome, Edge, Brave and other Chromium browsers use a safe live fallback when their session files are empty.' -Height 264
 $settingsFlow.Controls.Add($browserCard)
 $settingsCards.Add($browserCard)
 
@@ -3090,6 +3151,13 @@ $approxLabel = New-StudioLabel -Text 'Use recent history when session files are 
 $browserCard.Controls.Add($approxLabel)
 $approxHint = New-StudioLabel -Text 'This can include a few recently visited pages that are already closed. Tabs are marked approximate.' -X 76 -Y 140 -Width 440 -Height 32 -Font $script:FontBodySmall -Color $script:P.Subtle
 $browserCard.Controls.Add($approxHint)
+
+$toggleRedact = New-StudioToggle -X 20 -Y 198 -Checked $true
+$browserCard.Controls.Add($toggleRedact)
+$redactLabel = New-StudioLabel -Text 'Strip query strings from captured URLs' -X 76 -Y 202 -Width 420 -Height 20 -Font $script:FontBody -Color $script:P.Text
+$browserCard.Controls.Add($redactLabel)
+$redactHint = New-StudioLabel -Text 'Tokens and search terms in ?query strings never reach the snapshot files.' -X 76 -Y 222 -Width 440 -Height 18 -Font $script:FontBodySmall -Color $script:P.Subtle
+$browserCard.Controls.Add($redactHint)
 
 $lookbackLabel = New-StudioLabel -Text 'HISTORY LOOKBACK' -X 560 -Y 76 -Width 180 -Height 16 -Font $script:FontMono -Color $script:P.Subtle
 $browserCard.Controls.Add($lookbackLabel)
@@ -3182,7 +3250,7 @@ $languageHint = New-StudioLabel -Text 'English, Arabic, French, Spanish, German,
 $appearanceCard.Controls.Add($languageHint)
 
 # Card: smart capture
-$smartCard = New-StudioSettingsCard -Title 'Smart capture' -Description 'Skip snapshots nobody needs, and capture from anywhere.' -Height 232
+$smartCard = New-StudioSettingsCard -Title 'Smart capture' -Description 'Skip snapshots nobody needs, and capture from anywhere.' -Height 348
 $settingsFlow.Controls.Add($smartCard)
 $settingsCards.Add($smartCard)
 
@@ -3205,8 +3273,20 @@ $smartCard.Controls.Add($hotkeyLabel)
 $hotkeyHint = New-StudioLabel -Text 'Works while the background app is running. Takes effect after saving.' -X 76 -Y 212 -Width 430 -Height 18 -Font $script:FontBodySmall -Color $script:P.Subtle
 $smartCard.Controls.Add($hotkeyHint)
 
+$toggleEvents = New-StudioToggle -X 20 -Y 244 -Checked $true
+$smartCard.Controls.Add($toggleEvents)
+$eventsLabel = New-StudioLabel -Text 'Capture on lock, sleep and low battery' -X 76 -Y 248 -Width 420 -Height 20 -Font $script:FontBody -Color $script:P.Text
+$smartCard.Controls.Add($eventsLabel)
+
+$toggleDev = New-StudioToggle -X 20 -Y 300 -Checked $true
+$smartCard.Controls.Add($toggleDev)
+$devLabel = New-StudioLabel -Text 'Capture dev workspaces (VS Code, Cursor, JetBrains, Windows Terminal)' -X 76 -Y 304 -Width 460 -Height 20 -Font $script:FontBody -Color $script:P.Text
+$smartCard.Controls.Add($devLabel)
+$devHint = New-StudioLabel -Text 'Reads the editors'' own recent-files state so restore can reopen the same folders.' -X 76 -Y 324 -Width 460 -Height 18 -Font $script:FontBodySmall -Color $script:P.Subtle
+$smartCard.Controls.Add($devHint)
+
 # Card: storage and privacy
-$storageCard = New-StudioSettingsCard -Title 'Storage & privacy' -Description 'Everything Session Recovery saves stays in your local profile.' -Height 330
+$storageCard = New-StudioSettingsCard -Title 'Storage & privacy' -Description 'Everything Session Recovery saves stays in your local profile.' -Height 446
 $settingsFlow.Controls.Add($storageCard)
 $settingsCards.Add($storageCard)
 
@@ -3250,6 +3330,20 @@ $storageCard.Controls.Add($openConfig)
 $openLogs = New-StudioButton -Text 'Open logs' -X 172 -Y 280 -Width 140 -Height 32 -Glyph ([string][char]0xE838)
 $openLogs.Add_Click({ Open-StudioPath (Get-SRLogDirectory) })
 $storageCard.Controls.Add($openLogs)
+
+$toggleThumbs = New-StudioToggle -X 20 -Y 326 -Checked $false
+$storageCard.Controls.Add($toggleThumbs)
+$thumbsLabel = New-StudioLabel -Text 'Capture window thumbnails' -X 76 -Y 330 -Width 420 -Height 20 -Font $script:FontBody -Color $script:P.Text
+$storageCard.Controls.Add($thumbsLabel)
+$thumbsHint = New-StudioLabel -Text 'Stores a small JPEG of each window next to the snapshot. Off by default; excluded apps are never captured.' -X 76 -Y 350 -Width 460 -Height 18 -Font $script:FontBodySmall -Color $script:P.Subtle
+$storageCard.Controls.Add($thumbsHint)
+
+$toggleCompress = New-StudioToggle -X 20 -Y 382 -Checked $false
+$storageCard.Controls.Add($toggleCompress)
+$compressLabel = New-StudioLabel -Text 'Gzip snapshot files (smaller disk use)' -X 76 -Y 386 -Width 420 -Height 20 -Font $script:FontBody -Color $script:P.Text
+$storageCard.Controls.Add($compressLabel)
+$compressHint = New-StudioLabel -Text 'Unchanged moments are skipped automatically, so snapshots cover more real changes.' -X 76 -Y 406 -Width 460 -Height 18 -Font $script:FontBodySmall -Color $script:P.Subtle
+$storageCard.Controls.Add($compressHint)
 
 $settingsPage.Add_Resize({ Layout-StudioSettings })
 
@@ -3297,6 +3391,16 @@ function Load-StudioSettings {
     $toggleRestoreBrowsers.Checked = [bool]$script:Config.restoreBrowsers
     $toggleCaptureBrowsers.Checked = [bool]$script:Config.captureBrowserTabs
     $toggleApprox.Checked = [bool]$script:Config.captureApproximateTabs
+    $redactProperty = $script:Config.PSObject.Properties['redactUrls']
+    $toggleRedact.Checked = if ($null -ne $redactProperty) { [bool]$redactProperty.Value } else { $true }
+    $eventsProperty = $script:Config.PSObject.Properties['eventSnapshots']
+    $toggleEvents.Checked = if ($null -ne $eventsProperty) { [bool]$eventsProperty.Value } else { $true }
+    $devProperty = $script:Config.PSObject.Properties['captureDevWorkspaces']
+    $toggleDev.Checked = if ($null -ne $devProperty) { [bool]$devProperty.Value } else { $true }
+    $thumbsSettingProperty = $script:Config.PSObject.Properties['captureThumbnails']
+    $toggleThumbs.Checked = if ($null -ne $thumbsSettingProperty) { [bool]$thumbsSettingProperty.Value } else { $false }
+    $compressSettingProperty = $script:Config.PSObject.Properties['compressSnapshots']
+    $toggleCompress.Checked = if ($null -ne $compressSettingProperty) { [bool]$compressSettingProperty.Value } else { $false }
     $mediaToggleProperty = $script:Config.PSObject.Properties['captureMediaPlayers']
     $toggleMedia.Checked = if ($null -ne $mediaToggleProperty) { [bool]$mediaToggleProperty.Value } else { $true }
     $toggleNotifications.Checked = [bool]$script:Config.showNotifications
@@ -3340,6 +3444,11 @@ function Save-StudioSettings {
         $config.restoreBrowsers = [bool]$toggleRestoreBrowsers.Checked
         $config.captureBrowserTabs = [bool]$toggleCaptureBrowsers.Checked
         $config.captureApproximateTabs = [bool]$toggleApprox.Checked
+        $config.redactUrls = [bool]$toggleRedact.Checked
+        $config.eventSnapshots = [bool]$toggleEvents.Checked
+        $config.captureDevWorkspaces = [bool]$toggleDev.Checked
+        $config.captureThumbnails = [bool]$toggleThumbs.Checked
+        $config.compressSnapshots = [bool]$toggleCompress.Checked
         $config.captureMediaPlayers = [bool]$toggleMedia.Checked
         $config.showNotifications = [bool]$toggleNotifications.Checked
         $config.startWithWindows = [bool]$toggleStartup.Checked
@@ -3476,11 +3585,11 @@ $diagRefresh.Add_Click({ Refresh-StudioDiagnostics })
 $diagHealthCard.Controls.Add($diagRefresh)
 $script:Ui.DiagRefresh = $diagRefresh
 
-$diagChecksCard = New-StudioSettingsCard -Title 'Checks' -Description 'No cloud services and no account. These checks run against this PC only.' -Height 202
+$diagChecksCard = New-StudioSettingsCard -Title 'Checks' -Description 'No cloud services and no account. These checks run against this PC only.' -Height 230
 $diagFlow.Controls.Add($diagChecksCard)
 $diagCheckFlow = New-Object System.Windows.Forms.FlowLayoutPanel
 $diagCheckFlow.Location = New-Object System.Drawing.Point(20, 60)
-$diagCheckFlow.Size = New-Object System.Drawing.Size(760, 126)
+$diagCheckFlow.Size = New-Object System.Drawing.Size(760, 154)
 $diagCheckFlow.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
 $diagCheckFlow.FlowDirection = [System.Windows.Forms.FlowDirection]::TopDown
 $diagCheckFlow.WrapContents = $false
@@ -3649,6 +3758,10 @@ function Render-StudioDiagnostics {
             Add-StudioDiagnosticRow -Ok $true -Text (T 'CheckStorageOk' 'Snapshot storage is writable') -Detail (Format-StudioBytes -Bytes ([int64]$diag.SnapshotBytes))
         } else {
             Add-StudioDiagnosticRow -Ok $false -Text (T 'CheckStorageNone' 'Snapshot folder is missing') -Detail ([string]$diag.SnapshotDirectory)
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$diag.ShutdownReason)) {
+            $ok = ([string]$diag.ShutdownKind -ne 'crash')
+            Add-StudioDiagnosticRow -Ok $ok -Text ((T 'DiagShutdown' 'Last shutdown') + ': ' + [string]$diag.ShutdownReason) -Detail (Format-StudioAge -CapturedAt ([datetime]$diag.ShutdownAt))
         }
 
         $browsers = @($diag.Browsers)
@@ -3880,9 +3993,9 @@ $aboutFlow.Controls.Add($aboutLocal)
 $aboutLocalText = New-StudioLabel -Text "Snapshots are plain JSON files in your Windows profile. Browser tabs are read locally, and restore opens apps and folders without rewriting files.`r`n`r`nThe background app keeps capturing while you work. Everything can be inspected, backed up or deleted from this Studio." -X 20 -Y 64 -Width 740 -Height 80 -Font $script:FontBody -Color $script:P.Muted
 $aboutLocal.Controls.Add($aboutLocalText)
 
-$aboutNew = New-StudioSettingsCard -Title 'What is new in 2.4' -Description 'Nine languages, smart capture and a faster, calmer Studio.' -Height 214
+$aboutNew = New-StudioSettingsCard -Title 'What is new in 2.5' -Description 'Visual snapshots, dev workspace restore and crash facts.' -Height 214
 $aboutFlow.Controls.Add($aboutNew)
-$aboutNewText = New-StudioLabel -Text "• Nine languages: English, Arabic (right-to-left), French, Spanish, German, Portuguese, Russian, Chinese and Turkish.`r`n• Smart capture: snapshots pause while the PC is idle or a fullscreen app is in front.`r`n• Ctrl+Alt+S captures a snapshot from anywhere while the background app runs.`r`n• Snapshots show what changed since the previous one: new, closed and tabs.`r`n• Playing media reopens where it was: VLC, MPC-HC, MPC-BE, mpv, PotPlayer, Windows Media Player.`r`n• Fourteen studio themes, light and dark, with clearer text everywhere.`r`n• Vivaldi, Chromium, Opera, Opera GX, Waterfox and LibreWolf join the supported browsers.`r`n• Automatic snapshots are completely silent: no popups, no sounds." -X 20 -Y 64 -Width 740 -Height 150 -Font $script:FontBody -Color $script:P.Muted
+$aboutNewText = New-StudioLabel -Text "• Window thumbnails (opt-in): the timeline can show what your screen looked like, not just names.`r`n• Dev workspace restore: VS Code, Cursor, JetBrains and Windows Terminal folders reopen automatically.`r`n• The restore window now says why Windows stopped: power loss, blue screen or clean restart.`r`n• Office AutoRecover files are listed after a crash, pointing straight at recoverable work.`r`n• Named workspaces in the tray: save 'Work' or 'Study' and restore them in one click.`r`n• Smart capture: event snapshots on lock, sleep and low battery; unchanged moments are skipped.`r`n• URL query strings are stripped by default, and snapshots can be gzip-compressed.`r`n• Nine languages and fourteen themes carry over from 2.4." -X 20 -Y 64 -Width 740 -Height 150 -Font $script:FontBody -Color $script:P.Muted
 $aboutNew.Controls.Add($aboutNewText)
 
 $aboutUpdates = New-StudioSettingsCard -Title 'Application updates' -Description 'Check the private GitHub release channel for a newer build.' -Height 218

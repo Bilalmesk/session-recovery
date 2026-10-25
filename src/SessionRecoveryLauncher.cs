@@ -15,8 +15,8 @@ using WinFormsTimer = System.Windows.Forms.Timer;
 [assembly: AssemblyDescription("Session Recovery desktop host")]
 [assembly: AssemblyProduct("Session Recovery")]
 [assembly: AssemblyCompany("Bilalmesk")]
-[assembly: AssemblyVersion("2.4.0.0")]
-[assembly: AssemblyFileVersion("2.4.0.0")]
+[assembly: AssemblyVersion("2.5.0.0")]
+[assembly: AssemblyFileVersion("2.5.0.0")]
 
 namespace SessionRecoveryLauncher
 {
@@ -306,7 +306,7 @@ namespace SessionRecoveryLauncher
                 string snapshots = Path.Combine(root, "snapshots");
                 if (!Directory.Exists(snapshots)) return false;
 
-                foreach (string file in Directory.GetFiles(snapshots, "session-*.json"))
+                foreach (string file in Directory.GetFiles(snapshots, "session-*.json*"))
                 {
                     try
                     {

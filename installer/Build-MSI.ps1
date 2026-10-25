@@ -13,7 +13,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string]$Version = '2.4.0',
+    [string]$Version = '2.5.0',
     [switch]$NoRestore
 )
 
@@ -75,27 +75,29 @@ Session Recovery {0}
 Reopen the apps, File Explorer folders and browser tabs that were open before
 a crash, power cut or unexpected restart.
 
-What's new in 2.4
+What's new in 2.5
 -----------------
-- Nine languages: English, Arabic (with right-to-left layout), French,
-  Spanish, German, Portuguese, Russian, Chinese and Turkish. Pick the
-  language in Settings > Appearance; the whole UI switches instantly.
-- Smart capture: automatic snapshots pause while the PC is idle or a
-  fullscreen app or game is in front. Manual captures always run.
-- Global hotkey: Ctrl+Alt+S takes a snapshot from anywhere while the
-  background app is running.
-- Snapshots now show what changed since the previous one: applications
-  opened or closed, and browser tab movement.
-- Optional auto-backup folder: every new snapshot is copied to a folder
-  you choose (for example a OneDrive folder), keeping the latest ten.
-- Media restore beyond VLC: MPC-HC, MPC-BE, mpv, PotPlayer and Windows
-  Media Player reopen the file that was playing, resuming where supported.
-- Browser detection covers Vivaldi, Chromium, Opera, Opera GX, Waterfox
-  and LibreWolf, including installs outside the usual folders.
-- Fourteen studio themes with audited text contrast, faster animated
-  Diagnostics checks with a hang watchdog, and completely silent
-  automatic snapshots: no popups, no sounds.
-
+- Window thumbnails (opt-in): each snapshot can store a small JPEG of every
+  window, so the timeline shows what your screen actually looked like.
+  Excluded apps are never captured. Off by default for privacy.
+- Dev workspace restore: folders open in VS Code, Cursor and JetBrains IDEs
+  are captured from the editors' own state files and reopened on restore;
+  Windows Terminal directories reopen with wt.exe -d.
+- Crash facts: the restore window and Diagnostics now show why Windows
+  stopped (power loss, blue screen with stop code, or a clean restart),
+  read from the System event log.
+- Office AutoRecover awareness: after a crash the restore window lists the
+  .asd/.wbk/.xar files Office kept, pointing straight at recoverable work.
+- Named workspaces: save the current session as "Work" or "Study" from the
+  tray and restore it later in one click.
+- Event-driven snapshots: extra captures on lock, sleep/resume and when the
+  battery runs low (all optional).
+- Change detection: identical moments are skipped, so retention covers more
+  real changes; snapshots can optionally be gzip-compressed.
+- URL redaction: query strings and fragments are stripped from captured
+  URLs by default, keeping tokens out of the snapshot files.
+- Nine languages, fourteen themes, media restore beyond VLC, broader
+  browser detection and silent automatic snapshots carry over from 2.4.
 Install
 -------
 1. Download both files from the GitHub Releases page:

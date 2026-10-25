@@ -858,7 +858,7 @@ $brandName.Location = New-Object System.Drawing.Point(80, 18)
 $header.Controls.Add($brandName)
 
 $brandMeta = New-Object System.Windows.Forms.Label
-$brandMeta.Text = 'LOCAL SNAPSHOTS  /  V2.4.0'
+$brandMeta.Text = 'LOCAL SNAPSHOTS  /  V2.5.0'
 $brandMeta.Font = New-Object System.Drawing.Font('Consolas', 7.5)
 $brandMeta.ForeColor = $rsMuted
 $brandMeta.AutoSize = $true
@@ -886,6 +886,14 @@ $header.Controls.Add($titleLabel)
 
 $subtitleLabel = New-Object System.Windows.Forms.Label
 $subtitleLabel.Text = (T 'RstSubtitle' 'Choose what to reopen. Everything stays on this PC.')
+try {
+    # A plain-language crash reason replaces guesswork in the header.
+    $shutdownInfo = Get-SRLastShutdownReason
+    if ([string]$shutdownInfo.Kind -eq 'crash' -and -not [string]::IsNullOrWhiteSpace([string]$shutdownInfo.Reason)) {
+        $subtitleLabel.Text = ((T 'RstShutdownReason' 'Windows stopped unexpectedly: {0}') -f [string]$shutdownInfo.Reason)
+        $subtitleLabel.ForeColor = [System.Drawing.Color]::FromArgb(176, 48, 66)
+    }
+} catch { }
 $subtitleLabel.Font = New-Object System.Drawing.Font('Segoe UI', 9.5)
 $subtitleLabel.ForeColor = $rsMuted
 $subtitleLabel.AutoSize = $true
@@ -1206,6 +1214,7 @@ $restoreButton.Add_Click({
         explorer = $selectedFolders.ToArray()
         browsers = $selectedBrowsers.ToArray()
         tabMode  = $mode
+        dev      = @($entry.Snapshot.devWorkspaces)
     }
 
     $script:rsRestoring = $true
@@ -1244,6 +1253,20 @@ $restoreButton.Add_Click({
     } finally {
         $script:rsRestoring = $false
     }
+
+    # After a crash, point straight at the AutoRecover files Office kept.
+    try {
+        $shutdown = Get-SRLastShutdownReason
+        if ([string]$shutdown.Kind -eq 'crash') {
+            foreach ($officeFile in @(Get-SROfficeRecoveryFiles)) {
+                $results += [pscustomobject]@{
+                    Target  = ([string]$officeFile.file)
+                    Started = $false
+                    Message = ((T 'RstOfficeHint' 'Office left this AutoRecover file behind. Open it to recover unsaved work.') + '  [' + [string]$officeFile.app + ']')
+                }
+            }
+        }
+    } catch { }
 
     # Replace the checklist with the outcome of each item. The window stays
     # open so the summary is readable for as long as the user wants.

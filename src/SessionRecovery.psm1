@@ -1,4 +1,4 @@
-Set-StrictMode -Version 2.0
+﻿Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 # ---------------------------------------------------------------------------
@@ -1072,6 +1072,12 @@ function Get-SRDefaultConfig {
         pauseOnFullscreen       = $true
         captureHotkey           = $true
         autoExportFolder        = ''
+        captureThumbnails       = $false
+        redactUrls              = $true
+        compressSnapshots       = $false
+        eventSnapshots          = $true
+        captureDevWorkspaces    = $true
+        workspaces              = @()
         excludeApps             = @()
         excludeFolders          = @()
         excludeUrls             = @()
@@ -2912,6 +2918,511 @@ function Get-SRMediaLaunchArguments {
 # Snapshot creation
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Window thumbnails (opt-in), URL redaction, gzip storage
+# ---------------------------------------------------------------------------
+
+$script:SRThumbHelper = $null
+function Get-SRThumbHelper {
+    if ($null -ne $script:SRThumbHelper) { return $script:SRThumbHelper }
+    $source = @'
+using System;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.IO;
+using System.Runtime.InteropServices;
+
+namespace SessionRecovery {
+    public static class WindowThumb {
+        [StructLayout(LayoutKind.Sequential)]
+        struct RECT { public int Left, Top, Right, Bottom; }
+        [DllImport("user32.dll")] static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint nFlags);
+        [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+        [DllImport("user32.dll")] static extern bool IsIconic(IntPtr hWnd);
+
+        public static bool Capture(IntPtr hWnd, string path, int targetWidth) {
+            if (hWnd == IntPtr.Zero || IsIconic(hWnd)) { return false; }
+            RECT rect;
+            if (!GetWindowRect(hWnd, out rect)) { return false; }
+            int width = rect.Right - rect.Left;
+            int height = rect.Bottom - rect.Top;
+            if (width < 120 || height < 80) { return false; }
+            if (width > 2000) { width = 2000; }
+            if (height > 1200) { height = 1200; }
+            try {
+                using (Bitmap window = new Bitmap(width, height, PixelFormat.Format32bppRgb)) {
+                    using (Graphics g = Graphics.FromImage(window)) {
+                        IntPtr hdc = g.GetHdc();
+                        try { PrintWindow(hWnd, hdc, 2); } finally { g.ReleaseHdc(hdc); }
+                    }
+                    int thumbWidth = targetWidth;
+                    int thumbHeight = Math.Max(1, (int)Math.Round(height * (targetWidth / (double)width)));
+                    using (Bitmap thumb = new Bitmap(thumbWidth, thumbHeight, PixelFormat.Format32bppRgb)) {
+                        using (Graphics tg = Graphics.FromImage(thumb)) {
+                            tg.InterpolationMode = InterpolationMode.HighQualityBilinear;
+                            tg.DrawImage(window, 0, 0, thumbWidth, thumbHeight);
+                        }
+                        ImageCodecInfo jpeg = null;
+                        foreach (ImageCodecInfo codec in ImageCodecInfo.GetImageEncoders()) {
+                            if (codec.MimeType == "image/jpeg") { jpeg = codec; }
+                        }
+                        EncoderParameters quality = new EncoderParameters(1);
+                        quality.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 70L);
+                        string parent = Path.GetDirectoryName(path);
+                        if (!string.IsNullOrEmpty(parent) && !Directory.Exists(parent)) { Directory.CreateDirectory(parent); }
+                        thumb.Save(path, jpeg, quality);
+                        quality.Dispose();
+                    }
+                }
+                return true;
+            } catch {
+                return false;
+            }
+        }
+    }
+}
+'@
+    Add-Type -TypeDefinition $source -ReferencedAssemblies System.Drawing -ErrorAction Stop
+    $script:SRThumbHelper = $true
+    return $script:SRThumbHelper
+}
+
+function New-SRThumbnailSet {
+    # Saves one downscaled JPEG per captured application and browser window.
+    # Only entries that survived the exclusion rules are asked for a picture,
+    # so excluded apps are never rendered to disk.
+    param(
+        [Parameter(Mandatory = $true)]$Snapshot,
+        [Parameter(Mandatory = $true)][object[]]$Windows,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [int]$MaxThumbnails = 24
+    )
+    $result = @()
+    try { Get-SRThumbHelper | Out-Null } catch { return $result }
+    $thumbsRoot = Join-Path $script:SRSnapshotDir 'thumbs'
+    $targetDir = Join-Path $thumbsRoot $Name
+    $captured = 0
+    $index = 0
+
+    $candidates = New-Object System.Collections.Generic.List[object]
+    foreach ($app in @($Snapshot.apps)) {
+        $candidates.Add([pscustomobject]@{ Entry = $app; ProcessName = ([string]$app.name).ToLowerInvariant(); Owner = 'apps' })
+    }
+    foreach ($browser in @($Snapshot.browsers)) {
+        $processNames = @('chrome', 'msedge', 'brave', 'vivaldi', 'opera', 'chromium', 'firefox', 'waterfox', 'librewolf')
+        $matchName = ([string]$browser.exe)
+        if (-not [string]::IsNullOrWhiteSpace($matchName)) {
+            $matchName = [System.IO.Path]::GetFileNameWithoutExtension($matchName).ToLowerInvariant()
+        }
+        if ([string]::IsNullOrWhiteSpace($matchName)) { $matchName = 'chrome' }
+        $candidates.Add([pscustomobject]@{ Entry = $browser; ProcessName = $matchName; Owner = 'browsers' })
+    }
+
+    foreach ($candidate in $candidates) {
+        if ($captured -ge $MaxThumbnails) { break }
+        $best = $null
+        $bestArea = 0
+        foreach ($window in $Windows) {
+            if (([string]$window.ProcessName).ToLowerInvariant() -ne $candidate.ProcessName) { continue }
+            if ([bool]$window.Minimized) { continue }
+            $area = ([int]$window.Width) * ([int]$window.Height)
+            if ($area -gt $bestArea) { $bestArea = $area; $best = $window }
+        }
+        if ($null -eq $best) { continue }
+        $index++
+        $fileName = '{0:d2}-{1}.jpg' -f $index, ($candidate.ProcessName -replace '[^a-z0-9_.-]', '_')
+        $filePath = Join-Path $targetDir $fileName
+        try {
+            $ok = [SessionRecovery.WindowThumb]::Capture([IntPtr][int64]$best.Handle, $filePath, 240)
+            if ($ok) {
+                $relative = 'thumbs/' + $Name + '/' + $fileName
+                if ($candidate.Owner -eq 'apps') {
+                    $candidate.Entry | Add-Member -NotePropertyName thumb -NotePropertyValue $relative -Force
+                } else {
+                    $candidate.Entry | Add-Member -NotePropertyName thumb -NotePropertyValue $relative -Force
+                }
+                $result += $relative
+                $captured++
+            }
+        } catch { }
+    }
+    return $result
+}
+
+function Remove-SRThumbnails {
+    param([Parameter(Mandatory = $true)][string]$SnapshotName)
+    try {
+        $dir = Join-Path (Join-Path $script:SRSnapshotDir 'thumbs') $SnapshotName
+        if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
+    } catch { }
+}
+
+function Redact-SRUrl {
+    # Strips query strings and fragments so tokens never reach disk.
+    param([string]$Url)
+    if ([string]::IsNullOrWhiteSpace($Url)) { return $Url }
+    $value = [string]$Url
+    $hashIndex = $value.IndexOf('#')
+    if ($hashIndex -ge 0) { $value = $value.Substring(0, $hashIndex) }
+    $queryIndex = $value.IndexOf('?')
+    if ($queryIndex -ge 0) { $value = $value.Substring(0, $queryIndex) }
+    return $value
+}
+
+function Invoke-SRUrlRedaction {
+    param([Parameter(Mandatory = $true)]$Snapshot)
+    foreach ($browser in @($Snapshot.browsers)) {
+        foreach ($profile in @($browser.profiles)) {
+            foreach ($tab in @($profile.tabs)) {
+                $urlProperty = $tab.PSObject.Properties['url']
+                if ($null -ne $urlProperty) {
+                    $tab.url = Redact-SRUrl ([string]$urlProperty.Value)
+                }
+            }
+        }
+    }
+}
+
+function Get-SRSnapshotStateHash {
+    # A stable fingerprint of everything that matters in a snapshot, used to
+    # skip writing files when nothing on screen changed.
+    param([Parameter(Mandatory = $true)]$Snapshot)
+    $parts = New-Object System.Collections.Generic.List[string]
+    foreach ($app in @($Snapshot.apps)) {
+        $parts.Add('a:' + [string]$app.exe + ':' + @($app.windows).Count)
+    }
+    foreach ($folder in @($Snapshot.explorer)) { $parts.Add('f:' + [string]$folder) }
+    foreach ($browser in @($Snapshot.browsers)) {
+        foreach ($profile in @($browser.profiles)) {
+            foreach ($tab in @($profile.tabs)) { $parts.Add('t:' + [string]$tab.url + ':' + [string]$tab.title) }
+        }
+    }
+    foreach ($workspace in @($Snapshot.devWorkspaces)) {
+        foreach ($folder in @($workspace.folders)) { $parts.Add('d:' + [string]$folder) }
+    }
+    $text = ($parts -join "`n")
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($text)
+    $md5 = [System.Security.Cryptography.MD5]::Create()
+    try { return ([System.BitConverter]::ToString($md5.ComputeHash($bytes)) -replace '-', '') } finally { $md5.Dispose() }
+}
+
+function Read-SRSnapshotFile {
+    # Reads a snapshot as parsed JSON, transparently handling gzip files
+    # (session-*.json.gz) written when compressSnapshots is enabled.
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -ge 2 -and $bytes[0] -eq 0x1F -and $bytes[1] -eq 0x8B) {
+        $inputStream = $null; $gzip = $null
+        try {
+            $inputStream = New-Object System.IO.MemoryStream(,$bytes)
+            $gzip = New-Object System.IO.Compression.GZipStream($inputStream, [System.IO.Compression.CompressionMode]::Decompress)
+            $output = New-Object System.IO.MemoryStream
+            $gzip.CopyTo($output)
+            $text = [System.Text.Encoding]::UTF8.GetString($output.ToArray())
+        } finally {
+            if ($null -ne $gzip) { $gzip.Dispose() }
+            if ($null -ne $inputStream) { $inputStream.Dispose() }
+        }
+    } else {
+        $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+    }
+    return ($text | ConvertFrom-Json)
+}
+
+function Get-SRSnapshotFiles {
+    # Both plain and gzip snapshots, newest first.
+    return @(Get-ChildItem -LiteralPath $script:SRSnapshotDir -Filter 'session-*.json*' -File -ErrorAction SilentlyContinue |
+        Sort-Object -Property LastWriteTime -Descending)
+}
+
+function ConvertFrom-SRFileUri {
+    # 'file:///c%3A/Users/x' -> 'C:\Users\x' without relying on Uri parsing.
+    param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+    if (-not $Value.StartsWith('file://')) { return $Value }
+    try {
+        $rest = $Value.Substring('file://'.Length)
+        $rest = [Uri]::UnescapeDataString($rest)
+        if ($rest.StartsWith('/')) {
+            # file:/<host>/share for UNC paths, file:///c:/ for local drives.
+            $trimmed = $rest.TrimStart('/')
+            $slash = $trimmed.IndexOf('/')
+            if ($slash -gt 0 -and $trimmed.Substring(0, $slash) -notmatch '^[a-zA-Z]:$') {
+                return '\\' + $trimmed.Replace('/', '\')
+            }
+            $rest = $trimmed
+        }
+        $path = $rest.Replace('/', '\')
+        if ($path -match '^([a-zA-Z]):\\') {
+            $path = $path.Substring(0, 1).ToUpperInvariant() + $path.Substring(1)
+        }
+        return $path
+    } catch {
+        return $Value
+    }
+}
+
+function Get-SRDevWorkspaces {
+    # Reads the editors' own state files (no processes needed) so a restore
+    # can reopen the exact folders and projects that were open.
+    $result = New-Object System.Collections.Generic.List[object]
+
+    foreach ($pair in @(@('VS Code', (Join-Path $env:APPDATA 'Code')), @('Cursor', (Join-Path $env:APPDATA 'Cursor')))) {
+        $tool = [string]$pair[0]
+        $root = [string]$pair[1]
+        try {
+            $storagePath = Join-Path $root 'User\globalStorage\storage.json'
+            if (-not (Test-Path -LiteralPath $storagePath)) { $storagePath = Join-Path $root 'storage.json' }
+            if (-not (Test-Path -LiteralPath $storagePath)) { $storagePath = Join-Path $root 'backup\storage.json' }
+            if (-not (Test-Path -LiteralPath $storagePath)) { continue }
+            $storage = Get-Content -LiteralPath $storagePath -Raw -ErrorAction Stop | ConvertFrom-Json
+            $folders = New-Object System.Collections.Generic.List[string]
+            $state = $storage.windowsState
+            if ($null -ne $state) {
+                # Property-bag access keeps this working regardless of which
+                # windowsState fields a given editor build persists.
+                $candidates = @()
+                $lastWindowProperty = $state.PSObject.Properties['lastActiveWindow']
+                if ($null -ne $lastWindowProperty) { $candidates += @($lastWindowProperty.Value) }
+                $openedProperty = $state.PSObject.Properties['openedWindows']
+                if ($null -ne $openedProperty) { $candidates += @($openedProperty.Value) }
+                $workspaceProperty = $state.PSObject.Properties['workspaceFolders']
+                if ($null -ne $workspaceProperty) { $candidates += @($workspaceProperty.Value) }
+                foreach ($entry in $candidates) {
+                    if ($null -eq $entry) { continue }
+                    foreach ($propertyName in @('folder', 'workspace')) {
+                        $property = $entry.PSObject.Properties[$propertyName]
+                        if ($null -eq $property) { continue }
+                        $value = ConvertFrom-SRFileUri ([string]$property.Value)
+                        if (-not [string]::IsNullOrWhiteSpace($value) -and -not $folders.Contains($value)) {
+                            $folders.Add($value)
+                        }
+                    }
+                }
+            }
+            if ($folders.Count -gt 0) {
+                $result.Add([pscustomobject]@{
+                    kind    = 'vscode'
+                    tool    = $tool
+                    folders = $folders.ToArray()
+                })
+            }
+        } catch {
+            try { Write-SRLog -Level DEBUG -Message ("DevWorkspace {0} failed: {1}" -f $tool, $_.Exception.Message) } catch { }
+        }
+    }
+
+    # JetBrains IDEs keep recent projects in recentProjects.xml.
+    try {
+        $jetbrainsRoot = Join-Path $env:APPDATA 'JetBrains'
+        if (Test-Path -LiteralPath $jetbrainsRoot) {
+            foreach ($product in @(Get-ChildItem -LiteralPath $jetbrainsRoot -Directory -ErrorAction SilentlyContinue)) {
+                $recentPath = Join-Path $product.FullName 'options\recentProjects.xml'
+                if (-not (Test-Path -LiteralPath $recentPath)) { continue }
+                try {
+                    [xml]$xml = Get-Content -LiteralPath $recentPath -Raw -ErrorAction Stop
+                    $folders = New-Object System.Collections.Generic.List[string]
+                    foreach ($component in @($xml.component)) {
+                        if ([string]$component.name -ne 'RecentProjectsManager') { continue }
+                        foreach ($project in @($component.option | Where-Object { $_.name -eq 'recentPaths' } | ForEach-Object { $_.list.path })) {
+                            $value = ([string]$project).Replace('$USER_HOME$', $env:USERPROFILE)
+                            if (-not [string]::IsNullOrWhiteSpace($value) -and (Test-Path -LiteralPath $value) -and -not $folders.Contains($value)) {
+                                $folders.Add($value)
+                                if ($folders.Count -ge 5) { break }
+                            }
+                        }
+                    }
+                    if ($folders.Count -gt 0) {
+                        $result.Add([pscustomobject]@{
+                            kind    = 'jetbrains'
+                            tool    = $product.Name
+                            folders = $folders.ToArray()
+                        })
+                    }
+                } catch { }
+            }
+        }
+    } catch { }
+
+    # Windows Terminal tabs live in state.json inside the store package.
+    try {
+        $wtState = Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\state.json'
+        if (Test-Path -LiteralPath $wtState) {
+            $state = Get-Content -LiteralPath $wtState -Raw -ErrorAction Stop | ConvertFrom-Json
+            $dirs = New-Object System.Collections.Generic.List[string]
+            $tabRows = New-Object System.Collections.Generic.List[object]
+            $walkTabs = $null
+            $walkTabs = {
+                param($Tabs)
+                foreach ($tab in @($Tabs)) {
+                    $title = [string]$tab.title
+                    $cwd = [string]$tab.cwd
+                    $profile = [string]$tab.profile
+                    if ([string]::IsNullOrWhiteSpace($cwd)) { $cwd = '' }
+                    if ($cwd.StartsWith('file://')) { $cwd = $cwd.Substring(7) -replace '/', '\' }
+                    $tabRows.Add([pscustomobject]@{ title = $title; profile = $profile; cwd = $cwd })
+                    if (-not [string]::IsNullOrWhiteSpace($cwd) -and (Test-Path -LiteralPath $cwd) -and -not $dirs.Contains($cwd)) { $dirs.Add($cwd) }
+                    if ($null -ne $tab.panes) { & $walkTabs @($tab.panes) }
+                    if ($null -ne $tab.tab.panes) { & $walkTabs @($tab.tab.panes) }
+                    if ($null -ne $tab.tabs) { & $walkTabs @($tab.tabs) }
+                }
+            }
+            if ($null -ne $state.windows) {
+                foreach ($window in @($state.windows)) { & $walkTabs @($window.tabs) }
+            } elseif ($null -ne $state.tabs) {
+                & $walkTabs @($state.tabs)
+            }
+            if ($tabRows.Count -gt 0) {
+                $result.Add([pscustomobject]@{
+                    kind    = 'terminal'
+                    tool    = 'Windows Terminal'
+                    folders = $dirs.ToArray()
+                    tabs    = $tabRows.ToArray()
+                })
+            }
+        }
+    } catch { }
+
+    return $result.ToArray()
+}
+
+function Get-SRLastShutdownReason {
+    # Plain-language reason for the most recent shutdown, and whether it was
+    # a crash. Replaces guesswork in the restore prompt with facts.
+    $result = [pscustomobject]@{ Kind = 'unknown'; Reason = ''; At = $null }
+    try {
+        $since = (Get-Date).AddDays(-7)
+        $events = @()
+        foreach ($filter in @(
+            @{ LogName = 'System'; Id = 41; ProviderName = 'Microsoft-Windows-Kernel-Power' },
+            @{ LogName = 'System'; Id = 1001; ProviderName = 'Microsoft-Windows-WER-SystemErrorReporting' },
+            @{ LogName = 'System'; Id = 6008 },
+            @{ LogName = 'System'; Id = 1074 },
+            @{ LogName = 'System'; Id = 6006 }
+        )) {
+            $query = @{ LogName = 'System'; Id = $filter['Id']; StartTime = $since }
+            if ($filter['ProviderName']) { $query['ProviderName'] = $filter['ProviderName'] }
+            foreach ($event in @(Get-WinEvent -FilterHashtable $query -ErrorAction SilentlyContinue)) {
+                $events += [pscustomobject]@{ Id = $filter['Id']; At = $event.TimeCreated; Message = [string]$event.Message }
+            }
+        }
+        $events = @($events | Sort-Object -Property At -Descending)
+        if ($events.Count -eq 0) { return $result }
+
+        $bugcheck = @($events | Where-Object { $_.Id -eq 1001 } | Select-Object -First 1)
+        $kernelPower = @($events | Where-Object { $_.Id -eq 41 } | Select-Object -First 1)
+        $unexpected = @($events | Where-Object { $_.Id -eq 6008 } | Select-Object -First 1)
+        $initiated = @($events | Where-Object { $_.Id -eq 1074 } | Select-Object -First 1)
+        $clean = @($events | Where-Object { $_.Id -eq 6006 } | Select-Object -First 1)
+
+        $cleanAt = [datetime]::MinValue
+        if ($clean.Count -gt 0) { $cleanAt = $clean[0].At }
+        if ($bugcheck.Count -gt 0 -and $cleanAt -lt $bugcheck[0].At) {
+            $stop = ''
+            if ($bugcheck[0].Message -match '0x[0-9a-fA-F]{8}') { $stop = $Matches[0] }
+            $result.Kind = 'crash'
+            $result.Reason = 'Blue screen (stop code ' + $stop + ')'
+            $result.At = $bugcheck[0].At
+            return $result
+        }
+        if ($kernelPower.Count -gt 0 -and $cleanAt -lt $kernelPower[0].At) {
+            $result.Kind = 'crash'
+            $result.Reason = 'Power loss or forced restart (the system did not shut down cleanly)'
+            $result.At = $kernelPower[0].At
+            return $result
+        }
+        if ($unexpected.Count -gt 0 -and $cleanAt -lt $unexpected[0].At) {
+            $result.Kind = 'crash'
+            $result.Reason = 'Unexpected shutdown'
+            $result.At = $unexpected[0].At
+            return $result
+        }
+        if ($initiated.Count -gt 0) {
+            $by = ''
+            if ($initiated[0].Message -match 'initiated by (\S+)') { $by = $Matches[1] }
+            $result.Kind = 'clean'
+            $result.Reason = 'Restart initiated by ' + $by
+            $result.At = $initiated[0].At
+            return $result
+        }
+        if ($clean.Count -gt 0) {
+            $result.Kind = 'clean'
+            $result.Reason = 'Normal shutdown'
+            $result.At = $clean[0].At
+        }
+    } catch { }
+    return $result
+}
+
+function Get-SROfficeRecoveryFiles {
+    # Lists the AutoRecover files Office keeps after a crash, so the user can
+    # be pointed straight at them from the restore window.
+    $result = New-Object System.Collections.Generic.List[object]
+    $roots = @(
+        @{ App = 'Word';  Path = Join-Path $env:APPDATA 'Microsoft\Word' },
+        @{ App = 'Excel'; Path = Join-Path $env:APPDATA 'Microsoft\Excel' },
+        @{ App = 'PowerPoint'; Path = Join-Path $env:APPDATA 'Microsoft\PowerPoint' },
+        @{ App = 'Office'; Path = Join-Path $env:LOCALAPPDATA 'Microsoft\Office\UnsavedFiles' }
+    )
+    foreach ($root in $roots) {
+        try {
+            if (-not (Test-Path -LiteralPath $root.Path)) { continue }
+            $files = @(Get-ChildItem -LiteralPath $root.Path -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.Extension -in '.asd', '.wbk', '.xar' -and $_.LastWriteTime -gt (Get-Date).AddDays(-3) })
+            foreach ($file in $files) {
+                $result.Add([pscustomobject]@{
+                    app  = $root.App
+                    file = $file.FullName
+                    at   = $file.LastWriteTime.ToString('o')
+                    size = $file.Length
+                })
+            }
+        } catch { }
+    }
+    return $result.ToArray()
+}
+
+function Get-SRWorkspaces {
+    # Named, manually saved sessions. Each is a full snapshot copy under
+    # <data>\workspaces\<name>.json that the tray can restore directly.
+    $result = New-Object System.Collections.Generic.List[object]
+    try {
+        $dir = Join-Path $script:SRRoot 'workspaces'
+        if (-not (Test-Path -LiteralPath $dir)) { return $result.ToArray() }
+        foreach ($file in @(Get-ChildItem -LiteralPath $dir -Filter '*.json' -File -ErrorAction SilentlyContinue | Sort-Object -Property Name)) {
+            $result.Add([pscustomobject]@{
+                Name = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
+                Path = $file.FullName
+                At   = $file.LastWriteTime
+            })
+        }
+    } catch { }
+    return $result.ToArray()
+}
+
+function Save-SRWorkspace {
+    param([Parameter(Mandatory = $true)][string]$Name)
+    $safe = ($Name -replace '[^\w\-. ]', '_').Trim()
+    if ([string]::IsNullOrWhiteSpace($safe)) { throw 'Workspace name is empty.' }
+    $files = @(Get-SRSnapshotFiles)
+    if ($files.Count -eq 0) { throw 'No snapshot exists yet.' }
+    $source = $files[0].FullName
+    $snapshot = Read-SRSnapshotFile -Path $source
+    $dir = Join-Path $script:SRRoot 'workspaces'
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $target = Join-Path $dir ($safe + '.json')
+    $json = $snapshot | ConvertTo-Json -Depth 12
+    [System.IO.File]::WriteAllText($target, $json, (New-Object System.Text.UTF8Encoding($false)))
+    try {
+        $sourceThumbs = Join-Path $script:SRSnapshotDir ('thumbs\' + [System.IO.Path]::GetFileNameWithoutExtension($source))
+        if (Test-Path -LiteralPath $sourceThumbs) {
+            Copy-Item -LiteralPath $sourceThumbs -Destination (Join-Path $dir ($safe + '-thumbs')) -Recurse -Force
+        }
+    } catch { }
+    return $target
+}
+
 function New-SRSnapshot {
     $windows = @([SessionRecovery.WindowEnumerator]::GetVisibleWindows())
     $processMap = Get-SRProcessMap
@@ -2986,7 +3497,36 @@ function New-SRSnapshot {
         }
     }
 
-    return [pscustomobject]@{
+    # Privacy: strip query strings and fragments from captured URLs unless
+    # the user turned redaction off.
+    $redactUrls = $true
+    try {
+        $redactProperty = $config.PSObject.Properties['redactUrls']
+        if ($null -ne $redactProperty) { $redactUrls = [bool]$redactProperty.Value }
+    } catch { }
+    if ($redactUrls) {
+        foreach ($browser in $browsers) {
+            foreach ($profile in @($browser.profiles)) {
+                foreach ($tab in @($profile.tabs)) {
+                    $urlProperty = $tab.PSObject.Properties['url']
+                    if ($null -ne $urlProperty) { $tab.url = Redact-SRUrl ([string]$urlProperty.Value) }
+                }
+            }
+        }
+    }
+
+    $devWorkspaces = @()
+    $devCapture = $true
+    try {
+        $devProperty = $config.PSObject.Properties['captureDevWorkspaces']
+        if ($null -ne $devProperty) { $devCapture = [bool]$devProperty.Value }
+    } catch { }
+    if ($devCapture) { $devWorkspaces = @(Get-SRDevWorkspaces) }
+
+    # Kept for the thumbnail pass in Save-SRSnapshot; never serialized.
+    $script:SRLastWindows = $windows
+
+    $snapshot = [pscustomobject]@{
         schemaVersion = 1
         capturedAt    = $now.ToString('o')
         capturedAtUtc = $now.ToUniversalTime().ToString('o')
@@ -2998,6 +3538,7 @@ function New-SRSnapshot {
         apps          = $apps
         explorer      = $folders
         browsers      = $browsers
+        devWorkspaces = $devWorkspaces
         stats         = [pscustomobject]@{
             windows  = $windows.Count
             apps     = $apps.Count
@@ -3006,6 +3547,8 @@ function New-SRSnapshot {
             tabs     = $tabCount
         }
     }
+    $snapshot | Add-Member -NotePropertyName stateHash -NotePropertyValue (Get-SRSnapshotStateHash -Snapshot $snapshot) -Force
+    return $snapshot
 }
 
 function Remove-OldSRSnapshots {
@@ -3162,10 +3705,62 @@ function Save-SRSnapshot {
     try {
         $snapshot = New-SRSnapshot
         $captured = [DateTimeOffset]::Parse([string]$snapshot.capturedAt, [System.Globalization.CultureInfo]::InvariantCulture)
-        $fileName = 'session-{0}.json' -f $captured.ToString('yyyyMMdd-HHmmss-fff')
+
+        # Change detection: when nothing relevant changed since the newest
+        # snapshot, skip writing a new file. Manual captures always write.
+        if (-not $Force) {
+            try {
+                $newest = @(Get-SRSnapshotFiles)
+                if ($newest.Count -gt 0) {
+                    $previous = Read-SRSnapshotFile -Path $newest[0].FullName
+                    $previousHash = [string]$previous.stateHash
+                    if (-not [string]::IsNullOrWhiteSpace($previousHash) -and $previousHash -eq [string]$snapshot.stateHash) {
+                        Write-SRLog -Level DEBUG -Message 'Skipped snapshot: nothing changed since the last one.'
+                        return $null
+                    }
+                }
+            } catch { }
+        }
+
+        $compress = $false
+        try {
+            $compressProperty = $config.PSObject.Properties['compressSnapshots']
+            if ($null -ne $compressProperty) { $compress = [bool]$compressProperty.Value }
+        } catch { }
+
+        # Thumbnails are opt-in: nothing is rendered unless the user asked,
+        # and only entries that survived the exclusion rules get a picture.
+        $captureThumbs = $false
+        try {
+            $thumbsProperty = $config.PSObject.Properties['captureThumbnails']
+            if ($null -ne $thumbsProperty) { $captureThumbs = [bool]$thumbsProperty.Value }
+        } catch { }
+        if ($captureThumbs) {
+            try {
+                $thumbName = $captured.ToString('yyyyMMdd-HHmmss-fff')
+                [void](New-SRThumbnailSet -Snapshot $snapshot -Windows @($script:SRLastWindows) -Name $thumbName)
+            } catch { Write-SRLog -Level DEBUG -Message ("Thumbnails failed: {0}" -f $_.Exception.Message) }
+        }
+
+        $fileName = 'session-{0}.json{1}' -f $captured.ToString('yyyyMMdd-HHmmss-fff'), $(if ($compress) { '.gz' } else { '' })
         $path = Join-Path $script:SRSnapshotDir $fileName
         $json = $snapshot | ConvertTo-Json -Depth 12
-        [System.IO.File]::WriteAllText($path, $json, (New-Object System.Text.UTF8Encoding($false)))
+        if ($compress) {
+            $inputStream = $null; $gzip = $null; $fileStream = $null
+            try {
+                $payload = [System.Text.Encoding]::UTF8.GetBytes($json)
+                $inputStream = New-Object System.IO.MemoryStream (,$payload)
+                $fileStream = [System.IO.File]::Open($path, [System.IO.FileMode]::CreateNew)
+                $gzip = New-Object System.IO.Compression.GZipStream($fileStream, [System.IO.Compression.CompressionLevel]::Optimal)
+                $inputStream.CopyTo($gzip)
+            } finally {
+                if ($null -ne $gzip) { $gzip.Dispose() }
+                elseif ($null -ne $fileStream) { $fileStream.Dispose() }
+                if ($null -ne $inputStream) { $inputStream.Dispose() }
+            }
+        } else {
+            [System.IO.File]::WriteAllText($path, $json, (New-Object System.Text.UTF8Encoding($false)))
+        }
         Remove-OldSRSnapshots -Keep ([int]$config.keepSnapshots) -MaxAgeDays ([int]$config.keepSnapshotDays) -Pinned @($config.pinnedSnapshots)
         Write-SRLog -Message ("Snapshot saved: {0} ({1} apps, {2} folders, {3} browsers, {4} tabs)" -f $path, $snapshot.stats.apps, $snapshot.stats.folders, $snapshot.stats.browsers, $snapshot.stats.tabs)
         try {
@@ -3201,11 +3796,10 @@ function Save-SRSnapshot {
 function Get-SRSnapshots {
     if (-not (Test-Path -LiteralPath $script:SRSnapshotDir)) { return @() }
     $snapshots = New-Object System.Collections.Generic.List[object]
-    $files = @(Get-ChildItem -LiteralPath $script:SRSnapshotDir -Filter 'session-*.json' -File -ErrorAction SilentlyContinue |
-        Sort-Object -Property LastWriteTime -Descending)
+    $files = @(Get-SRSnapshotFiles)
     foreach ($file in $files) {
         try {
-            $snapshot = Get-Content -LiteralPath $file.FullName -Raw -ErrorAction Stop | ConvertFrom-Json
+            $snapshot = Read-SRSnapshotFile -Path $file.FullName
             $captured = [DateTimeOffset]::Parse([string]$snapshot.capturedAt, [System.Globalization.CultureInfo]::InvariantCulture)
             $snapshots.Add([pscustomobject]@{
                 Path       = $file.FullName
@@ -3606,6 +4200,68 @@ function Invoke-SRRestore {
         }
     }
 
+    # Dev workspaces: reopen the folders the editors had open. Editors are
+    # launched through their CLI launcher when it exists; otherwise the
+    # folder opens in Explorer so nothing is silently dropped.
+    foreach ($workspace in @($Plan.dev)) {
+        if ($null -eq $workspace) { continue }
+        $tool = [string]$workspace.tool
+        $kind = [string]$workspace.kind
+        $launcher = $null
+        if ($kind -eq 'vscode') {
+            $launcherCandidates = @()
+            if ($tool -eq 'Cursor') {
+                $launcherCandidates = @(
+                    (Join-Path $env:LOCALAPPDATA 'Programs\cursor\resources\app\bin\cursor.cmd'),
+                    (Join-Path $env:LOCALAPPDATA 'Programs\Cursor\Cursor.exe')
+                )
+            } else {
+                $launcherCandidates = @(
+                    (Join-Path $env:LOCALAPPDATA 'Programs\Microsoft VS Code\bin\code.cmd'),
+                    (Join-Path $env:ProgramFiles 'Microsoft VS Code\bin\code.cmd'),
+                    (Join-Path ${env:ProgramFiles(x86)} 'Microsoft VS Code\bin\code.cmd')
+                )
+            }
+            foreach ($candidate in $launcherCandidates) {
+                if (Test-Path -LiteralPath $candidate) { $launcher = $candidate; break }
+            }
+        } elseif ($kind -eq 'terminal') {
+            $wtExe = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\wt.exe'
+            if (Test-Path -LiteralPath $wtExe) { $launcher = $wtExe }
+        }
+        foreach ($folder in @($workspace.folders)) {
+            if ([string]::IsNullOrWhiteSpace([string]$folder) -or -not (Test-Path -LiteralPath $folder)) { continue }
+            $index++
+            if ($null -ne $Progress) {
+                try { & $Progress $index $total ($tool + ': ' + $folder) } catch { }
+            }
+            $started = $false
+            $message = ''
+            try {
+                if ($null -ne $launcher -and $kind -eq 'vscode') {
+                    Start-Process -FilePath 'cmd.exe' -ArgumentList ('/c ""{0}" "{1}""' -f $launcher, ([string]$folder)) -WindowStyle Hidden
+                    $started = $true
+                    $message = 'Reopened in ' + $tool
+                } elseif ($null -ne $launcher -and $kind -eq 'terminal') {
+                    Start-Process -FilePath $launcher -ArgumentList ('-d "{0}"' -f [string]$folder)
+                    $started = $true
+                    $message = 'Windows Terminal opened here'
+                } else {
+                    Start-Process -FilePath 'explorer.exe' -ArgumentList ('"{0}"' -f [string]$folder)
+                    $started = $true
+                    $message = 'Folder opened in Explorer'
+                }
+            } catch {
+                $message = 'Could not reopen: ' + $_.Exception.Message
+            }
+            $results.Add([pscustomobject]@{
+                Target  = ($folder)
+                Started = $started
+                Message = $message
+            })
+        }
+    }
+
     return $results.ToArray()
 }
 
@@ -3654,7 +4310,7 @@ function New-SRRestorePlan {
 function Get-SRSnapshotByPath {
     param([Parameter(Mandatory = $true)][string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) { throw "Snapshot not found: $Path" }
-    $snapshot = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json
+    $snapshot = Read-SRSnapshotFile -Path $Path
     return $snapshot
 }
 
@@ -4134,6 +4790,19 @@ function Get-SRDiagnostics {
         try {
             # Reading just the head of the file is much cheaper than parsing a
             # potentially large snapshot JSON only to read one timestamp.
+            # Gzip files fall back to a full read (they are small anyway).
+            $nameLower = $latestFile.Name.ToLowerInvariant()
+            if ($nameLower.EndsWith('.gz')) {
+                $latestSnapshot = Read-SRSnapshotFile -Path $latestFile.FullName
+                if (-not [string]::IsNullOrWhiteSpace([string]$latestSnapshot.capturedAt)) {
+                    $latestCaptured = [DateTimeOffset]::Parse(
+                        [string]$latestSnapshot.capturedAt,
+                        [System.Globalization.CultureInfo]::InvariantCulture).LocalDateTime
+                }
+                $latestAt = $latestCaptured.ToString('o')
+                $latestAgeMinutes = [Math]::Round(((Get-Date) - $latestCaptured).TotalMinutes, 1)
+                $latestPath = [string]$latestFile.FullName
+            }
             $stream = [System.IO.File]::OpenText($latestFile.FullName)
             try {
                 $chunk = New-Object System.Text.StringBuilder
@@ -4239,6 +4908,7 @@ function Get-SRDiagnostics {
     }
 
     $installed = Test-Path -LiteralPath (Join-Path $root 'app\SessionRecovery.psm1')
+    $shutdown = Get-SRLastShutdownReason
 
     return [pscustomobject]@{
         GeneratedAt              = (Get-Date).ToString('o')
@@ -4257,6 +4927,9 @@ function Get-SRDiagnostics {
         SnapshotBytes            = $snapshotBytes
         LogPath                  = $logPath
         ScheduleMode             = $scheduleMode
+        ShutdownKind             = [string]$shutdown.Kind
+        ShutdownReason           = [string]$shutdown.Reason
+        ShutdownAt               = if ($shutdown.At) { ([datetime]$shutdown.At).ToString('o') } else { $null }
         WatcherPids              = @($watcherPids)
         TrayPids                 = @($trayPids)
         ScheduledTasks           = @($tasks)

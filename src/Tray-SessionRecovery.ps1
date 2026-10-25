@@ -86,6 +86,15 @@ if (-not (Test-Path -LiteralPath $script:hostExe)) {
     if (Test-Path -LiteralPath $candidate) { $script:hostExe = $candidate }
 }
 
+function Test-SRTrayEventSnapshots {
+    try {
+        $config = Get-SRConfig
+        $property = $config.PSObject.Properties['eventSnapshots']
+        if ($null -ne $property) { return [bool]$property.Value }
+    } catch { }
+    return $true
+}
+
 function Get-SRTrayIntervalMinutes {
     try {
         $config = Get-SRConfig
@@ -468,6 +477,43 @@ $snapshotItem = New-Object System.Windows.Forms.ToolStripMenuItem((T 'TraySnapsh
 [void]$snapshotItem.Add_Click({ Invoke-SRTraySnapshot -Manual })
 [void]$script:menu.Items.Add($snapshotItem)
 
+# Named workspaces: manually saved sessions that restore in one click.
+$workspaceMenu = New-Object System.Windows.Forms.ToolStripMenuItem((T 'TrayWorkspaces' 'Workspaces'))
+[void]$workspaceMenu.Add_DropDownOpening({
+    $workspaceMenu.DropDownItems.Clear()
+    $saveItem = New-Object System.Windows.Forms.ToolStripMenuItem((T 'TraySaveWorkspace' 'Save current session as...'))
+    [void]$saveItem.Add_Click({
+        $name = ''
+        try {
+            Add-Type -AssemblyName Microsoft.VisualBasic
+            $name = [Microsoft.VisualBasic.Interaction]::InputBox((T 'TrayWorkspacePrompt' 'Name this workspace'), 'Session Recovery', '')
+        } catch { return }
+        if ([string]::IsNullOrWhiteSpace($name)) { return }
+        try {
+            [void](Save-SRSnapshot -Force)
+            [void](Save-SRWorkspace -Name $name)
+            Show-SRTrayBalloon -Text ((T 'TrayWorkspaceSaved' 'Workspace "{0}" saved.') -f $name) -Icon Information
+        } catch {
+            Show-SRTrayBalloon -Text ((T 'TrayWorkspaceFail' 'Could not save the workspace: {0}') -f $_.Exception.Message) -Icon Error
+        }
+    })
+    [void]$workspaceMenu.DropDownItems.Add($saveItem)
+    $saved = @(Get-SRWorkspaces)
+    if ($saved.Count -gt 0) {
+        [void]$workspaceMenu.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+        foreach ($workspace in $saved) {
+            $item = New-Object System.Windows.Forms.ToolStripMenuItem($workspace.Name)
+            $item.Tag = $workspace.Path
+            [void]$item.Add_Click({
+                param($sender, $eventArgs)
+                Start-SRStudio -Mode ('--restore-manual -SnapshotPath "' + ([string]$sender.Tag).Replace('"', '""') + '"')
+            })
+            [void]$workspaceMenu.DropDownItems.Add($item)
+        }
+    }
+})
+[void]$script:menu.Items.Add($workspaceMenu)
+
 $script:pauseItem = New-Object System.Windows.Forms.ToolStripMenuItem((T 'TrayPause' 'Pause snapshots'))
 $script:pauseItem.CheckOnClick = $true
 [void]$script:pauseItem.Add_CheckedChanged({
@@ -610,13 +656,64 @@ $script:hotkeyTimer.Interval = 250
 })
 $script:hotkeyTimer.Start()
 
+# Low battery: capture once when the charge first drops to the low band.
+$script:batteryTimer = New-Object System.Windows.Forms.Timer
+$script:batteryTimer.Interval = 60000
+$script:batteryLowSeen = $false
+[void]$script:batteryTimer.Add_Tick({
+    if ($script:exiting) { return }
+    try {
+        $power = [System.Windows.Forms.SystemInformation]::PowerStatus
+        if ($power.PowerLineStatus -eq [System.Windows.Forms.PowerLineStatus]::Online) {
+            $script:batteryLowSeen = $false
+            return
+        }
+        $low = ($power.BatteryChargeStatus -band [System.Windows.Forms.BatteryChargeStatus]::Low) -ne 0
+        $critical = ($power.BatteryChargeStatus -band [System.Windows.Forms.BatteryChargeStatus]::Critical) -ne 0
+        if (($low -or $critical) -and -not $script:batteryLowSeen) {
+            $script:batteryLowSeen = $true
+            if ((Test-SRTrayEventSnapshots) -and $script:ownsSnapshots -and -not $script:paused) {
+                Invoke-SRTraySnapshot
+            }
+        }
+        if (-not $low -and -not $critical -and [double]$power.BatteryLifePercent -gt 0.35) {
+            $script:batteryLowSeen = $false
+        }
+    } catch { }
+})
+$script:batteryTimer.Start()
+
 try {
     [Microsoft.Win32.SystemEvents]::PowerModeChanged += {
         param($sender, $e)
-        if ($e.Mode -eq [Microsoft.Win32.PowerModes]::Resume -and $script:ownsSnapshots -and -not $script:paused) {
-            Stop-SRTrayTimers
-            $script:firstTimer.Interval = 15000
-            $script:firstTimer.Start()
+        if ($e.Mode -eq [Microsoft.Win32.PowerModes]::Resume) {
+            # A resume is a likely crash moment on laptops: capture once the
+            # desktop is back, then let the timer continue.
+            if ((Test-SRTrayEventSnapshots) -and $script:ownsSnapshots -and -not $script:paused) {
+                Stop-SRTrayTimers
+                $script:firstTimer.Interval = 15000
+                $script:firstTimer.Start()
+            }
+        }
+        if ($e.Mode -eq [Microsoft.Win32.PowerModes]::Suspend) {
+            # Capture right before sleep: this is the snapshot that matters
+            # when the battery dies or the machine never wakes up.
+            if ((Test-SRTrayEventSnapshots) -and $script:ownsSnapshots -and -not $script:paused) {
+                Invoke-SRTraySnapshot
+            }
+        }
+    }
+} catch { }
+
+try {
+    [Microsoft.Win32.SystemEvents]::SessionSwitch += {
+        param($sender, $e)
+        if ($e.Reason -eq [Microsoft.Win32.SessionSwitchReason]::SessionLock) {
+            # Locking is the most reliable 'walked away / end of session'
+            # signal Windows gives without admin rights.
+            if ((Test-SRTrayEventSnapshots) -and -not $script:paused) {
+                Invoke-SRTraySnapshot
+            }
         }
     }
 } catch { }
