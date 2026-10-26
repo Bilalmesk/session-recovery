@@ -13,3 +13,14 @@ installer/obj/
 installer/bin/
 *.wixpdb
 *.wixobj
+
+# UI render and audit output
+shots-check/
+shots-ar/
+shots-en/
+shots-now/
+audit-*/
+audit2/
+ui-audit/
+installer-smoke/
+testResults.xml

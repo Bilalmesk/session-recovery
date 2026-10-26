@@ -116,7 +116,7 @@ function Test-SRScheduledSnapshotTask {
 
 function Get-SRLastSnapshotInfo {
     try {
-        $file = Get-ChildItem -LiteralPath (Get-SRSnapshotDirectory) -Filter 'session-*.json' -File -ErrorAction SilentlyContinue |
+        $file = Get-ChildItem -LiteralPath (Get-SRSnapshotDirectory) -Filter 'session-*.json*' -File -ErrorAction SilentlyContinue |
             Sort-Object -Property LastWriteTime -Descending |
             Select-Object -First 1
         if ($null -eq $file) { return $null }
@@ -331,6 +331,15 @@ function Exit-SRTray {
     if ($script:exiting) { return }
     $script:exiting = $true
     Stop-SRTrayTimers
+    if ($null -ne $script:controlTimer) {
+        try { $script:controlTimer.Stop(); $script:controlTimer.Dispose() } catch { }
+        $script:controlTimer = $null
+    }
+    try {
+        if ('SessionRecovery.Tray.ControlPipe' -as [type]) {
+            [SessionRecovery.Tray.ControlPipe]::Stop()
+        }
+    } catch { }
     if ($null -ne $script:hotkeyTimer) {
         try { $script:hotkeyTimer.Stop(); $script:hotkeyTimer.Dispose() } catch { }
         $script:hotkeyTimer = $null
@@ -655,6 +664,159 @@ $script:hotkeyTimer.Interval = 250
     }
 })
 $script:hotkeyTimer.Start()
+
+# ---------------------------------------------------------------------------
+# Local control API: a named pipe other tools can talk to
+# ---------------------------------------------------------------------------
+
+try {
+    if (-not ('SessionRecovery.Tray.ControlPipe' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Concurrent;
+using System.IO;
+using System.IO.Pipes;
+using System.Text;
+using System.Threading;
+
+namespace SessionRecovery.Tray
+{
+    public static class ControlPipe
+    {
+        // Raw .NET threads cannot run PowerShell, so the pipe thread only
+        // queues command lines; the UI timer picks them up on the STA thread.
+        private static readonly ConcurrentQueue<string> Queue = new ConcurrentQueue<string>();
+        private static Thread worker;
+        private static volatile bool stopping;
+
+        public static bool TryDequeue(out string command)
+        {
+            return Queue.TryDequeue(out command);
+        }
+
+        public static void Start()
+        {
+            if (worker != null) return;
+            stopping = false;
+            worker = new Thread(new ThreadStart(Run));
+            worker.IsBackground = true;
+            worker.Start();
+        }
+
+        public static void Stop()
+        {
+            stopping = true;
+            Thread local = worker;
+            worker = null;
+            try { if (local != null) local.Join(700); } catch { }
+        }
+
+        private static void Run()
+        {
+            while (!stopping)
+            {
+                NamedPipeServerStream pipe = null;
+                try
+                {
+                    pipe = new NamedPipeServerStream(
+                        "SessionRecoveryControl", PipeDirection.InOut, 1,
+                        PipeTransmissionMode.Byte, PipeOptions.None);
+                    pipe.WaitForConnection();
+                    if (stopping) return;
+                    string line = null;
+                    try
+                    {
+                        using (StreamReader reader = new StreamReader(pipe, Encoding.UTF8, false, 4096, true))
+                        {
+                            line = reader.ReadLine();
+                        }
+                        if (!string.IsNullOrWhiteSpace(line))
+                        {
+                            Queue.Enqueue(line);
+                            byte[] ack = Encoding.UTF8.GetBytes("{\"accepted\":true}\n");
+                            pipe.Write(ack, 0, ack.Length);
+                            pipe.Flush();
+                        }
+                    }
+                    catch { }
+                }
+                catch
+                {
+                    // A failed connection must not kill the server thread.
+                }
+                finally
+                {
+                    try { if (pipe != null) pipe.Dispose(); } catch { }
+                }
+            }
+        }
+    }
+}
+'@ -ErrorAction Stop
+    }
+    [SessionRecovery.Tray.ControlPipe]::Start()
+    $script:controlPipeRunning = $true
+} catch {
+    $script:controlPipeRunning = $false
+    try { Write-SRLog -Level WARN -Message ('Control pipe could not start: {0}' -f $_.Exception.Message) } catch { }
+}
+
+function Invoke-SRTrayControl {
+    # Handles one JSON command line from the control pipe on the UI thread.
+    param([string]$JsonLine)
+    try {
+        $request = ([string]$JsonLine).Trim() | ConvertFrom-Json
+        $command = [string]$request.command
+        $name = [string]$request.name
+        switch ($command) {
+            'snapshot' { Invoke-SRTraySnapshot }
+            'pause' {
+                if ($script:ownsSnapshots -and -not $script:paused) {
+                    $script:paused = $true
+                    Stop-SRTrayTimers
+                    $script:resumeAt = $null
+                    Update-SRTrayStatus
+                }
+            }
+            'resume' { Resume-SRTraySnapshots }
+            'restore-latest' { Start-SRStudio -Mode '--restore-prompt' }
+            'workspace-save' {
+                if ([string]::IsNullOrWhiteSpace($name)) { break }
+                try {
+                    [void](Save-SRSnapshot -Force)
+                    [void](Save-SRWorkspace -Name $name)
+                    Show-SRTrayBalloon -Text ((T 'TrayWorkspaceSaved' 'Workspace "{0}" saved.') -f $name) -Icon Information
+                } catch {
+                    Show-SRTrayBalloon -Text ((T 'TrayWorkspaceFail' 'Could not save the workspace: {0}') -f $_.Exception.Message) -Icon Error
+                }
+            }
+            'workspace-restore' {
+                if ([string]::IsNullOrWhiteSpace($name)) { break }
+                $workspace = @(Get-SRWorkspaces) | Where-Object { $_.Name -eq $name } | Select-Object -First 1
+                if ($workspace) {
+                    Start-SRStudio -Mode ('--restore-manual -SnapshotPath "' + ([string]$workspace.Path).Replace('"', '""') + '"')
+                }
+            }
+        }
+        try { Write-SRLog -Message ('Control command handled: {0}' -f $command) } catch { }
+    } catch {
+        try { Write-SRLog -Level WARN -Message ('Control command failed: {0}' -f $_.Exception.Message) } catch { }
+    }
+}
+
+$script:controlTimer = New-Object System.Windows.Forms.Timer
+$script:controlTimer.Interval = 500
+[void]$script:controlTimer.Add_Tick({
+    if (-not $script:controlPipeRunning) { return }
+    for ($drained = 0; $drained -lt 5; $drained++) {
+        $line = $null
+        $has = $false
+        try { $has = [SessionRecovery.Tray.ControlPipe]::TryDequeue([ref]$line) } catch { $has = $false }
+        if (-not $has) { break }
+        Invoke-SRTrayControl -JsonLine ([string]$line)
+    }
+})
+$script:controlTimer.Start()
 
 # Low battery: capture once when the charge first drops to the low band.
 $script:batteryTimer = New-Object System.Windows.Forms.Timer

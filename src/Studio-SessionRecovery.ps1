@@ -17,7 +17,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-$script:AppVersion = '2.5.0'
+$script:AppVersion = '2.6.0'
 $script:ScriptDir = $PSScriptRoot
 $script:AppDir = if ($env:SESSIONRECOVERY_HOST_EXE) { Split-Path -Parent $env:SESSIONRECOVERY_HOST_EXE } else { $PSScriptRoot }
 $script:HostExe = $null
@@ -32,6 +32,7 @@ $script:UiReady = $false
 $script:CurrentPage = 'Dashboard'
 $script:SettingsLoaded = $false
 $script:ExclusionCards = @()
+$script:LocalizedCombos = New-Object System.Collections.ArrayList
 $script:SnapshotRows = @()
 $script:ToastTimer = $null
 $script:SnapshotsDirty = $true
@@ -743,6 +744,18 @@ function Get-StudioThemeList {
     return $list.ToArray()
 }
 
+function Get-StudioThemeLabel {
+    param($Entry)
+    if ($null -eq $Entry) { return '' }
+    return (T ('Theme' + [string]$Entry.Key + 'Label') ([string]$Entry.Label))
+}
+
+function Get-StudioThemeDescription {
+    param($Entry)
+    if ($null -eq $Entry) { return '' }
+    return (T ('Theme' + [string]$Entry.Key + 'Desc') ([string]$Entry.Description))
+}
+
 function Get-StudioPalette {
     param([string]$Theme = 'Aurora')
     $key = Resolve-StudioThemeKey -Theme $Theme
@@ -830,6 +843,27 @@ function Set-StudioLanguage {
         if (-not [string]::IsNullOrWhiteSpace($Language)) { $script:Lang = ([string]$Language).ToLowerInvariant() }
     } catch { }
     $script:L = Get-SRStrings -Language $script:Lang
+    $script:DateCulture = switch ($script:Lang) {
+        'ar' { 'ar-EG' }
+        'fr' { 'fr-FR' }
+        'es' { 'es-ES' }
+        'de' { 'de-DE' }
+        'pt' { 'pt-PT' }
+        'ru' { 'ru-RU' }
+        'zh' { 'zh-CN' }
+        'tr' { 'tr-TR' }
+        default { 'en-US' }
+    }
+}
+
+function Format-StudioDate {
+    # Dates follow the selected UI language, not the Windows display language.
+    param([datetime]$Date, [string]$Format)
+    try {
+        return $Date.ToString($Format, [System.Globalization.CultureInfo]::GetCultureInfo($script:DateCulture))
+    } catch {
+        return $Date.ToString($Format)
+    }
 }
 
 function T {
@@ -851,21 +885,127 @@ function Localize-StudioString {
 }
 
 function Localize-StudioTexts {
-    # One pass over the whole tree: any control whose text still shows the
-    # English source of a translated key gets the translation. This covers
-    # the many labels built once with literal strings.
+    # One pass over the whole tree. The original English text is remembered on
+    # each control, so switching fr -> de -> ar always starts from the English
+    # source instead of trying to translate an already translated string.
     param($Control)
     if ($null -eq $Control) { return }
-    if ($script:Lang -ne 'en') {
+    $typeName = $Control.GetType().FullName
+    $isTextBox = ($typeName -eq 'System.Windows.Forms.TextBox')
+    if (-not $isTextBox) {
         $textProperty = $Control.PSObject.Properties['Text']
         if ($null -ne $textProperty) {
             $text = [string]$Control.Text
-            if (-not [string]::IsNullOrWhiteSpace($text) -and $script:L.ReverseLookup.ContainsKey($text)) {
-                $Control.Text = [string]$script:L.ReverseLookup[$text]
+            $originProperty = $Control.PSObject.Properties['SROriginalText']
+            if ($null -eq $originProperty) {
+                $original = $text
+                if (-not [string]::IsNullOrWhiteSpace($original)) {
+                    $Control | Add-Member -NotePropertyName 'SROriginalText' -NotePropertyValue $original -Force
+                }
+            } else {
+                $original = [string]$originProperty.Value
+            }
+            if (-not [string]::IsNullOrWhiteSpace($original)) {
+                if ($script:Lang -eq 'en') {
+                    if ($text -ne $original) { $Control.Text = $original }
+                } elseif ($script:L.ReverseLookup.ContainsKey($original)) {
+                    $translated = [string]$script:L.ReverseLookup[$original]
+                    if ($text -ne $translated) { $Control.Text = $translated }
+                }
+            }
+        }
+    }
+    # StudioRing paints its caption itself, so it is not covered by the Text
+    # walk above. Remember the English caption and re-apply it on each
+    # language change, including the dashboard and diagnostics rings.
+    if ($typeName -eq 'SessionRecovery.Studio.StudioRing') {
+        $captionProperty = $Control.PSObject.Properties['Caption']
+        if ($null -ne $captionProperty) {
+            $caption = [string]$captionProperty.Value
+            $originProperty = $Control.PSObject.Properties['SROriginalCaption']
+            if ($null -eq $originProperty) {
+                $originalCaption = $caption
+                if (-not [string]::IsNullOrWhiteSpace($originalCaption)) {
+                    $Control | Add-Member -NotePropertyName 'SROriginalCaption' -NotePropertyValue $originalCaption -Force
+                }
+            } else {
+                $originalCaption = [string]$originProperty.Value
+            }
+            if (-not [string]::IsNullOrWhiteSpace($originalCaption)) {
+                if ($script:Lang -eq 'en') {
+                    if ($caption -ne $originalCaption) { $Control.Caption = $originalCaption }
+                } elseif ($script:L.ReverseLookup.ContainsKey($originalCaption)) {
+                    $translatedCaption = [string]$script:L.ReverseLookup[$originalCaption]
+                    if ($caption -ne $translatedCaption) { $Control.Caption = $translatedCaption }
+                }
             }
         }
     }
     foreach ($child in @($Control.Controls)) { Localize-StudioTexts -Control $child }
+}
+
+function Set-StudioLocalizedCombo {
+    # ComboBox items are not part of the control tree walk. Remember the key
+    # list so a live language change can rebuild the visible labels without
+    # touching the selected index (which is what settings actually save).
+    param($Combo, [string[]]$Keys, [string[]]$Defaults)
+    if ($null -eq $Combo) { return }
+    if ($null -eq $script:LocalizedCombos) { $script:LocalizedCombos = New-Object System.Collections.ArrayList }
+    $entry = @{ Combo = $Combo; Keys = @($Keys); Defaults = @($Defaults) }
+    [void]$script:LocalizedCombos.Add($entry)
+    $selected = $Combo.SelectedIndex
+    $Combo.BeginUpdate()
+    try {
+        $Combo.Items.Clear()
+        for ($index = 0; $index -lt $Keys.Count; $index++) {
+            $fallback = if ($index -lt $Defaults.Count) { [string]$Defaults[$index] } else { '' }
+            [void]$Combo.Items.Add((T $Keys[$index] $fallback))
+        }
+        if ($selected -ge 0 -and $selected -lt $Combo.Items.Count) { $Combo.SelectedIndex = $selected }
+    } finally {
+        $Combo.EndUpdate()
+    }
+}
+
+function Update-StudioLocalizedCombos {
+    foreach ($entry in @($script:LocalizedCombos)) {
+        if ($null -eq $entry -or $null -eq $entry.Combo) { continue }
+        $combo = $entry.Combo
+        $selected = $combo.SelectedIndex
+        $combo.BeginUpdate()
+        try {
+            $combo.Items.Clear()
+            for ($index = 0; $index -lt $entry.Keys.Count; $index++) {
+                $fallback = if ($index -lt $entry.Defaults.Count) { [string]$entry.Defaults[$index] } else { '' }
+                [void]$combo.Items.Add((T ([string]$entry.Keys[$index]) $fallback))
+            }
+            if ($selected -ge 0 -and $selected -lt $combo.Items.Count) { $combo.SelectedIndex = $selected }
+        } finally {
+            $combo.EndUpdate()
+        }
+    }
+}
+
+function Update-StudioPlaceholders {
+    # TextBox placeholders are not translated by the tree walk because the box
+    # may contain user input. Only rebuild the visible placeholder when the
+    # placeholder tag is still active.
+    if ($script:Ui -and $script:Ui.SnapSearch -and $script:Ui.SnapSearch.Tag -eq 'placeholder') {
+        $script:Ui.SnapSearch.Text = (T 'SearchPlaceholder' 'Search apps, folders, tabs')
+    }
+    $script:ExclusionPlaceholders = @{
+        excludeApps    = (T 'ExclAppPlaceholder' 'e.g. steam.exe or *game*')
+        excludeFolders = (T 'ExclFolderPlaceholder' 'e.g. C:\Projects\Private')
+        excludeUrls    = (T 'ExclUrlPlaceholder' 'e.g. *bank* or https://mail.example.com/*')
+    }
+    foreach ($card in @($script:ExclusionCards)) {
+        if ($null -eq $card) { continue }
+        $context = $card.Tag
+        if ($null -eq $context -or $null -eq $context.Input) { continue }
+        if ($context.Input.Tag -eq 'placeholder') {
+            $context.Input.Text = [string]$script:ExclusionPlaceholders[[string]$context.Input.AccessibleName]
+        }
+    }
 }
 
 function Initialize-StudioLanguage {
@@ -875,17 +1015,31 @@ function Initialize-StudioLanguage {
     $reverse = @{}
     $english = Get-SRStrings -Language 'en'
     foreach ($key in @($english.Keys)) {
-        $reverse[[string]$english[$key]] = $script:L[$key]
+        $translated = [string]$script:L[$key]
+        $source = [string]$english[$key]
+        if (-not [string]::IsNullOrWhiteSpace($source) -and -not [string]::IsNullOrWhiteSpace($translated)) {
+            $reverse[$source] = $translated
+        }
     }
     $script:L.ReverseLookup = $reverse
     if ($null -ne $Root) {
         try {
-            $rtl = Test-SRRtlLanguage -Language $script:Lang
-            $Root.RightToLeft = if ($rtl) { [System.Windows.Forms.RightToLeft]::Yes } else { [System.Windows.Forms.RightToLeft]::No }
-            $Root.RightToLeftLayout = $rtl
+            # Arabic/Hebrew characters are shaped correctly by GDI even when
+            # the control reads left-to-right. Do NOT switch the form to
+            # RightToLeft: the window is a collection of fixed-position,
+            # custom-painted LTR cards, and WinForms only mirrors the stock
+            # labels and buttons. That split alignment pushed translated text
+            # across neighbouring controls and clipped it at the opposite
+            # edge, and it also reordered the split panels. Keeping every
+            # control on the LTR layout grid preserves the design and still
+            # renders connected Arabic script correctly.
+            $Root.RightToLeft = [System.Windows.Forms.RightToLeft]::No
+            $Root.RightToLeftLayout = $false
         } catch { }
         Localize-StudioTexts -Control $Root
     }
+    Update-StudioLocalizedCombos
+    Update-StudioPlaceholders
 }
 
 $studioLanguage = 'en'
@@ -914,6 +1068,52 @@ $script:FontMono = New-Object System.Drawing.Font('Consolas', 8.25)
 # Small UI helpers
 # ---------------------------------------------------------------------------
 
+function Set-StudioVerticalStack {
+    # Stacks cards at an explicit Y position. FlowLayoutPanel depends on its
+    # child collection order, and WinForms can silently reverse that order when
+    # pages are hidden, shown and relaid out. Positioning each card ourselves
+    # keeps the intended reading order stable on every Windows version.
+    # Returns the card width so callers can size the text inside each card.
+    param(
+        $Panel,
+        [object[]]$Cards,
+        [int]$Padding = 24,
+        [int]$BottomPadding = 24,
+        [int]$MinWidth = 200
+    )
+    if ($null -eq $Panel -or $null -eq $Cards) { return 0 }
+
+    $contentHeight = $Padding
+    $gaps = @()
+    $index = 0
+    foreach ($card in $Cards) {
+        if ($null -eq $card) { continue }
+        $gap = if ($null -ne $card.Margin) { [Math]::Max(0, $card.Margin.Bottom) } else { 14 }
+        $gaps += $gap
+        $contentHeight += $card.Height + $gap
+        $index++
+    }
+    if ($gaps.Count -gt 0) { $contentHeight = $contentHeight - $gaps[$gaps.Count - 1] + $BottomPadding }
+
+    # Setting the virtual size first makes WinForms add the scrollbar (if one
+    # is needed) before the width is measured, so cards never slide under it.
+    $Panel.AutoScrollMinSize = New-Object System.Drawing.Size(0, [Math]::Max(0, $contentHeight))
+    $Panel.PerformLayout()
+    $available = [Math]::Max($MinWidth, $Panel.ClientSize.Width - ($Padding * 2))
+
+    $top = $Padding
+    $gapIndex = 0
+    foreach ($card in $Cards) {
+        if ($null -eq $card) { continue }
+        $card.SetBounds($Padding, $top, $available, $card.Height)
+        $top += $card.Height
+        if ($gapIndex -lt $gaps.Count) { $top += $gaps[$gapIndex] }
+        $gapIndex++
+    }
+
+    return $available
+}
+
 function New-StudioLabel {
     param(
         [string]$Text = '',
@@ -935,6 +1135,20 @@ function New-StudioLabel {
     $label.BackColor = [System.Drawing.Color]::Transparent
     $label.TextAlign = [System.Drawing.ContentAlignment]$Align
     $label.AutoSize = $AutoSize
+    # '&' is part of normal text here (for example "Data & support"), not a
+    # keyboard mnemonic. Without this the ampersand disappeared and the next
+    # character was underlined.
+    $label.UseMnemonic = $false
+    # Single-line labels ellipsize instead of wrapping: translated strings are
+    # much longer than English (German, Russian, Arabic) and a wrapped second
+    # line used to run underneath the next control. Taller labels are hints
+    # that are meant to wrap, so anchor their text at the top instead of
+    # centring it in the middle of the reserved box.
+    if (-not $AutoSize -and $Height -le 24) {
+        $label.AutoEllipsis = $true
+    } elseif (-not $AutoSize -and $Align -eq 'MiddleLeft') {
+        $label.TextAlign = [System.Drawing.ContentAlignment]::TopLeft
+    }
     return $label
 }
 
@@ -1087,7 +1301,7 @@ function Format-StudioAge {
     if ($span.TotalMinutes -lt 60) { return ((T 'MinutesAgo' '{0} min ago') -f [Math]::Max(1, [int]$span.TotalMinutes)) }
     if ($span.TotalHours -lt 24) { return ((T 'HoursAgo' '{0} hr ago') -f [Math]::Max(1, [int]$span.TotalHours)) }
     if ($span.TotalDays -lt 7) { return ((T 'DaysAgo' '{0} day(s) ago') -f [Math]::Max(1, [int]$span.TotalDays)) }
-    return $CapturedAt.ToString('MMM d, HH:mm')
+    return Format-StudioDate -Date $CapturedAt -Format 'MMM d, HH:mm'
 }
 
 function Format-StudioNext {
@@ -1265,6 +1479,20 @@ function Open-StudioPath {
 
 $script:TrayStateCache = $null
 $script:TrayStateCacheAt = [datetime]::MinValue
+# Map the English background-status mode to the current language. The state
+# object itself keeps English values so diagnostics JSON stays stable.
+function Get-StudioModeText {
+    param([string]$Mode)
+    switch ($Mode) {
+        'Scheduled tasks + tray' { return (T 'ModeScheduledTray' 'Scheduled tasks + tray') }
+        'Scheduled tasks' { return (T 'ModeScheduled' 'Scheduled tasks') }
+        'Background tray' { return (T 'ModeTrayOnly' 'Background tray') }
+        'Startup watcher' { return (T 'ModeStartupWatcher' 'Startup watcher') }
+        'Not running' { return (T 'ModeNotRunning' 'Not running') }
+        default { return $Mode }
+    }
+}
+
 function Get-StudioTrayState {
     param([switch]$Force)
     $now = Get-Date
@@ -1305,21 +1533,21 @@ function Get-StudioTrayState {
 
 function Start-StudioBackground {
     if (-not $script:HostExe -or -not (Test-Path -LiteralPath $script:HostExe)) {
-        Show-StudioToast 'SessionRecovery.exe is missing. Reinstall the app.' $script:P.Red
+        Show-StudioToast (T 'ToastAppMissing' 'SessionRecovery.exe is missing. Reinstall the app.') $script:P.Red
         return
     }
     $state = Get-StudioTrayState -Force
     if ($state.Running) {
-        Show-StudioToast 'The background app is already running.' $script:P.Green
+        Show-StudioToast (T 'ToastAlreadyRunning' 'The background app is already running.') $script:P.Green
         return
     }
     $taskWasActive = [bool]$state.Tasks
     try {
         Start-Process -FilePath $script:HostExe -ArgumentList '--tray' -WorkingDirectory $script:ScriptDir | Out-Null
         if ($taskWasActive) {
-            Show-StudioToast 'Tray controls started. Windows task protection is already active.' $script:P.Green
+            Show-StudioToast (T 'ToastTrayStarted' 'Tray controls started. Windows task protection is already active.') $script:P.Green
         } else {
-            Show-StudioToast 'Background protection started.' $script:P.Green
+            Show-StudioToast (T 'ToastBackgroundStarted' 'Background protection started.') $script:P.Green
         }
         $script:TrayStateCache = [pscustomobject]@{
             Running     = $true
@@ -1339,7 +1567,7 @@ function Start-StudioBackground {
 function Open-StudioRestore {
     param([string]$SnapshotPath = '')
     if (-not $script:HostExe -or -not (Test-Path -LiteralPath $script:HostExe)) {
-        Show-StudioToast 'SessionRecovery.exe is missing. Reinstall the app.' $script:P.Red
+        Show-StudioToast (T 'ToastAppMissing' 'SessionRecovery.exe is missing. Reinstall the app.') $script:P.Red
         return
     }
     try {
@@ -1348,7 +1576,7 @@ function Open-StudioRestore {
             $arguments += ' -SnapshotPath "' + $SnapshotPath.Replace('"', '""') + '"'
         }
         Start-Process -FilePath $script:HostExe -ArgumentList $arguments -WorkingDirectory $script:ScriptDir | Out-Null
-        Show-StudioToast 'Restore studio opened.' $script:P.Green
+        Show-StudioToast (T 'ToastOpenStudio' 'Restore studio opened.') $script:P.Green
     } catch {
         Show-StudioToast ('Could not open restore studio: ' + $_.Exception.Message) $script:P.Red
     }
@@ -1373,7 +1601,7 @@ function Complete-StudioCapture {
     if ($Succeeded) {
         Refresh-StudioData
         if ($script:Snapshots.Count -gt 0) {
-            Show-StudioToast ((T 'ToastSavedAt' 'Snapshot saved  •  {0}') -f $script:Snapshots[0].CapturedAt.ToString('HH:mm:ss')) $script:P.Green
+            Show-StudioToast ((T 'ToastSavedAt' 'Snapshot saved  •  {0}') -f (Format-StudioDate -Date $script:Snapshots[0].CapturedAt -Format 'HH:mm:ss')) $script:P.Green
         } else {
             Show-StudioToast (T 'ToastSaved' 'Snapshot saved.') $script:P.Green
         }
@@ -1384,7 +1612,7 @@ function Complete-StudioCapture {
 
 function Invoke-StudioCapture {
     if (-not $script:HostExe -or -not (Test-Path -LiteralPath $script:HostExe)) {
-        Show-StudioToast 'SessionRecovery.exe is missing. Reinstall the app.' $script:P.Red
+        Show-StudioToast (T 'ToastAppMissing' 'SessionRecovery.exe is missing. Reinstall the app.') $script:P.Red
         return
     }
     if ($script:CaptureBusy) { return }
@@ -1404,7 +1632,7 @@ function Invoke-StudioCapture {
 
     $before = [datetime]::MinValue
     try {
-        $newest = Get-ChildItem -LiteralPath (Get-SRSnapshotDirectory) -Filter 'session-*.json' -File -ErrorAction SilentlyContinue |
+        $newest = Get-ChildItem -LiteralPath (Get-SRSnapshotDirectory) -Filter 'session-*.json*' -File -ErrorAction SilentlyContinue |
             Sort-Object -Property LastWriteTime -Descending | Select-Object -First 1
         if ($newest) { $before = $newest.LastWriteTime }
     } catch { }
@@ -1445,7 +1673,7 @@ function Invoke-StudioCapture {
             if ($processExited) {
                 # Wait for the capture process to exit before reading the file,
                 # so a partially written snapshot can never enter the timeline.
-                $newest = Get-ChildItem -LiteralPath (Get-SRSnapshotDirectory) -Filter 'session-*.json' -File -ErrorAction SilentlyContinue |
+                $newest = Get-ChildItem -LiteralPath (Get-SRSnapshotDirectory) -Filter 'session-*.json*' -File -ErrorAction SilentlyContinue |
                     Sort-Object -Property LastWriteTime -Descending | Select-Object -First 1
                 if ($null -ne $newest -and $newest.LastWriteTime -gt $state.Before) {
                     $script:CapturePollTimer.Stop()
@@ -1551,7 +1779,7 @@ function Refresh-StudioSidebar {
         $script:Ui.SidebarBadge.FillColor = $script:P.AmberSoft
         $script:Ui.SidebarBadge.TextColor = $script:P.Amber
     }
-    $script:Ui.SidebarStatus.Text = $state.Mode
+    $script:Ui.SidebarStatus.Text = Get-StudioModeText -Mode ([string]$state.Mode)
     $script:Ui.SidebarDetail.Text = if ($state.Running -and $state.Tasks) {
         (T 'StatusTaskTray' 'Task + tray controls active')
     } elseif ($state.Running) {
@@ -1644,7 +1872,7 @@ $sidebar.Controls.Add($brandPic)
 
 $brandName = New-StudioLabel -Text 'Session' -X 70 -Y 23 -Width 150 -Height 24 -Font (New-Object System.Drawing.Font('Segoe UI Semibold', 13)) -Color $script:P.Text
 $sidebar.Controls.Add($brandName)
-$brandSub = New-StudioLabel -Text 'RECOVERY  /  STUDIO' -X 72 -Y 45 -Width 150 -Height 16 -Font $script:FontMono -Color $script:P.Subtle
+$brandSub = New-StudioLabel -Text (T 'BrandRecoveryStudio' 'RECOVERY  /  STUDIO') -X 72 -Y 45 -Width 162 -Height 16 -Font $script:FontMono -Color $script:P.Subtle
 $sidebar.Controls.Add($brandSub)
 
 $navDefs = @(
@@ -1695,10 +1923,10 @@ $script:Ui.SidebarBadge = $sidebarBadge
 
 $sidebarTitle = New-StudioLabel -Text 'PROTECTION' -X 14 -Y 43 -Width 150 -Height 16 -Font $script:FontMono -Color $script:P.Subtle
 $sidebarStatusCard.Controls.Add($sidebarTitle)
-$sidebarStatus = New-StudioLabel -Text 'Checking...' -X 14 -Y 60 -Width 180 -Height 18 -Font $script:FontSemibold -Color $script:P.Text
+$sidebarStatus = New-StudioLabel -Text 'Checking...' -X 14 -Y 60 -Width 200 -Height 18 -Font $script:FontSemibold -Color $script:P.Text
 $sidebarStatusCard.Controls.Add($sidebarStatus)
 $script:Ui.SidebarStatus = $sidebarStatus
-$sidebarDetail = New-StudioLabel -Text '' -X 14 -Y 78 -Width 180 -Height 16 -Font $script:FontBodySmall -Color $script:P.Muted
+$sidebarDetail = New-StudioLabel -Text '' -X 14 -Y 78 -Width 200 -Height 16 -Font $script:FontBodySmall -Color $script:P.Muted
 $sidebarStatusCard.Controls.Add($sidebarDetail)
 $script:Ui.SidebarDetail = $sidebarDetail
 
@@ -1708,7 +1936,7 @@ $trayButton.Add_Click({ Start-StudioBackground })
 $sidebarStatusCard.Controls.Add($trayButton)
 $script:Ui.TrayButton = $trayButton
 
-$sidebarVersion = New-StudioLabel -Text ('STUDIO {0}  /  LOCAL ONLY' -f $script:AppVersion) -X 14 -Y 0 -Width 208 -Height 16 -Font $script:FontMono -Color $script:P.Subtle -Align 'MiddleCenter'
+$sidebarVersion = New-StudioLabel -Text ('STUDIO {0}  /  {1}' -f $script:AppVersion, (T 'BadgeLocalOnly' 'LOCAL ONLY')) -X 14 -Y 0 -Width 208 -Height 16 -Font $script:FontMono -Color $script:P.Subtle -Align 'MiddleCenter'
 $sidebarVersion.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
 $sidebar.Controls.Add($sidebarVersion)
 $script:Ui.SidebarVersion = $sidebarVersion
@@ -1727,6 +1955,7 @@ $headerLine.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Wi
 $header.Controls.Add($headerLine)
 
 $pageTitle = New-StudioLabel -Text 'Dashboard' -X 28 -Y 17 -Width 560 -Height 32 -Font $script:FontTitle -Color $script:P.Text
+$pageTitle.AutoEllipsis = $true
 $header.Controls.Add($pageTitle)
 $script:Ui.PageTitle = $pageTitle
 $pageSubtitle = New-StudioLabel -Text 'Your session, exactly as you left it.' -X 30 -Y 47 -Width 600 -Height 20 -Font $script:FontBody -Color $script:P.Muted
@@ -1749,7 +1978,7 @@ $refreshButton.Add_Click({ Refresh-StudioDiagnostics })
 $header.Controls.Add($refreshButton)
 $script:Ui.RefreshButton = $refreshButton
 
-$captureButton = New-StudioButton -Text 'Capture now' -X 0 -Y 24 -Width 138 -Height 40 -Primary -Glyph ([string][char]0xE710)
+$captureButton = New-StudioButton -Text 'Capture now' -X 0 -Y 24 -Width 184 -Height 40 -Primary -Glyph ([string][char]0xE710)
 $captureButton.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
 $captureButton.Add_Click({ Invoke-StudioCapture })
 $header.Controls.Add($captureButton)
@@ -1793,12 +2022,13 @@ $script:Ui.HeroBadge = $heroBadge
 $heroTitle = New-StudioLabel -Text 'Your session is protected' -X 22 -Y 48 -Width 560 -Height 40 -Font $script:FontHero -Color $script:P.Text
 $hero.Controls.Add($heroTitle)
 $script:Ui.HeroTitle = $heroTitle
-$heroSub = New-StudioLabel -Text 'Snapshots stay on this PC. Restore apps, folders and browser tabs from any saved moment.' -X 24 -Y 91 -Width 600 -Height 22 -Font $script:FontBody -Color $script:P.Muted
+$heroSub = New-StudioLabel -Text (T 'HeroSubLine' 'Snapshots stay on this PC. Restore apps, folders and browser tabs from any saved moment.') -X 24 -Y 91 -Width 600 -Height 36 -Font $script:FontBody -Color $script:P.Muted
 $hero.Controls.Add($heroSub)
-$heroLast = New-StudioLabel -Text 'Last snapshot  •  checking' -X 24 -Y 123 -Width 620 -Height 18 -Font $script:FontBodySmall -Color $script:P.Muted
+$heroLast = New-StudioLabel -Text (T 'HeroLastChecking' 'Last snapshot  •  checking') -X 24 -Y 128 -Width 620 -Height 18 -Font $script:FontBodySmall -Color $script:P.Muted
+$heroLast.AutoEllipsis = $true
 $hero.Controls.Add($heroLast)
 $script:Ui.HeroLast = $heroLast
-$heroNext = New-StudioLabel -Text 'Next automatic snapshot  •  checking' -X 24 -Y 143 -Width 620 -Height 18 -Font $script:FontBodySmall -Color $script:P.Subtle
+$heroNext = New-StudioLabel -Text (T 'HeroNextChecking' 'Next automatic snapshot  •  checking') -X 24 -Y 148 -Width 620 -Height 18 -Font $script:FontBodySmall -Color $script:P.Subtle
 $hero.Controls.Add($heroNext)
 $script:Ui.HeroNext = $heroNext
 
@@ -1823,15 +2053,15 @@ $script:Ui.HeroRing = $heroRing
 
 $statRow = New-Object System.Windows.Forms.Panel
 $statRow.Location = New-Object System.Drawing.Point(24, 214)
-$statRow.Size = New-Object System.Drawing.Size(936, 108)
+$statRow.Size = New-Object System.Drawing.Size(936, 124)
 $statRow.BackColor = $script:P.Bg
 $statRow.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
 $dashboard.Controls.Add($statRow)
 
 $statSnapshots = New-Object SessionRecovery.Studio.StudioStatCard
-$statSnapshots.Title = 'Snapshots'
+$statSnapshots.Title = (T 'StatSnapshots' 'SNAPSHOTS')
 $statSnapshots.Value = '0'
-$statSnapshots.Detail = 'Saved moments'
+$statSnapshots.Detail = (T 'StatDetailMoments' 'Saved moments')
 $statSnapshots.Glyph = [string][char]0xE81C
 $statSnapshots.AccentColor = $script:P.Accent
 $statSnapshots.TitleColor = $script:P.Muted
@@ -1841,14 +2071,14 @@ $statSnapshots.FillColor = $script:P.Card
 $statSnapshots.BorderColor = $script:P.BorderSoft
 $statSnapshots.CanvasColor = $script:P.Bg
 $statSnapshots.Location = New-Object System.Drawing.Point(0, 0)
-$statSnapshots.Size = New-Object System.Drawing.Size(224, 108)
+$statSnapshots.Size = New-Object System.Drawing.Size(224, 124)
 $statRow.Controls.Add($statSnapshots)
 $script:Ui.StatSnapshots = $statSnapshots
 
 $statApps = New-Object SessionRecovery.Studio.StudioStatCard
-$statApps.Title = 'Apps captured'
+$statApps.Title = (T 'StatAppsCaptured' 'APPS CAPTURED')
 $statApps.Value = '0'
-$statApps.Detail = 'In the latest snapshot'
+$statApps.Detail = (T 'StatDetailLatest' 'In the latest snapshot')
 $statApps.Glyph = [string][char]0xE8F1
 $statApps.AccentColor = $script:P.Green
 $statApps.TitleColor = $script:P.Muted
@@ -1858,12 +2088,12 @@ $statApps.FillColor = $script:P.Card
 $statApps.BorderColor = $script:P.BorderSoft
 $statApps.CanvasColor = $script:P.Bg
 $statApps.Location = New-Object System.Drawing.Point(238, 0)
-$statApps.Size = New-Object System.Drawing.Size(224, 108)
+$statApps.Size = New-Object System.Drawing.Size(224, 124)
 $statRow.Controls.Add($statApps)
 $script:Ui.StatApps = $statApps
 
 $statTabs = New-Object SessionRecovery.Studio.StudioStatCard
-$statTabs.Title = 'Browser tabs'
+$statTabs.Title = (T 'StatBrowserTabs' 'BROWSER TABS')
 $statTabs.Value = '0'
 $statTabs.Detail = 'Across open browsers'
 $statTabs.Glyph = [string][char]0xE774
@@ -1875,12 +2105,12 @@ $statTabs.FillColor = $script:P.Card
 $statTabs.BorderColor = $script:P.BorderSoft
 $statTabs.CanvasColor = $script:P.Bg
 $statTabs.Location = New-Object System.Drawing.Point(476, 0)
-$statTabs.Size = New-Object System.Drawing.Size(224, 108)
+$statTabs.Size = New-Object System.Drawing.Size(224, 124)
 $statRow.Controls.Add($statTabs)
 $script:Ui.StatTabs = $statTabs
 
 $statStorage = New-Object SessionRecovery.Studio.StudioStatCard
-$statStorage.Title = 'Local storage'
+$statStorage.Title = (T 'StatLocalStorage' 'LOCAL STORAGE')
 $statStorage.Value = '0 B'
 $statStorage.Detail = 'Snapshots on disk'
 $statStorage.Glyph = [string][char]0xE7B8
@@ -1892,16 +2122,16 @@ $statStorage.FillColor = $script:P.Card
 $statStorage.BorderColor = $script:P.BorderSoft
 $statStorage.CanvasColor = $script:P.Bg
 $statStorage.Location = New-Object System.Drawing.Point(714, 0)
-$statStorage.Size = New-Object System.Drawing.Size(222, 108)
+$statStorage.Size = New-Object System.Drawing.Size(224, 124)
 $statRow.Controls.Add($statStorage)
 $script:Ui.StatStorage = $statStorage
 
 $recentCard = New-StudioCard -X 24 -Y 342 -Width 620 -Height 240
 $recentCard.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
 $dashboard.Controls.Add($recentCard)
-$recentHeading = New-StudioLabel -Text 'RECENT SNAPSHOTS' -X 18 -Y 15 -Width 240 -Height 18 -Font $script:FontMono -Color $script:P.Subtle
+$recentHeading = New-StudioLabel -Text (T 'RecentSnapshots' 'RECENT SNAPSHOTS') -X 18 -Y 15 -Width 240 -Height 18 -Font $script:FontMono -Color $script:P.Subtle
 $recentCard.Controls.Add($recentHeading)
-$recentViewAll = New-StudioButton -Text 'View timeline' -X 0 -Y 10 -Width 100 -Height 26 -Glyph ''
+$recentViewAll = New-StudioButton -Text (T 'BtnViewTimeline' 'View timeline') -X 0 -Y 10 -Width 160 -Height 26 -Glyph ''
 $recentViewAll.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
 $recentViewAll.Add_Click({ Show-StudioPage -Name 'Snapshots' })
 $recentCard.Controls.Add($recentViewAll)
@@ -1923,7 +2153,7 @@ $recentSpark.LineColor = $script:P.Accent
 $recentSpark.FillColor = $script:P.SparkFill
 $recentCard.Controls.Add($recentSpark)
 $script:Ui.RecentSpark = $recentSpark
-$recentEmpty = New-StudioLabel -Text 'No snapshots yet. Capture one to get started.' -X 18 -Y 54 -Width 400 -Height 30 -Font $script:FontBody -Color $script:P.Muted
+$recentEmpty = New-StudioLabel -Text (T 'NoSnapshotsYet' 'No snapshots yet. Capture one to get started.') -X 18 -Y 54 -Width 400 -Height 30 -Font $script:FontBody -Color $script:P.Muted
 $recentEmpty.Visible = $false
 $recentCard.Controls.Add($recentEmpty)
 $script:Ui.RecentEmpty = $recentEmpty
@@ -1931,31 +2161,31 @@ $script:Ui.RecentEmpty = $recentEmpty
 $quickCard = New-StudioCard -X 660 -Y 342 -Width 300 -Height 240
 $quickCard.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Right
 $dashboard.Controls.Add($quickCard)
-$quickHeading = New-StudioLabel -Text 'QUICK ACTIONS' -X 18 -Y 15 -Width 200 -Height 18 -Font $script:FontMono -Color $script:P.Subtle
+$quickHeading = New-StudioLabel -Text (T 'QuickActions' 'QUICK ACTIONS') -X 18 -Y 15 -Width 200 -Height 18 -Font $script:FontMono -Color $script:P.Subtle
 $quickCard.Controls.Add($quickHeading)
 $quickCapture = New-StudioButton -Text 'Capture now' -X 16 -Y 44 -Width 268 -Height 34 -Primary -Glyph ([string][char]0xE710)
 $quickCapture.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
 $quickCapture.Add_Click({ Invoke-StudioCapture })
 $quickCard.Controls.Add($quickCapture)
 $script:Ui.QuickCapture = $quickCapture
-$quickRestore = New-StudioButton -Text 'Restore latest snapshot' -X 16 -Y 86 -Width 268 -Height 34 -Glyph ([string][char]0xE777)
+$quickRestore = New-StudioButton -Text (T 'BtnRestoreLatestSession' 'Restore latest snapshot') -X 16 -Y 86 -Width 268 -Height 34 -Glyph ([string][char]0xE777)
 $quickRestore.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
 $quickRestore.Add_Click({
     if ($script:Snapshots.Count -gt 0) { Open-StudioRestore -SnapshotPath $script:Snapshots[0].Path }
-    else { Show-StudioToast 'There is no snapshot to restore yet.' $script:P.Amber }
+    else { Show-StudioToast (T 'ToastNoSnapshot' 'There is no snapshot to restore yet.') $script:P.Amber }
 })
 $quickCard.Controls.Add($quickRestore)
 $script:Ui.QuickRestore = $quickRestore
-$quickFolder = New-StudioButton -Text 'Open snapshots folder' -X 16 -Y 128 -Width 268 -Height 34 -Glyph ([string][char]0xE838)
+$quickFolder = New-StudioButton -Text (T 'BtnOpenSnapshotsFolder' 'Open snapshots folder') -X 16 -Y 128 -Width 268 -Height 34 -Glyph ([string][char]0xE838)
 $quickFolder.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
 $quickFolder.Add_Click({ Open-StudioPath (Get-SRSnapshotDirectory) })
 $quickCard.Controls.Add($quickFolder)
-$quickDiagnostics = New-StudioButton -Text 'Run diagnostics' -X 16 -Y 170 -Width 268 -Height 34 -Glyph ([string][char]0xE9D9)
+$quickDiagnostics = New-StudioButton -Text (T 'BtnRunDiagnostics' 'Run diagnostics') -X 16 -Y 170 -Width 268 -Height 34 -Glyph ([string][char]0xE9D9)
 $quickDiagnostics.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
 $quickDiagnostics.Add_Click({ Show-StudioPage -Name 'Diagnostics' })
 $quickCard.Controls.Add($quickDiagnostics)
 
-$dashboardHint = New-StudioLabel -Text 'Snapshots are local JSON files. Nothing leaves this device.' -X 24 -Y 660 -Width 600 -Height 18 -Font $script:FontBodySmall -Color $script:P.Subtle
+$dashboardHint = New-StudioLabel -Text (T 'DashboardHint' 'Snapshots are local JSON files. Nothing leaves this device.') -X 24 -Y 660 -Width 600 -Height 18 -Font $script:FontBodySmall -Color $script:P.Subtle
 $dashboardHint.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
 $dashboardHint.Visible = $false
 $dashboard.Controls.Add($dashboardHint)
@@ -1967,14 +2197,18 @@ function Refresh-StudioDashboard {
     $bytes = 0
     foreach ($entry in $script:Snapshots) { $bytes += Get-StudioSnapshotBytes -Entry $entry }
     if ($script:Ui.StatSnapshots) {
+        $script:Ui.StatSnapshots.Title = (T 'StatSnapshots' 'SNAPSHOTS')
         $script:Ui.StatSnapshots.Value = [string]$script:Snapshots.Count
-        $script:Ui.StatSnapshots.Detail = ('Retaining up to {0}' -f $script:Config.keepSnapshots)
+        $script:Ui.StatSnapshots.Detail = (T 'StatDetailRetaining' 'Retaining up to {0}') -f $script:Config.keepSnapshots
+        $script:Ui.StatApps.Title = (T 'StatAppsCaptured' 'APPS CAPTURED')
         $script:Ui.StatApps.Value = [string]$stats.Apps
-        $script:Ui.StatApps.Detail = if ($latest) { 'Captured ' + (Format-StudioAge -CapturedAt $latest.CapturedAt) } else { 'No snapshot yet' }
+        $script:Ui.StatApps.Detail = if ($latest) { (T 'StatDetailCaptured' 'Captured {0}') -f (Format-StudioAge -CapturedAt $latest.CapturedAt) } else { (T 'StatDetailNoSnapshot' 'No snapshot yet') }
+        $script:Ui.StatTabs.Title = (T 'StatBrowserTabs' 'BROWSER TABS')
         $script:Ui.StatTabs.Value = [string]$stats.Tabs
-        $script:Ui.StatTabs.Detail = if ($stats.Browsers -gt 0) { ('{0} browser(s) captured' -f $stats.Browsers) } else { 'No browser tabs captured' }
+        $script:Ui.StatTabs.Detail = if ($stats.Browsers -gt 0) { (T 'StatDetailBrowsers' '{0} browser(s) captured') -f $stats.Browsers } else { (T 'StatDetailNoBrowsers' 'No browser tabs captured') }
+        $script:Ui.StatStorage.Title = (T 'StatLocalStorage' 'LOCAL STORAGE')
         $script:Ui.StatStorage.Value = Format-StudioBytes -Bytes $bytes
-        $script:Ui.StatStorage.Detail = ('{0} folder(s) in latest' -f $stats.Folders)
+        $script:Ui.StatStorage.Detail = (T 'StatDetailFolders' '{0} folder(s) in latest') -f $stats.Folders
     }
     if ($script:Ui.HeroRing) {
         $age = if ($latest) { ((Get-Date) - $latest.CapturedAt).TotalMinutes } else { 9999 }
@@ -1988,7 +2222,7 @@ function Refresh-StudioDashboard {
             $ageSpan = (Get-Date) - $latest.CapturedAt
             $ringText = if ($ageSpan.TotalMinutes -lt 60) { '{0}m' -f [Math]::Max(1, [int]$ageSpan.TotalMinutes) } elseif ($ageSpan.TotalHours -lt 24) { '{0}h' -f [int]$ageSpan.TotalHours } else { '{0}d' -f [int]$ageSpan.TotalDays }
             $script:Ui.HeroRing.CenterText = $ringText
-            $script:Ui.HeroLast.Text = ('Last snapshot {0}  •  {1}  •  {2} app(s), {3} tab(s)' -f (Format-StudioAge -CapturedAt $latest.CapturedAt), $latest.CapturedAt.ToString('HH:mm:ss'), $stats.Apps, $stats.Tabs)
+            $script:Ui.HeroLast.Text = ((T 'HeroLastLine' 'Last snapshot {0}  •  {1}  •  {2} app(s), {3} tab(s)') -f (Format-StudioAge -CapturedAt $latest.CapturedAt), (Format-StudioDate -Date $latest.CapturedAt -Format 'HH:mm:ss'), $stats.Apps, $stats.Tabs)
         } else {
             $script:Ui.HeroRing.CenterText = '--'
             $script:Ui.HeroLast.Text = (T 'NoSnapshotSaved' 'No snapshot has been saved yet.')
@@ -2028,9 +2262,10 @@ function Refresh-StudioDashboard {
                 $row.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 6)
                 $row.Tag = $entry.Path
                 $statsRow = Get-StudioStats -Snapshot $entry.Snapshot
-                $timeLabel = New-StudioLabel -Text $entry.CapturedAt.ToString('MMM d  •  HH:mm') -X 12 -Y 5 -Width 150 -Height 16 -Font $script:FontBodySmall -Color $script:P.Text
-                $metaLabel = New-StudioLabel -Text ('{0} apps  •  {1} tabs  •  {2}' -f $statsRow.Apps, $statsRow.Tabs, (Format-StudioAge -CapturedAt $entry.CapturedAt)) -X 12 -Y 22 -Width 300 -Height 16 -Font $script:FontBodySmall -Color $script:P.Muted
-                $restoreRow = New-StudioButton -Text 'Restore' -X ($row.Width - 78) -Y 9 -Width 66 -Height 26 -Glyph ''
+                $timeLabel = New-StudioLabel -Text (Format-StudioDate -Date $entry.CapturedAt -Format 'MMM d  •  HH:mm') -X 12 -Y 5 -Width 150 -Height 16 -Font $script:FontBodySmall -Color $script:P.Text
+                $metaLabel = New-StudioLabel -Text ((T 'RowMetaAppsTabs' '{0} apps  •  {1} tabs  •  {2}') -f $statsRow.Apps, $statsRow.Tabs, (Format-StudioAge -CapturedAt $entry.CapturedAt)) -X 12 -Y 22 -Width ([Math]::Max(120, $row.Width - 156)) -Height 16 -Font $script:FontBodySmall -Color $script:P.Muted
+                $metaLabel.AutoEllipsis = $true
+                $restoreRow = New-StudioButton -Text (T 'BtnRestore' 'Restore') -X ($row.Width - 136) -Y 9 -Width 124 -Height 26 -Glyph ''
                 $restoreRow.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
                 $restoreRow.Tag = $entry.Path
                 $restoreRow.Add_Click({
@@ -2077,7 +2312,7 @@ $snapToolbar.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Wind
 $snapshotsPage.Controls.Add($snapToolbar)
 
 $snapSearch = New-StudioTextBox -X 16 -Y 18 -Width 230 -Height 28
-$snapSearch.Text = 'Search apps, folders, tabs'
+$snapSearch.Text = (T 'SearchPlaceholder' 'Search apps, folders, tabs')
 $snapSearch.ForeColor = $script:P.Subtle
 $snapSearch.Tag = 'placeholder'
 $snapSearch.Add_GotFocus({
@@ -2089,7 +2324,7 @@ $snapSearch.Add_GotFocus({
 })
 $snapSearch.Add_LostFocus({
     if ([string]::IsNullOrWhiteSpace($script:Ui.SnapSearch.Text)) {
-        $script:Ui.SnapSearch.Text = 'Search apps, folders, tabs'
+        $script:Ui.SnapSearch.Text = (T 'SearchPlaceholder' 'Search apps, folders, tabs')
         $script:Ui.SnapSearch.ForeColor = $script:P.Subtle
         $script:Ui.SnapSearch.Tag = 'placeholder'
     }
@@ -2103,10 +2338,7 @@ $snapToolbar.Controls.Add($snapSearch)
 $script:Ui.SnapSearch = $snapSearch
 
 $snapFilter = New-StudioCombo -X 258 -Y 18 -Width 170
-[void]$snapFilter.Items.Add('All snapshots')
-[void]$snapFilter.Items.Add('Last hour')
-[void]$snapFilter.Items.Add('Last 24 hours')
-[void]$snapFilter.Items.Add('Last 7 days')
+Set-StudioLocalizedCombo -Combo $snapFilter -Keys @('FilterAll', 'FilterHour', 'Filter24', 'Filter7') -Defaults @('All snapshots', 'Last hour', 'Last 24 hours', 'Last 7 days')
 $snapFilter.SelectedIndex = 0
 $snapFilter.Add_SelectedIndexChanged({
     if ($script:UiReady) { Refresh-StudioSnapshotRows }
@@ -2114,21 +2346,22 @@ $snapFilter.Add_SelectedIndexChanged({
 $snapToolbar.Controls.Add($snapFilter)
 $script:Ui.SnapFilter = $snapFilter
 
-$snapCount = New-StudioLabel -Text '0 snapshots' -X 444 -Y 20 -Width 180 -Height 22 -Font $script:FontBodySmall -Color $script:P.Muted
+$snapCount = New-StudioLabel -Text ((T 'SnapCount' '{0} snapshots') -f 0) -X 444 -Y 20 -Width 180 -Height 22 -Font $script:FontBodySmall -Color $script:P.Muted
+$snapCount.AutoEllipsis = $true
 $snapToolbar.Controls.Add($snapCount)
 $script:Ui.SnapCount = $snapCount
 
-$snapOpenFolder = New-StudioButton -Text 'Open folder' -X 662 -Y 16 -Width 116 -Height 32 -Glyph ''
+$snapOpenFolder = New-StudioButton -Text (T 'BtnOpenFolder' 'Open folder') -X 662 -Y 16 -Width 116 -Height 32 -Glyph ''
 $snapOpenFolder.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
 $snapOpenFolder.Add_Click({ Open-StudioPath (Get-SRSnapshotDirectory) })
 $snapToolbar.Controls.Add($snapOpenFolder)
 
-$snapRefresh = New-StudioButton -Text 'Refresh' -X 788 -Y 16 -Width 104 -Height 32 -Glyph ([string][char]0xE72C)
+$snapRefresh = New-StudioButton -Text (T 'BtnRefresh' 'Refresh') -X 788 -Y 16 -Width 128 -Height 32 -Glyph ([string][char]0xE72C)
 $snapRefresh.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
 $snapRefresh.Add_Click({
     Refresh-StudioData
     Refresh-StudioSnapshotRows
-    Show-StudioToast 'Snapshot timeline refreshed.' $script:P.Muted
+    Show-StudioToast (T 'ToastTimeline' 'Snapshot timeline refreshed.') $script:P.Muted
 })
 $snapToolbar.Controls.Add($snapRefresh)
 $script:Ui.SnapRefresh = $snapRefresh
@@ -2140,8 +2373,8 @@ $snapSplit.Size = New-Object System.Drawing.Size(936, 582)
 $snapSplit.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
 $snapSplit.BackColor = $script:P.Bg
 $snapSplit.SplitterWidth = 12
-$snapSplit.Panel1MinSize = 380
-$snapSplit.Panel2MinSize = 310
+$snapSplit.Panel1MinSize = 320
+$snapSplit.Panel2MinSize = 376
 $snapSplit.FixedPanel = [System.Windows.Forms.FixedPanel]::Panel2
 $snapSplit.SplitterDistance = 548
 $snapshotsPage.Controls.Add($snapSplit)
@@ -2152,19 +2385,19 @@ $snapListCard.Dock = [System.Windows.Forms.DockStyle]::Fill
 $snapListCard.CanvasColor = $script:P.Bg
 $snapSplit.Panel1.Controls.Add($snapListCard)
 
-$snapListHeading = New-StudioLabel -Text 'SNAPSHOT TIMELINE' -X 18 -Y 15 -Width 260 -Height 18 -Font $script:FontMono -Color $script:P.Subtle
+$snapListHeading = New-StudioLabel -Text (T 'SnapTimeline' 'SNAPSHOT TIMELINE') -X 18 -Y 15 -Width 260 -Height 18 -Font $script:FontMono -Color $script:P.Subtle
 $snapListCard.Controls.Add($snapListHeading)
-$snapListHint = New-StudioLabel -Text 'Select a moment to preview it.' -X 18 -Y 31 -Width 260 -Height 16 -Font $script:FontBodySmall -Color $script:P.Subtle
+$snapListHint = New-StudioLabel -Text (T 'SelectMoment' 'Select a moment to preview it.') -X 18 -Y 31 -Width 260 -Height 16 -Font $script:FontBodySmall -Color $script:P.Subtle
 $snapListCard.Controls.Add($snapListHint)
 
-$snapExport = New-StudioButton -Text 'Export' -X 0 -Y 10 -Width 100 -Height 28 -Glyph ([string][char]0xE72D)
+$snapExport = New-StudioButton -Text (T 'BtnExport' 'Export') -X 0 -Y 10 -Width 120 -Height 28 -Glyph ([string][char]0xE72D)
 $snapExport.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
 $snapExport.Enabled = $false
 $snapExport.Add_Click({
     if (-not $script:SelectedSnapshotPath) { return }
     $dialog = New-Object System.Windows.Forms.SaveFileDialog
-    $dialog.Title = 'Export snapshot'
-    $dialog.Filter = 'Snapshot JSON (*.json)|*.json'
+    $dialog.Title = (T 'ExportSnapshotTitle' 'Export snapshot')
+    $dialog.Filter = (T 'SnapJsonFilter' 'Snapshot JSON (*.json)|*.json')
     $dialog.FileName = Split-Path -Leaf $script:SelectedSnapshotPath
     try {
         if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
@@ -2180,12 +2413,12 @@ $snapExport.Add_Click({
 $snapListCard.Controls.Add($snapExport)
 $script:Ui.SnapExport = $snapExport
 
-$snapImport = New-StudioButton -Text 'Import' -X 0 -Y 10 -Width 100 -Height 28 -Glyph ([string][char]0xE896)
+$snapImport = New-StudioButton -Text (T 'BtnImport' 'Import') -X 0 -Y 10 -Width 120 -Height 28 -Glyph ([string][char]0xE896)
 $snapImport.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
 $snapImport.Add_Click({
     $dialog = New-Object System.Windows.Forms.OpenFileDialog
-    $dialog.Title = 'Import snapshot'
-    $dialog.Filter = 'Snapshot JSON (*.json)|*.json'
+    $dialog.Title = (T 'ImportSnapshotTitle' 'Import snapshot')
+    $dialog.Filter = (T 'SnapJsonFilter' 'Snapshot JSON (*.json)|*.json')
     try {
         if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             $path = Import-SRSnapshotFile -Path $dialog.FileName
@@ -2216,7 +2449,7 @@ $snapFlow.Padding = New-Object System.Windows.Forms.Padding(0)
 $snapListCard.Controls.Add($snapFlow)
 $script:Ui.SnapFlow = $snapFlow
 
-$snapEmpty = New-StudioLabel -Text 'No snapshots match this view.' -X 18 -Y 60 -Width 400 -Height 30 -Font $script:FontBody -Color $script:P.Muted
+$snapEmpty = New-StudioLabel -Text (T 'NoSnapshotsMatch' 'No snapshots match this view.') -X 18 -Y 60 -Width 400 -Height 30 -Font $script:FontBody -Color $script:P.Muted
 $snapEmpty.Visible = $false
 $snapListCard.Controls.Add($snapEmpty)
 $script:Ui.SnapEmpty = $snapEmpty
@@ -2227,25 +2460,26 @@ $detailCard.CanvasColor = $script:P.Bg
 $snapSplit.Panel2.Controls.Add($detailCard)
 $script:Ui.DetailCard = $detailCard
 
-$detailBadge = New-StudioBadge -Text 'NO SNAPSHOT' -Width 104 -Height 22 -Fill $script:P.CardAlt -TextColor $script:P.Muted
+$detailBadge = New-StudioBadge -Text (T 'BadgeNoSnapshot' 'NO SNAPSHOT') -Width 104 -Height 22 -Fill $script:P.CardAlt -TextColor $script:P.Muted
 $detailBadge.Location = New-Object System.Drawing.Point(18, 16)
 $detailCard.Controls.Add($detailBadge)
 $script:Ui.DetailBadge = $detailBadge
 
-$detailPin = New-StudioButton -Text 'Pin' -X 0 -Y 13 -Width 94 -Height 28 -Glyph ([string][char]0xE840)
+$detailPin = New-StudioButton -Text (T 'BtnPin' 'Pin') -X 0 -Y 13 -Width 118 -Height 28 -Glyph ([string][char]0xE840)
 $detailPin.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
 $detailPin.Enabled = $false
 $detailPin.Add_Click({ Toggle-StudioSnapshotPin })
 $detailCard.Controls.Add($detailPin)
 $script:Ui.DetailPin = $detailPin
 
-$detailTitle = New-StudioLabel -Text 'Select a snapshot' -X 18 -Y 48 -Width 340 -Height 28 -Font $script:FontSemiboldLarge -Color $script:P.Text
+$detailTitle = New-StudioLabel -Text (T 'SelectSnapshot' 'Select a snapshot') -X 18 -Y 48 -Width 340 -Height 28 -Font $script:FontSemiboldLarge -Color $script:P.Text
+$detailTitle.AutoEllipsis = $true
 $detailCard.Controls.Add($detailTitle)
 $script:Ui.DetailTitle = $detailTitle
 $detailMeta = New-StudioLabel -Text '' -X 18 -Y 77 -Width 340 -Height 18 -Font $script:FontBodySmall -Color $script:P.Muted
 $detailCard.Controls.Add($detailMeta)
 $script:Ui.DetailMeta = $detailMeta
-$detailSummary = New-StudioLabel -Text 'Capture a moment, then select it here to inspect and restore it.' -X 18 -Y 99 -Width 340 -Height 34 -Font $script:FontBodySmall -Color $script:P.Subtle
+$detailSummary = New-StudioLabel -Text (T 'CaptureMomentHint' 'Capture a moment, then select it here to inspect and restore it.') -X 18 -Y 99 -Width 340 -Height 34 -Font $script:FontBodySmall -Color $script:P.Subtle
 $detailCard.Controls.Add($detailSummary)
 $script:Ui.DetailSummary = $detailSummary
 
@@ -2266,6 +2500,9 @@ $script:Ui.DetailThumbs = $detailThumbs
 $detailText = New-StudioTextBox -X 18 -Y 138 -Width 340 -Height 350
 $detailText.Multiline = $true
 $detailText.ReadOnly = $true
+# ReadOnly switches the TextBox back to the system color, so the theme
+# background must be applied after ReadOnly or the box renders white.
+$detailText.BackColor = $script:P.CardAlt
 $detailText.ScrollBars = [System.Windows.Forms.ScrollBars]::Both
 $detailText.WordWrap = $false
 $detailText.Font = $script:FontMono
@@ -2274,7 +2511,8 @@ $detailText.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windo
 $detailCard.Controls.Add($detailText)
 $script:Ui.DetailText = $detailText
 
-$detailRestore = New-StudioButton -Text 'Restore selected' -X 18 -Y 500 -Width 148 -Height 36 -Primary -Glyph ([string][char]0xE777)
+$detailRestore = New-StudioButton -Text (T 'BtnRestoreSelected' 'Restore selected') -X 18 -Y 500 -Width 174 -Height 36 -Primary -Glyph ''
+
 $detailRestore.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
 $detailRestore.Enabled = $false
 $detailRestore.Add_Click({
@@ -2283,7 +2521,7 @@ $detailRestore.Add_Click({
 $detailCard.Controls.Add($detailRestore)
 $script:Ui.DetailRestore = $detailRestore
 
-$detailOpen = New-StudioButton -Text 'Open' -X 172 -Y 500 -Width 78 -Height 36
+$detailOpen = New-StudioButton -Text (T 'BtnOpen' 'Open') -X 172 -Y 500 -Width 78 -Height 36
 $detailOpen.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
 $detailOpen.Enabled = $false
 $detailOpen.Add_Click({
@@ -2292,14 +2530,14 @@ $detailOpen.Add_Click({
 $detailCard.Controls.Add($detailOpen)
 $script:Ui.DetailOpen = $detailOpen
 
-$detailDelete = New-StudioButton -Text 'Delete' -X 256 -Y 500 -Width 80 -Height 36 -Danger
+$detailDelete = New-StudioButton -Text (T 'BtnDelete' 'Delete') -X 256 -Y 500 -Width 80 -Height 36 -Danger
 $detailDelete.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
 $detailDelete.Enabled = $false
 $detailDelete.Add_Click({
     if (-not $script:SelectedSnapshotPath) { return }
     $answer = [System.Windows.Forms.MessageBox]::Show(
-        "Delete this snapshot?`r`n`r`nThis removes only the saved JSON file. It cannot be undone.",
-        'Delete snapshot', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+        (T 'ConfirmDeleteSnapshotText' "Delete this snapshot?`r`n`r`nThis removes only the saved JSON file. It cannot be undone."),
+        (T 'ConfirmDeleteSnapshotTitle' 'Delete snapshot'), [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
     if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
     $path = $script:SelectedSnapshotPath
     try {
@@ -2311,9 +2549,9 @@ $detailDelete.Add_Click({
         $script:SelectedSnapshotPath = $null
         Refresh-StudioData
         Refresh-StudioSnapshotRows
-        Show-StudioToast 'Snapshot deleted.' $script:P.Green
+        Show-StudioToast (T 'ToastSnapshotDeleted' 'Snapshot deleted.') $script:P.Green
     } catch {
-        Show-StudioToast ('Could not delete snapshot: ' + $_.Exception.Message) $script:P.Red
+        Show-StudioToast ((T 'ToastDeleteFailed' 'Could not delete snapshot: {0}') -f $_.Exception.Message) $script:P.Red
     }
 })
 $detailCard.Controls.Add($detailDelete)
@@ -2330,12 +2568,13 @@ $detailCard.Add_Resize({
     try { $thumbsExtra = [int]$script:DetailThumbsHeight } catch { }
     if ($script:Ui.DetailText.Top -lt (138 + $thumbsExtra)) { $script:Ui.DetailText.Top = 138 + $thumbsExtra + 6 }
     $script:Ui.DetailText.Height = [Math]::Max(120, $card.ClientSize.Height - $script:Ui.DetailText.Top - 62)
-    $script:Ui.DetailPin.Left = $card.ClientSize.Width - 114
+    $script:Ui.DetailPin.Left = $card.ClientSize.Width - 18 - $script:Ui.DetailPin.Width
     $script:Ui.DetailRestore.Top = $card.ClientSize.Height - 54
     $script:Ui.DetailOpen.Top = $card.ClientSize.Height - 54
     $script:Ui.DetailDelete.Top = $card.ClientSize.Height - 54
     $script:Ui.DetailDelete.Left = $card.ClientSize.Width - 92
     $script:Ui.DetailOpen.Left = $script:Ui.DetailDelete.Left - 84
+    $script:Ui.DetailRestore.Width = [Math]::Max(148, $script:Ui.DetailOpen.Left - 26)
     $script:Ui.DetailRestore.BringToFront()
     $script:Ui.DetailOpen.BringToFront()
     $script:Ui.DetailDelete.BringToFront()
@@ -2358,12 +2597,12 @@ function Toggle-StudioSnapshotPin {
         Refresh-StudioSnapshotRows
         Update-StudioSnapshotDetails
         if ($isPinned) {
-            Show-StudioToast 'Snapshot unpinned. Retention may delete it again.' $script:P.Muted
+            Show-StudioToast (T 'ToastSnapshotUnpinned' 'Snapshot unpinned. Retention may delete it again.') $script:P.Muted
         } else {
-            Show-StudioToast 'Snapshot pinned. Automatic cleanup will keep it.' $script:P.Green
+            Show-StudioToast (T 'ToastSnapshotPinned' 'Snapshot pinned. Automatic cleanup will keep it.') $script:P.Green
         }
     } catch {
-        Show-StudioToast ('Could not update the pin: ' + $_.Exception.Message) $script:P.Red
+        Show-StudioToast ((T 'ToastPinFailed' 'Could not update the pin: {0}') -f $_.Exception.Message) $script:P.Red
     }
 }
 
@@ -2374,7 +2613,13 @@ function Update-StudioSnapshotDetails {
         if ($script:Ui.DetailThumbs) { $script:Ui.DetailThumbs.Controls.Clear(); $script:Ui.DetailThumbs.Height = 0 }
         $script:DetailThumbsHeight = 0
         if ($script:Ui.DetailText) { $script:Ui.DetailText.Top = 138 }
-        $script:Ui.DetailBadge.Text = 'NO SNAPSHOT'
+        # Keep the text box inside the card: a thumbnail strip raises the top,
+        # so the height must shrink with it (the resize handler only sees
+        # card-size changes, not content changes).
+        if ($script:Ui.DetailText -and $script:Ui.DetailCard) {
+            $script:Ui.DetailText.Height = [Math]::Max(120, $script:Ui.DetailCard.ClientSize.Height - $script:Ui.DetailText.Top - 62)
+        }
+        $script:Ui.DetailBadge.Text = (T 'BadgeNoSnapshot' 'NO SNAPSHOT')
         $script:Ui.DetailBadge.FillColor = $script:P.CardAlt
         $script:Ui.DetailBadge.TextColor = $script:P.Muted
         $script:Ui.DetailTitle.Text = (T 'SelectSnapshot' 'Select a snapshot')
@@ -2433,17 +2678,24 @@ function Update-StudioSnapshotDetails {
         $script:Ui.DetailThumbs.ResumeLayout()
     }
     $script:DetailThumbsHeight = $thumbHeight
-    if ($script:Ui.DetailText) { $script:Ui.DetailText.Top = 138 + $thumbHeight + 6 }
+    if ($script:Ui.DetailText) {
+        $script:Ui.DetailText.Top = 138 + $thumbHeight + 6
+        if ($script:Ui.DetailCard) {
+            # Shrink with the thumbnail strip so the text never runs under
+            # the Restore/Open/Delete buttons at the bottom of the card.
+            $script:Ui.DetailText.Height = [Math]::Max(120, $script:Ui.DetailCard.ClientSize.Height - $script:Ui.DetailText.Top - 62)
+        }
+    }
 
     $bytes = Get-StudioSnapshotBytes -Entry $entry
     $isPinned = ($script:SnapshotPinnedNames -and $script:SnapshotPinnedNames.Contains((Split-Path -Leaf $entry.Path)))
-    $script:Ui.DetailBadge.Text = if ($isPinned) { 'PINNED' } else { 'READY TO RESTORE' }
+    $script:Ui.DetailBadge.Text = if ($isPinned) { (T 'BadgePinned' 'PINNED') } else { (T 'BadgeReady' 'READY TO RESTORE') }
     $script:Ui.DetailBadge.FillColor = if ($isPinned) { $script:P.AccentSoft } else { $script:P.GreenSoft }
     $script:Ui.DetailBadge.TextColor = if ($isPinned) { $script:P.Accent } else { $script:P.Green }
-    $script:Ui.DetailTitle.Text = $entry.CapturedAt.ToString('dddd, MMM d  •  HH:mm:ss')
-    $pinnedText = if ($isPinned) { '  •  pinned' } else { '' }
-    $script:Ui.DetailMeta.Text = ('{0}  •  {1}  •  {2} app(s)  •  {3} folder(s){4}' -f (Format-StudioAge -CapturedAt $entry.CapturedAt), (Format-StudioBytes -Bytes $bytes), $stats.Apps, $stats.Folders, $pinnedText)
-    $script:Ui.DetailSummary.Text = ('Captured {0} browser tab(s) across {1} browser(s). Nothing in this snapshot modifies files.' -f $stats.Tabs, $stats.Browsers)
+    $script:Ui.DetailTitle.Text = Format-StudioDate -Date $entry.CapturedAt -Format 'dddd, MMM d  •  HH:mm:ss'
+    $pinnedText = if ($isPinned) { (T 'DetailPinnedSuffix' '  •  pinned') } else { '' }
+    $script:Ui.DetailMeta.Text = ((T 'DetailMetaAppsTabs' '{0}  •  {1}  •  {2} app(s)  •  {3} folder(s){4}') -f (Format-StudioAge -CapturedAt $entry.CapturedAt), (Format-StudioBytes -Bytes $bytes), $stats.Apps, $stats.Folders, $pinnedText)
+    $script:Ui.DetailSummary.Text = ((T 'DetailSummaryCaptured' 'Captured {0} browser tab(s) across {1} browser(s). Nothing in this snapshot modifies files.') -f $stats.Tabs, $stats.Browsers)
     $script:Ui.DetailRestore.Enabled = $true
     $script:Ui.DetailOpen.Enabled = $true
     $script:Ui.DetailDelete.Enabled = $true
@@ -2498,7 +2750,7 @@ function Update-StudioSnapshotDetails {
         $null -ne $prop -and $null -ne $prop.Value
     })
     if ($mediaApps.Count -gt 0) {
-        $lines.Add('PLAYING')
+        $lines.Add((T 'DetailPlaying' 'PLAYING'))
         foreach ($mediaApp in $mediaApps) {
             $media = $mediaApp.media
             $clock = ''
@@ -2511,13 +2763,13 @@ function Update-StudioSnapshotDetails {
                 else { $clock = ('{0}:{1:00}' -f $minutes, $seconds) }
             } catch { }
             $mark = if ($media.estimated) { '~' } else { '' }
-            $lines.Add(('  {0}  {1}  at {2}{3}' -f ([string]$mediaApp.name), (Split-Path -Leaf ([string]$media.file)), $mark, $clock))
+            $lines.Add(((T 'DetailPlayingLine' '  {0}  {1}  at {2}{3}') -f ([string]$mediaApp.name), (Split-Path -Leaf ([string]$media.file)), $mark, $clock))
         }
         $lines.Add('')
     }
-    $lines.Add('APPLICATIONS')
+    $lines.Add((T 'DetailApplications' 'APPLICATIONS'))
     if ($stats.Apps -eq 0) {
-        $lines.Add('  (none captured)')
+        $lines.Add((T 'DetailNoneCaptured' '  (none captured)'))
     } else {
         $count = 0
         foreach ($app in @($snapshot.apps)) {
@@ -2525,7 +2777,7 @@ function Update-StudioSnapshotDetails {
             $appName = [string]$app.displayName
             if ([string]::IsNullOrWhiteSpace($appName)) { $appName = [string]$app.name }
             if ([string]::IsNullOrWhiteSpace($appName)) { $appName = [string]$app.processName }
-            if ([string]::IsNullOrWhiteSpace($appName)) { $appName = 'Application' }
+            if ([string]::IsNullOrWhiteSpace($appName)) { $appName = (T 'DetailApplicationFallback' 'Application') }
             $appExe = [string]$app.exe
             if ([string]::IsNullOrWhiteSpace($appExe)) { $appExe = [string]$app.path }
             $lines.Add(('  {0}  {1}' -f $appName, $appExe))
@@ -2533,9 +2785,9 @@ function Update-StudioSnapshotDetails {
         }
     }
     $lines.Add('')
-    $lines.Add('FOLDERS')
+    $lines.Add((T 'DetailFolders' 'FOLDERS'))
     if ($stats.Folders -eq 0) {
-        $lines.Add('  (none captured)')
+        $lines.Add((T 'DetailNoneCaptured' '  (none captured)'))
     } else {
         $count = 0
         foreach ($folder in @($snapshot.explorer)) {
@@ -2545,15 +2797,15 @@ function Update-StudioSnapshotDetails {
         }
     }
     $lines.Add('')
-    $lines.Add('BROWSER TABS')
+    $lines.Add((T 'DetailBrowserTabs' 'BROWSER TABS'))
     if ($stats.Browsers -eq 0) {
-        $lines.Add('  (none captured)')
+        $lines.Add((T 'DetailNoneCaptured' '  (none captured)'))
     } else {
         foreach ($browser in @($snapshot.browsers)) {
             $lines.Add(('  {0}' -f [string]$browser.name))
             foreach ($profile in @($browser.profiles)) {
                 $approx = ''
-                if ($profile.tabsApproximate) { $approx = '  [approximate]' }
+                if ($profile.tabsApproximate) { $approx = '  ' + (T 'DetailApproximate' '[approximate]') }
                 $lines.Add(('    {0}  ({1} tab(s)){2}' -f [string]$profile.displayName, @($profile.tabs).Count, $approx))
                 $tabCount = 0
                 foreach ($tab in @($profile.tabs)) {
@@ -2631,14 +2883,16 @@ function New-StudioSnapshotRowControl {
     $row.PinnedSoft = $script:P.AccentSoft
     $row.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 7)
     $row.Tag = $Entry.Path
-    $row.TimeText = $Entry.CapturedAt.ToString('ddd  •  MMM d  •  HH:mm:ss')
-    $row.MetaText = ('{0} app(s)  •  {1} tab(s)  •  {2}' -f $stats.Apps, $stats.Tabs, (Format-StudioBytes -Bytes (Get-StudioSnapshotBytes -Entry $Entry)))
+    $row.TimeText = Format-StudioDate -Date $Entry.CapturedAt -Format 'ddd  •  MMM d  •  HH:mm:ss'
+    $row.MetaText = ((T 'SnapRowMeta' '{0} app(s)  •  {1} tab(s)  •  {2}') -f $stats.Apps, $stats.Tabs, (Format-StudioBytes -Bytes (Get-StudioSnapshotBytes -Entry $Entry)))
     $row.AgeText = Format-StudioAge -CapturedAt $Entry.CapturedAt
     $row.Approximate = $approx
+    $row.ApproxLabel = (T 'BadgeApprox' 'APPROX')
+    $row.PinnedLabel = (T 'BadgePinned' 'PINNED')
     $row.Pinned = ($null -ne $script:SnapshotPinnedNames -and $script:SnapshotPinnedNames.Contains((Split-Path -Leaf $Entry.Path)))
     $row.Selected = ([string]$row.Tag -eq [string]$script:SelectedSnapshotPath)
     $row.AccessibleName = ('{0}. {1}. {2}.' -f $row.TimeText, $row.MetaText, $row.AgeText)
-    $row.AccessibleDescription = 'Snapshot. Select to preview and restore.'
+    $row.AccessibleDescription = (T 'SnapRowAccessibleDesc' 'Snapshot. Select to preview and restore.')
     $row.Add_Click($ClickHandler)
     return $row
 }
@@ -2685,7 +2939,7 @@ function Test-StudioSnapshotContent {
     # Search covers the capture date and file name as before, plus everything
     # the snapshot recorded: application names and paths, Explorer folders,
     # browser names, tab titles and URLs.
-    $haystack = ($Entry.Path + ' ' + $Entry.CapturedAt.ToString('yyyy-MM-dd HH:mm') + ' ' + $Entry.CapturedAt.ToString('dddd')).ToLowerInvariant()
+    $haystack = ($Entry.Path + ' ' + (Format-StudioDate -Date $Entry.CapturedAt -Format 'yyyy-MM-dd HH:mm') + ' ' + (Format-StudioDate -Date $Entry.CapturedAt -Format 'dddd')).ToLowerInvariant()
     if ($haystack.Contains($Needle)) { return $true }
 
     $snapshot = $Entry.Snapshot
@@ -2728,10 +2982,12 @@ function Refresh-StudioSnapshotRows {
     if ($script:Ui.SnapSearch.Tag -eq 'placeholder') { $search = '' }
     $search = $search.Trim()
     $mode = [string]$script:Ui.SnapFilter.SelectedItem
+    # The cutoff is derived from the selected index, not the display text, so
+    # translated filter labels keep working.
     $cutoff = $null
-    if ($mode -eq 'Last hour') { $cutoff = (Get-Date).AddHours(-1) }
-    elseif ($mode -eq 'Last 24 hours') { $cutoff = (Get-Date).AddHours(-24) }
-    elseif ($mode -eq 'Last 7 days') { $cutoff = (Get-Date).AddDays(-7) }
+    if ($script:Ui.SnapFilter.SelectedIndex -eq 1) { $cutoff = (Get-Date).AddHours(-1) }
+    elseif ($script:Ui.SnapFilter.SelectedIndex -eq 2) { $cutoff = (Get-Date).AddHours(-24) }
+    elseif ($script:Ui.SnapFilter.SelectedIndex -eq 3) { $cutoff = (Get-Date).AddDays(-7) }
 
     $script:SnapshotPinnedNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     try {
@@ -2768,7 +3024,7 @@ function Refresh-StudioSnapshotRows {
         } else {
             $script:Ui.SnapEmpty.Visible = $false
         }
-        $script:Ui.SnapCount.Text = if ($filtered.Count -eq 1) { '1 snapshot' } else { ('{0} snapshots' -f $filtered.Count) }
+        $script:Ui.SnapCount.Text = if ($filtered.Count -eq 1) { T 'SnapCountOne' '1 snapshot' } else { (T 'SnapCount' '{0} snapshots') -f $filtered.Count }
         $selected = Get-StudioSelectedSnapshotEntry
         if ($null -eq $selected -and $filtered.Count -gt 0) {
             $script:SelectedSnapshotPath = $filtered[0].Path
@@ -2830,10 +3086,11 @@ function Add-StudioExclusionValue {
     }
     Save-SRConfig -Config $script:Config
     $input.Text = ''
+
     $input.ForeColor = $script:P.Text
     $input.Tag = ''
     Refresh-StudioExclusions
-    Show-StudioToast 'Exclusion added.' $script:P.Green
+    Show-StudioToast (T 'ToastExclusionAdded' 'Exclusion added.') $script:P.Green
 }
 
 function Remove-StudioExclusionValue {
@@ -2850,7 +3107,7 @@ function Remove-StudioExclusionValue {
     }
     Save-SRConfig -Config $script:Config
     Refresh-StudioExclusions
-    Show-StudioToast 'Exclusion removed.' $script:P.Green
+    Show-StudioToast (T 'ToastExclusionRemoved' 'Exclusion removed.') $script:P.Green
 }
 
 function New-StudioExclusionCard {
@@ -2884,7 +3141,9 @@ function New-StudioExclusionCard {
     $input.Text = $Placeholder
     $input.ForeColor = $script:P.Subtle
     $input.Tag = 'placeholder'
-    $input.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+    # Left-anchored only: a right-anchored input stretched with the card on
+    # resize and ran underneath the Add/Remove buttons.
+    $input.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left
     $input.Add_GotFocus({
         param($sender, $eventArgs)
         if ($sender.Tag -eq 'placeholder') {
@@ -2915,6 +3174,7 @@ function New-StudioExclusionCard {
         Property = $PropertyName
         List     = $list
         Input    = $input
+        HasBrowse = [bool]$BrowseFolder
     }
     $add.Tag = $context
     $remove.Tag = $context
@@ -2928,7 +3188,7 @@ function New-StudioExclusionCard {
     })
 
     if ($BrowseFolder) {
-        $browse = New-StudioButton -Text 'Browse...' -X ($card.Width - 350) -Y 154 -Width 86 -Height 32 -Glyph ''
+        $browse = New-StudioButton -Text 'Browse...' -X ($card.Width - 368) -Y 154 -Width 104 -Height 32 -Glyph ''
         $browse.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
         $browse.Tag = $context
         $browse.Add_Click({
@@ -2947,7 +3207,7 @@ function New-StudioExclusionCard {
             }
         })
         $card.Controls.Add($browse)
-        $input.Width = $card.Width - 370
+        $input.Width = $card.Width - 398
     } else {
         $input.Width = $card.Width - 260
     }
@@ -2958,9 +3218,9 @@ function New-StudioExclusionCard {
 }
 
 $script:ExclusionPlaceholders = @{
-    excludeApps    = 'e.g. steam.exe or *game*'
-    excludeFolders = 'e.g. C:\Projects\Private'
-    excludeUrls    = 'e.g. *bank* or https://mail.example.com/*'
+    excludeApps    = (T 'ExclAppPlaceholder' 'e.g. steam.exe or *game*')
+    excludeFolders = (T 'ExclFolderPlaceholder' 'e.g. C:\Projects\Private')
+    excludeUrls    = (T 'ExclUrlPlaceholder' 'e.g. *bank* or https://mail.example.com/*')
 }
 
 $exclusionsPage = New-StudioPage -Name 'Exclusions'
@@ -2974,25 +3234,37 @@ $exFlow.BackColor = $script:P.Bg
 $exclusionsPage.Controls.Add($exFlow)
 $script:Ui.ExclusionFlow = $exFlow
 
-$exIntro = New-StudioLabel -Text 'Exclusions keep private or noisy windows out of every new snapshot. Changes apply immediately.' -X 0 -Y 0 -Width 800 -Height 22 -Font $script:FontBody -Color $script:P.Muted
+$exIntro = New-StudioLabel -Text (T 'ExclIntro' 'Exclusions keep private or noisy windows out of every new snapshot. Changes apply immediately.') -X 0 -Y 0 -Width 800 -Height 22 -Font $script:FontBody -Color $script:P.Muted
+$exIntro.AutoEllipsis = $true
 $exIntro.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 12)
 $exFlow.Controls.Add($exIntro)
 
-$appCard = New-StudioExclusionCard -Title 'Applications' -Description 'Skip processes by name. Wildcards * and ? are supported.' -PropertyName 'excludeApps' -Placeholder 'e.g. steam.exe or *game*'
+$appCard = New-StudioExclusionCard -Title (T 'ExclApps' 'Applications') -Description (T 'ExclAppsDesc' 'Skip processes by name. Wildcards * and ? are supported.') -PropertyName 'excludeApps' -Placeholder $script:ExclusionPlaceholders['excludeApps']
 $exFlow.Controls.Add($appCard)
-$folderCard = New-StudioExclusionCard -Title 'Folders' -Description 'Skip Explorer windows pointing at these folders or their children.' -PropertyName 'excludeFolders' -Placeholder 'e.g. C:\Projects\Private' -BrowseFolder $true
+$folderCard = New-StudioExclusionCard -Title (T 'ExclFolders' 'Folders') -Description (T 'ExclFoldersDesc' 'Skip Explorer windows pointing at these folders or their children.') -PropertyName 'excludeFolders' -Placeholder $script:ExclusionPlaceholders['excludeFolders'] -BrowseFolder $true
 $exFlow.Controls.Add($folderCard)
-$urlCard = New-StudioExclusionCard -Title 'URLs' -Description 'Skip matching browser tabs. Use a wildcard for broad patterns.' -PropertyName 'excludeUrls' -Placeholder 'e.g. *bank* or https://mail.example.com/*'
+$urlCard = New-StudioExclusionCard -Title (T 'ExclUrls' 'URLs') -Description (T 'ExclUrlsDesc' 'Skip matching browser tabs. Use a wildcard for broad patterns.') -PropertyName 'excludeUrls' -Placeholder $script:ExclusionPlaceholders['excludeUrls']
 $exFlow.Controls.Add($urlCard)
 
-$exFooter = New-StudioLabel -Text 'Exclusion rules are stored only in config.json on this PC.' -X 0 -Y 0 -Width 800 -Height 18 -Font $script:FontBodySmall -Color $script:P.Subtle
+$exFooter = New-StudioLabel -Text (T 'ExclFooterNote' 'Exclusion rules are stored only in config.json on this PC.') -X 0 -Y 0 -Width 800 -Height 18 -Font $script:FontBodySmall -Color $script:P.Subtle
+$exFooter.AutoEllipsis = $true
 $exFooter.Margin = New-Object System.Windows.Forms.Padding(0, 2, 0, 0)
 $exFlow.Controls.Add($exFooter)
 
 function Layout-StudioExclusions {
     if (-not $script:Ui.ExclusionFlow) { return }
     $width = [Math]::Max(620, $script:Ui.ExclusionFlow.ClientSize.Width - 52)
-    foreach ($card in $script:ExclusionCards) { $card.Width = $width }
+    foreach ($card in $script:ExclusionCards) {
+        $card.Width = $width
+        # The input is left-anchored, so resize it here to stop short of the
+        # right-anchored action buttons.
+        $context = $card.Tag
+        if ($null -ne $context -and $null -ne $context.Input) {
+            # Left margin (20) + button zone (264, or 386 with Browse) + gap.
+            $clearance = $(if ($context.HasBrowse) { 398 } else { 276 })
+            $context.Input.Width = [Math]::Max(300, $width - $clearance)
+        }
+    }
     $exIntro.Width = $width
     $exFooter.Width = $width
 }
@@ -3002,12 +3274,13 @@ function Layout-StudioExclusions {
 # ---------------------------------------------------------------------------
 
 function New-StudioSettingsCard {
-    param([string]$Title, [string]$Description, [int]$Height = 180)
+    param([string]$Title, [string]$Description, [int]$Height = 180, [switch]$WrapDescription)
     $card = New-StudioCard -X 0 -Y 0 -Width 800 -Height $Height -Fill $script:P.Card -Border $script:P.BorderSoft -Radius 14
     $card.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 14)
     $titleLabel = New-StudioLabel -Text $Title -X 20 -Y 15 -Width 360 -Height 24 -Font $script:FontSemiboldLarge -Color $script:P.Text
     $card.Controls.Add($titleLabel)
-    $descriptionLabel = New-StudioLabel -Text $Description -X 20 -Y 38 -Width ($card.Width - 40) -Height 18 -Font $script:FontBodySmall -Color $script:P.Muted
+    $descriptionHeight = if ($WrapDescription) { 32 } else { 18 }
+    $descriptionLabel = New-StudioLabel -Text $Description -X 20 -Y 38 -Width ($card.Width - 40) -Height $descriptionHeight -Font $script:FontBodySmall -Color $script:P.Muted
     $descriptionLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
     $card.Controls.Add($descriptionLabel)
     return $card
@@ -3029,14 +3302,12 @@ function New-StudioNumeric {
 }
 
 $settingsPage = New-StudioPage -Name 'Settings'
-$settingsFlow = New-Object System.Windows.Forms.FlowLayoutPanel
+$settingsFlow = New-Object System.Windows.Forms.Panel
 $settingsFlow.Location = New-Object System.Drawing.Point(0, 0)
 $settingsFlow.Size = New-Object System.Drawing.Size(984, 622)
 $settingsFlow.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
 $settingsFlow.Padding = New-Object System.Windows.Forms.Padding(24)
 $settingsFlow.AutoScroll = $true
-$settingsFlow.FlowDirection = [System.Windows.Forms.FlowDirection]::TopDown
-$settingsFlow.WrapContents = $false
 $settingsFlow.BackColor = $script:P.Bg
 $settingsPage.Controls.Add($settingsFlow)
 $script:Ui.SettingsFlow = $settingsFlow
@@ -3057,7 +3328,7 @@ $settingsStatus = New-StudioLabel -Text '' -X 24 -Y 24 -Width 460 -Height 20 -Fo
 $settingsBar.Controls.Add($settingsStatus)
 $script:Ui.StatusLabel = $settingsStatus
 
-$settingsReset = New-StudioButton -Text 'Reset defaults' -X 650 -Y 16 -Width 130 -Height 38 -Glyph ''
+$settingsReset = New-StudioButton -Text 'Reset defaults' -X 650 -Y 16 -Width 138 -Height 38 -Glyph ''
 $settingsReset.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
 $settingsReset.Add_Click({ Reset-StudioSettings })
 $settingsBar.Controls.Add($settingsReset)
@@ -3087,7 +3358,7 @@ $rhythmLabel2 = New-StudioLabel -Text 'KEEP' -X 270 -Y 70 -Width 160 -Height 16 
 $rhythmCard.Controls.Add($rhythmLabel2)
 $numKeep = New-StudioNumeric -X 270 -Y 90 -Value 48 -Min 1 -Max 1000 -Width 84
 $rhythmCard.Controls.Add($numKeep)
-$rhythmUnit2 = New-StudioLabel -Text 'snapshots' -X 360 -Y 94 -Width 100 -Height 20 -Font $script:FontBodySmall -Color $script:P.Muted
+$rhythmUnit2 = New-StudioLabel -Text 'snapshots' -X 360 -Y 94 -Width 150 -Height 20 -Font $script:FontBodySmall -Color $script:P.Muted
 $rhythmCard.Controls.Add($rhythmUnit2)
 
 $rhythmLabel3 = New-StudioLabel -Text 'DELETE OLDER THAN' -X 520 -Y 70 -Width 180 -Height 16 -Font $script:FontMono -Color $script:P.Subtle
@@ -3096,8 +3367,12 @@ $numDays = New-StudioNumeric -X 520 -Y 90 -Value 0 -Min 0 -Max 3650 -Width 84
 $rhythmCard.Controls.Add($numDays)
 $rhythmUnit3 = New-StudioLabel -Text 'days' -X 610 -Y 94 -Width 80 -Height 20 -Font $script:FontBodySmall -Color $script:P.Muted
 $rhythmCard.Controls.Add($rhythmUnit3)
-$rhythmHint = New-StudioLabel -Text '0 days keeps history by count only. Snapshot files are tiny JSON documents.' -X 20 -Y 126 -Width 700 -Height 18 -Font $script:FontBodySmall -Color $script:P.Subtle
+$rhythmHint = New-StudioLabel -Text ((T 'SetRhythmHint' '{0} days keeps history by count only. Snapshot files are tiny JSON documents.') -f 0) -X 20 -Y 126 -Width 700 -Height 18 -Font $script:FontBodySmall -Color $script:P.Subtle
 $rhythmCard.Controls.Add($rhythmHint)
+$numDays.Add_ValueChanged({
+    if (-not $script:SettingsLoaded) { return }
+    $rhythmHint.Text = (T 'SetRhythmHint' '{0} days keeps history by count only. Snapshot files are tiny JSON documents.') -f [int]$numDays.Value
+})
 
 # Card: restore behavior
 $restoreCard = New-StudioSettingsCard -Title 'Restore behavior' -Description 'Choose how Session Recovery offers to reopen apps, folders and tabs.' -Height 206
@@ -3107,9 +3382,7 @@ $settingsCards.Add($restoreCard)
 $promptLabel = New-StudioLabel -Text 'WHEN WINDOWS STARTS' -X 20 -Y 70 -Width 220 -Height 16 -Font $script:FontMono -Color $script:P.Subtle
 $restoreCard.Controls.Add($promptLabel)
 $comboPrompt = New-StudioCombo -X 20 -Y 90 -Width 210
-[void]$comboPrompt.Items.Add('Always ask')
-[void]$comboPrompt.Items.Add('Only after a crash')
-[void]$comboPrompt.Items.Add('Never ask')
+Set-StudioLocalizedCombo -Combo $comboPrompt -Keys @('PromptAlways', 'PromptCrashOnly', 'PromptNever') -Defaults @('Always ask', 'Only after a crash', 'Never ask')
 $comboPrompt.SelectedIndex = 1
 $restoreCard.Controls.Add($comboPrompt)
 
@@ -3125,18 +3398,15 @@ $restoreCard.Controls.Add($toggleRestoreBrowsers)
 $restoreBrowserLabel = New-StudioLabel -Text 'Reopen captured browser tabs' -X 76 -Y 150 -Width 320 -Height 20 -Font $script:FontBody -Color $script:P.Text
 $restoreCard.Controls.Add($restoreBrowserLabel)
 
-$tabModeLabel = New-StudioLabel -Text 'TAB RESTORE MODE' -X 440 -Y 132 -Width 180 -Height 16 -Font $script:FontMono -Color $script:P.Subtle
+$tabModeLabel = New-StudioLabel -Text 'TAB RESTORE MODE' -X 430 -Y 132 -Width 260 -Height 16 -Font $script:FontMono -Color $script:P.Subtle
 $restoreCard.Controls.Add($tabModeLabel)
 $comboTabMode = New-StudioCombo -X 440 -Y 152 -Width 180
-[void]$comboTabMode.Items.Add('Smart')
-[void]$comboTabMode.Items.Add('Captured')
-[void]$comboTabMode.Items.Add('Native')
-[void]$comboTabMode.Items.Add('None')
+Set-StudioLocalizedCombo -Combo $comboTabMode -Keys @('TabModeSmart', 'TabModeCaptured', 'TabModeNative', 'TabModeNone') -Defaults @('Smart', 'Captured', 'Native', 'None')
 $comboTabMode.SelectedIndex = 0
 $restoreCard.Controls.Add($comboTabMode)
 
 # Card: browser capture
-$browserCard = New-StudioSettingsCard -Title 'Browser capture' -Description 'Chrome, Edge, Brave and other Chromium browsers use a safe live fallback when their session files are empty.' -Height 264
+$browserCard = New-StudioSettingsCard -Title 'Browser capture' -Description 'Chrome, Edge, Brave and other Chromium browsers use a safe live fallback when their session files are empty.' -Height 264 -WrapDescription
 $settingsFlow.Controls.Add($browserCard)
 $settingsCards.Add($browserCard)
 
@@ -3169,7 +3439,7 @@ $lookbackHint = New-StudioLabel -Text 'Only used when the exact session file can
 $browserCard.Controls.Add($lookbackHint)
 
 # Card: media playback
-$mediaCard = New-StudioSettingsCard -Title 'Media playback' -Description 'Remember what a media player was playing, and where.' -Height 150
+$mediaCard = New-StudioSettingsCard -Title 'Media playback' -Description 'Remember what a media player was playing, and where.' -Height 164
 $settingsFlow.Controls.Add($mediaCard)
 $settingsCards.Add($mediaCard)
 
@@ -3177,7 +3447,7 @@ $toggleMedia = New-StudioToggle -X 20 -Y 76 -Checked $true
 $mediaCard.Controls.Add($toggleMedia)
 $mediaLabel = New-StudioLabel -Text 'Capture the playing video and its position' -X 76 -Y 80 -Width 380 -Height 20 -Font $script:FontBody -Color $script:P.Text
 $mediaCard.Controls.Add($mediaLabel)
-$mediaHint = New-StudioLabel -Text 'VLC, MPC-HC, MPC-BE, mpv, PotPlayer and Windows Media Player are supported: restore reopens the same file, near the moment it was playing when it can. Positions between snapshots are estimated, so restore lands at most one interval early.' -X 76 -Y 100 -Width 580 -Height 32 -Font $script:FontBodySmall -Color $script:P.Subtle
+$mediaHint = New-StudioLabel -Text 'VLC, MPC-HC, MPC-BE, mpv, PotPlayer and Windows Media Player are supported: restore reopens the same file, near the moment it was playing when it can. Positions between snapshots are estimated, so restore lands at most one interval early.' -X 76 -Y 100 -Width 580 -Height 48 -Font $script:FontBodySmall -Color $script:P.Subtle
 $mediaCard.Controls.Add($mediaHint)
 
 # Card: background and desktop
@@ -3225,7 +3495,9 @@ $settingsCards.Add($appearanceCard)
 $themeLabel = New-StudioLabel -Text 'STUDIO THEME' -X 20 -Y 70 -Width 180 -Height 16 -Font $script:FontMono -Color $script:P.Subtle
 $appearanceCard.Controls.Add($themeLabel)
 $comboTheme = New-StudioCombo -X 20 -Y 90 -Width 220
-foreach ($themeEntry in $script:ThemeList) { [void]$comboTheme.Items.Add([string]$themeEntry.Label) }
+$themeKeys = @($script:ThemeList | ForEach-Object { 'Theme' + [string]$_.Key + 'Label' })
+$themeLabels = @($script:ThemeList | ForEach-Object { [string]$_.Label })
+Set-StudioLocalizedCombo -Combo $comboTheme -Keys $themeKeys -Defaults $themeLabels
 $comboTheme.SelectedIndex = 0
 $appearanceCard.Controls.Add($comboTheme)
 $themeHint = New-StudioLabel -Text '' -X 270 -Y 84 -Width 500 -Height 38 -Font $script:FontBodySmall -Color $script:P.Muted
@@ -3235,7 +3507,7 @@ $comboTheme.Add_SelectedIndexChanged({
     if (-not $script:SettingsLoaded) { return }
     $index = $comboTheme.SelectedIndex
     if ($index -ge 0 -and $index -lt $script:ThemeList.Count) {
-        $themeHint.Text = $script:ThemeList[$index].Description + "`r`nSave to apply instantly, without reopening the Studio."
+        $themeHint.Text = (Get-StudioThemeDescription $script:ThemeList[$index]) + "`r`n" + (T 'ThemeHintIdle' 'Save to apply instantly, without reopening the Studio.')
     }
 })
 
@@ -3250,7 +3522,7 @@ $languageHint = New-StudioLabel -Text 'English, Arabic, French, Spanish, German,
 $appearanceCard.Controls.Add($languageHint)
 
 # Card: smart capture
-$smartCard = New-StudioSettingsCard -Title 'Smart capture' -Description 'Skip snapshots nobody needs, and capture from anywhere.' -Height 348
+$smartCard = New-StudioSettingsCard -Title 'Smart capture' -Description 'Skip snapshots nobody needs, and capture from anywhere.' -Height 382
 $settingsFlow.Controls.Add($smartCard)
 $settingsCards.Add($smartCard)
 
@@ -3270,23 +3542,23 @@ $toggleHotkey = New-StudioToggle -X 20 -Y 188 -Checked $true
 $smartCard.Controls.Add($toggleHotkey)
 $hotkeyLabel = New-StudioLabel -Text 'Ctrl+Alt+S captures a snapshot anywhere' -X 76 -Y 192 -Width 380 -Height 20 -Font $script:FontBody -Color $script:P.Text
 $smartCard.Controls.Add($hotkeyLabel)
-$hotkeyHint = New-StudioLabel -Text 'Works while the background app is running. Takes effect after saving.' -X 76 -Y 212 -Width 430 -Height 18 -Font $script:FontBodySmall -Color $script:P.Subtle
+$hotkeyHint = New-StudioLabel -Text 'Works while the background app is running. Takes effect after saving.' -X 76 -Y 214 -Width 500 -Height 34 -Font $script:FontBodySmall -Color $script:P.Subtle
 $smartCard.Controls.Add($hotkeyHint)
 
 $toggleEvents = New-StudioToggle -X 20 -Y 244 -Checked $true
 $smartCard.Controls.Add($toggleEvents)
-$eventsLabel = New-StudioLabel -Text 'Capture on lock, sleep and low battery' -X 76 -Y 248 -Width 420 -Height 20 -Font $script:FontBody -Color $script:P.Text
+$eventsLabel = New-StudioLabel -Text 'Capture on lock, sleep and low battery' -X 76 -Y 254 -Width 420 -Height 20 -Font $script:FontBody -Color $script:P.Text
 $smartCard.Controls.Add($eventsLabel)
 
 $toggleDev = New-StudioToggle -X 20 -Y 300 -Checked $true
 $smartCard.Controls.Add($toggleDev)
-$devLabel = New-StudioLabel -Text 'Capture dev workspaces (VS Code, Cursor, JetBrains, Windows Terminal)' -X 76 -Y 304 -Width 460 -Height 20 -Font $script:FontBody -Color $script:P.Text
+$devLabel = New-StudioLabel -Text 'Capture dev workspaces (VS Code, Cursor, JetBrains, Windows Terminal)' -X 76 -Y 310 -Width 660 -Height 20 -Font $script:FontBody -Color $script:P.Text
 $smartCard.Controls.Add($devLabel)
-$devHint = New-StudioLabel -Text 'Reads the editors'' own recent-files state so restore can reopen the same folders.' -X 76 -Y 324 -Width 460 -Height 18 -Font $script:FontBodySmall -Color $script:P.Subtle
+$devHint = New-StudioLabel -Text 'Reads the editors'' own recent-files state so restore can reopen the same folders.' -X 76 -Y 330 -Width 560 -Height 34 -Font $script:FontBodySmall -Color $script:P.Subtle
 $smartCard.Controls.Add($devHint)
 
 # Card: storage and privacy
-$storageCard = New-StudioSettingsCard -Title 'Storage & privacy' -Description 'Everything Session Recovery saves stays in your local profile.' -Height 446
+$storageCard = New-StudioSettingsCard -Title 'Storage & privacy' -Description 'Everything Session Recovery saves stays in your local profile.' -Height 660
 $settingsFlow.Controls.Add($storageCard)
 $settingsCards.Add($storageCard)
 
@@ -3295,7 +3567,7 @@ $storageCard.Controls.Add($dataLabel)
 $dataPath = New-StudioLabel -Text '' -X 20 -Y 88 -Width 700 -Height 20 -Font $script:FontMono -Color $script:P.Muted
 $storageCard.Controls.Add($dataPath)
 $script:Ui.DataPath = $dataPath
-$openData = New-StudioButton -Text 'Open data folder' -X 20 -Y 116 -Width 170 -Height 32 -Glyph ([string][char]0xE838)
+$openData = New-StudioButton -Text 'Open data folder' -X 20 -Y 116 -Width 230 -Height 32 -Glyph ([string][char]0xE838)
 $openData.Add_Click({ Open-StudioPath (Get-SRRoot) })
 $storageCard.Controls.Add($openData)
 
@@ -3313,37 +3585,51 @@ $autoExportBrowse.Add_Click({
     }
 })
 $storageCard.Controls.Add($autoExportBrowse)
-$autoExportHint = New-StudioLabel -Text 'Each new snapshot is copied here as plain JSON (latest ten kept). Leave empty to turn off. Great for a synced folder.' -X 20 -Y 210 -Width 680 -Height 18 -Font $script:FontBodySmall -Color $script:P.Subtle
+$autoExportHint = New-StudioLabel -Text 'Each new snapshot is copied here as plain JSON (latest ten kept). Leave empty to turn off. Great for a synced folder.' -X 20 -Y 210 -Width 680 -Height 48 -Font $script:FontBodySmall -Color $script:P.Subtle
 $storageCard.Controls.Add($autoExportHint)
 
-$configLabel = New-StudioLabel -Text 'CONFIG FILE' -X 20 -Y 234 -Width 160 -Height 16 -Font $script:FontMono -Color $script:P.Subtle
+$configLabel = New-StudioLabel -Text 'CONFIG FILE' -X 20 -Y 266 -Width 160 -Height 16 -Font $script:FontMono -Color $script:P.Subtle
 $storageCard.Controls.Add($configLabel)
-$configPath = New-StudioLabel -Text '' -X 20 -Y 252 -Width 700 -Height 20 -Font $script:FontMono -Color $script:P.Muted
+$configPath = New-StudioLabel -Text '' -X 20 -Y 284 -Width 700 -Height 20 -Font $script:FontMono -Color $script:P.Muted
 $storageCard.Controls.Add($configPath)
 $script:Ui.ConfigPath = $configPath
-$openConfig = New-StudioButton -Text 'Open config' -X 20 -Y 280 -Width 140 -Height 32 -Glyph ''
+$openConfig = New-StudioButton -Text 'Open config' -X 20 -Y 312 -Width 170 -Height 32 -Glyph ''
 $openConfig.Add_Click({
     $path = Get-SRConfigPath
     if (Test-Path -LiteralPath $path) { Start-Process -FilePath 'notepad.exe' -ArgumentList ('\"{0}\"' -f $path) | Out-Null }
 })
 $storageCard.Controls.Add($openConfig)
-$openLogs = New-StudioButton -Text 'Open logs' -X 172 -Y 280 -Width 140 -Height 32 -Glyph ([string][char]0xE838)
+$openLogs = New-StudioButton -Text 'Open logs' -X 206 -Y 312 -Width 170 -Height 32 -Glyph ([string][char]0xE838)
 $openLogs.Add_Click({ Open-StudioPath (Get-SRLogDirectory) })
 $storageCard.Controls.Add($openLogs)
 
-$toggleThumbs = New-StudioToggle -X 20 -Y 326 -Checked $false
+$toggleThumbs = New-StudioToggle -X 20 -Y 358 -Checked $false
 $storageCard.Controls.Add($toggleThumbs)
-$thumbsLabel = New-StudioLabel -Text 'Capture window thumbnails' -X 76 -Y 330 -Width 420 -Height 20 -Font $script:FontBody -Color $script:P.Text
+$thumbsLabel = New-StudioLabel -Text 'Capture window thumbnails' -X 76 -Y 362 -Width 420 -Height 20 -Font $script:FontBody -Color $script:P.Text
 $storageCard.Controls.Add($thumbsLabel)
-$thumbsHint = New-StudioLabel -Text 'Stores a small JPEG of each window next to the snapshot. Off by default; excluded apps are never captured.' -X 76 -Y 350 -Width 460 -Height 18 -Font $script:FontBodySmall -Color $script:P.Subtle
+$thumbsHint = New-StudioLabel -Text 'Stores a small JPEG of each window next to the snapshot. Off by default; excluded apps are never captured.' -X 76 -Y 382 -Width 560 -Height 42 -Font $script:FontBodySmall -Color $script:P.Subtle
 $storageCard.Controls.Add($thumbsHint)
 
-$toggleCompress = New-StudioToggle -X 20 -Y 382 -Checked $false
+$toggleCompress = New-StudioToggle -X 20 -Y 432 -Checked $false
 $storageCard.Controls.Add($toggleCompress)
-$compressLabel = New-StudioLabel -Text 'Gzip snapshot files (smaller disk use)' -X 76 -Y 386 -Width 420 -Height 20 -Font $script:FontBody -Color $script:P.Text
+$compressLabel = New-StudioLabel -Text 'Gzip snapshot files (smaller disk use)' -X 76 -Y 436 -Width 420 -Height 20 -Font $script:FontBody -Color $script:P.Text
 $storageCard.Controls.Add($compressLabel)
-$compressHint = New-StudioLabel -Text 'Unchanged moments are skipped automatically, so snapshots cover more real changes.' -X 76 -Y 406 -Width 460 -Height 18 -Font $script:FontBodySmall -Color $script:P.Subtle
+$compressHint = New-StudioLabel -Text 'Unchanged moments are skipped automatically, so snapshots cover more real changes.' -X 76 -Y 456 -Width 560 -Height 42 -Font $script:FontBodySmall -Color $script:P.Subtle
 $storageCard.Controls.Add($compressHint)
+
+$toggleEncrypt = New-StudioToggle -X 20 -Y 506 -Checked $false
+$storageCard.Controls.Add($toggleEncrypt)
+$encryptLabel = New-StudioLabel -Text 'Encrypt snapshot files (DPAPI)' -X 76 -Y 510 -Width 420 -Height 20 -Font $script:FontBody -Color $script:P.Text
+$storageCard.Controls.Add($encryptLabel)
+$encryptHint = New-StudioLabel -Text 'Snapshots are sealed with your Windows user key. Encrypted exports only restore on this PC and user.' -X 76 -Y 530 -Width 560 -Height 48 -Font $script:FontBodySmall -Color $script:P.Subtle
+$storageCard.Controls.Add($encryptHint)
+
+$toggleVDesk = New-StudioToggle -X 20 -Y 588 -Checked $true
+$storageCard.Controls.Add($toggleVDesk)
+$vdeskLabel = New-StudioLabel -Text 'Remember virtual desktops' -X 76 -Y 592 -Width 420 -Height 20 -Font $script:FontBody -Color $script:P.Text
+$storageCard.Controls.Add($vdeskLabel)
+$vdeskHint = New-StudioLabel -Text 'Each window remembers which Windows desktop it was on, and restore moves it back when that desktop still exists.' -X 76 -Y 612 -Width 560 -Height 42 -Font $script:FontBodySmall -Color $script:P.Subtle
+$storageCard.Controls.Add($vdeskHint)
 
 $settingsPage.Add_Resize({ Layout-StudioSettings })
 
@@ -3369,7 +3655,7 @@ function Load-StudioSettings {
         }
     }
     $comboTheme.SelectedIndex = $themeIndex
-    $themeHint.Text = $script:ThemeList[$themeIndex].Description + "`r`nSave to apply instantly, without reopening the Studio."
+    $themeHint.Text = (Get-StudioThemeDescription $script:ThemeList[$themeIndex]) + "`r`n" + (T 'ThemeHintIdle' 'Save to apply instantly, without reopening the Studio.')
     $langIndex = 0
     for ($index = 0; $index -lt $script:LanguageList.Count; $index++) {
         if ([string]::Equals([string]$script:LanguageList[$index].Key, [string]$script:Config.language, [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -3401,6 +3687,10 @@ function Load-StudioSettings {
     $toggleThumbs.Checked = if ($null -ne $thumbsSettingProperty) { [bool]$thumbsSettingProperty.Value } else { $false }
     $compressSettingProperty = $script:Config.PSObject.Properties['compressSnapshots']
     $toggleCompress.Checked = if ($null -ne $compressSettingProperty) { [bool]$compressSettingProperty.Value } else { $false }
+    $encryptSettingProperty = $script:Config.PSObject.Properties['encryptSnapshots']
+    $toggleEncrypt.Checked = if ($null -ne $encryptSettingProperty) { [bool]$encryptSettingProperty.Value } else { $false }
+    $vdeskSettingProperty = $script:Config.PSObject.Properties['restoreVirtualDesktops']
+    $toggleVDesk.Checked = if ($null -ne $vdeskSettingProperty) { [bool]$vdeskSettingProperty.Value } else { $true }
     $mediaToggleProperty = $script:Config.PSObject.Properties['captureMediaPlayers']
     $toggleMedia.Checked = if ($null -ne $mediaToggleProperty) { [bool]$mediaToggleProperty.Value } else { $true }
     $toggleNotifications.Checked = [bool]$script:Config.showNotifications
@@ -3449,6 +3739,8 @@ function Save-StudioSettings {
         $config.captureDevWorkspaces = [bool]$toggleDev.Checked
         $config.captureThumbnails = [bool]$toggleThumbs.Checked
         $config.compressSnapshots = [bool]$toggleCompress.Checked
+        $config.encryptSnapshots = [bool]$toggleEncrypt.Checked
+        $config.restoreVirtualDesktops = [bool]$toggleVDesk.Checked
         $config.captureMediaPlayers = [bool]$toggleMedia.Checked
         $config.showNotifications = [bool]$toggleNotifications.Checked
         $config.startWithWindows = [bool]$toggleStartup.Checked
@@ -3469,7 +3761,7 @@ function Save-StudioSettings {
             Show-StudioPage -Name $script:CurrentPage -Force
         }
         if ($null -ne $script:Ui.ThemeHint) {
-            $script:Ui.ThemeHint.Text = $script:ThemeList[$themeIndex].Description + "`r`nTheme applied. Choose another and save to switch."
+            $script:Ui.ThemeHint.Text = (Get-StudioThemeDescription $script:ThemeList[$themeIndex]) + "`r`n" + (T 'ThemeHintSaved' 'Theme applied. Choose another and save to switch.')
         }
 
         $startupOk = Set-StudioStartWithWindows -Enabled ([bool]$toggleStartup.Checked)
@@ -3477,34 +3769,35 @@ function Save-StudioSettings {
         if (-not $startupOk) {
             $config.startWithWindows = $false
             $toggleStartup.Checked = $false
-            Set-StudioStatus 'Settings saved, but the Startup shortcut could not be created.' $script:P.Amber
+            Set-StudioStatus (T 'StatusSavedStartupFail' 'Settings saved, but the Startup shortcut could not be created.') $script:P.Amber
         } elseif (-not $desktopOk) {
             $config.desktopShortcut = $false
             $toggleDesktop.Checked = $false
-            Set-StudioStatus 'Settings saved, but the desktop shortcut could not be created.' $script:P.Amber
+            Set-StudioStatus (T 'StatusSavedDesktopFail' 'Settings saved, but the desktop shortcut could not be created.') $script:P.Amber
         } elseif ($themeChanged) {
-            Set-StudioStatus 'Settings saved. The new theme is applied.' $script:P.Green
+            Set-StudioStatus (T 'StatusSavedTheme' 'Settings saved. The new theme is applied.') $script:P.Green
         } else {
-            Set-StudioStatus 'Settings saved. Background protection will pick them up automatically.' $script:P.Green
+            Set-StudioStatus (T 'StatusSaved' 'Settings saved. Background protection will pick them up automatically.') $script:P.Green
         }
         Save-SRConfig -Config $config
         $script:Config = $config
         Refresh-StudioData
         if ($themeChanged) {
-            Show-StudioToast 'Settings saved. Theme applied.' $script:P.Green
+            Show-StudioToast (T 'ToastThemeApplied' 'Settings saved. Theme applied.') $script:P.Green
         } else {
-            Show-StudioToast 'Settings saved.' $script:P.Green
+            Show-StudioToast (T 'ToastSettingsSaved' 'Settings saved.') $script:P.Green
         }
     } catch {
-        Set-StudioStatus ('Could not save settings: ' + $_.Exception.Message) $script:P.Red
-        Show-StudioToast ('Could not save settings: ' + $_.Exception.Message) $script:P.Red
+        $message = (T 'SaveSettingsFail' 'Could not save settings: {0}') -f $_.Exception.Message
+        Set-StudioStatus $message $script:P.Red
+        Show-StudioToast $message $script:P.Red
     }
 }
 
 function Reset-StudioSettings {
     $answer = [System.Windows.Forms.MessageBox]::Show(
-        'Reset all capture, restore, startup and storage settings? Your exclusion lists will be kept.',
-        'Reset settings', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+        (T 'ConfirmResetText' 'Reset all capture, restore, startup and storage settings? Your exclusion lists will be kept.'),
+        (T 'ConfirmResetTitle' 'Reset settings'), [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
     if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
     try {
         $current = Get-SRConfig
@@ -3517,9 +3810,9 @@ function Reset-StudioSettings {
         $script:SettingsLoaded = $false
         Load-StudioSettings
         Save-StudioSettings
-        Show-StudioToast 'Settings reset to defaults.' $script:P.Green
+        Show-StudioToast (T 'ToastSettingsReset' 'Settings reset to defaults.') $script:P.Green
     } catch {
-        Set-StudioStatus ('Could not reset settings: ' + $_.Exception.Message) $script:P.Red
+        Set-StudioStatus ((T 'ResetSettingsFail' 'Could not reset settings: {0}') -f $_.Exception.Message) $script:P.Red
     }
 }
 
@@ -3528,12 +3821,14 @@ function Layout-StudioSettings {
     $flow = $script:Ui.SettingsFlow
     $flow.Width = $settingsPage.ClientSize.Width
     $flow.Height = [Math]::Max(160, $settingsPage.ClientSize.Height - 70)
+    # Bottom padding keeps scrolled cards from sliding under the fixed
+    # Save/Reset bar, which would cover the last rows of a card.
+    $flow.Padding = New-Object System.Windows.Forms.Padding(24, 24, 24, 82)
     $settingsBar.Top = $settingsPage.ClientSize.Height - 70
     $settingsBar.Width = $settingsPage.ClientSize.Width
-    $cardWidth = [Math]::Max(620, $flow.ClientSize.Width - 52)
-    foreach ($card in $settingsCards) { $card.Width = $cardWidth }
+    [void](Set-StudioVerticalStack -Panel $flow -Cards $settingsCards -Padding 24 -BottomPadding 82 -MinWidth 620)
     $settingsSave.Left = $settingsPage.ClientSize.Width - 184
-    $settingsReset.Left = $settingsSave.Left - 142
+    $settingsReset.Left = $settingsSave.Left - 150
     $settingsStatus.Width = [Math]::Max(200, $settingsReset.Left - 48)
 }
 
@@ -3542,25 +3837,22 @@ function Layout-StudioSettings {
 # ---------------------------------------------------------------------------
 
 $diagnosticsPage = New-StudioPage -Name 'Diagnostics'
-$diagFlow = New-Object System.Windows.Forms.FlowLayoutPanel
+$diagFlow = New-Object System.Windows.Forms.Panel
 $diagFlow.Dock = [System.Windows.Forms.DockStyle]::Fill
 $diagFlow.Padding = New-Object System.Windows.Forms.Padding(24)
 $diagFlow.AutoScroll = $true
-$diagFlow.FlowDirection = [System.Windows.Forms.FlowDirection]::TopDown
-$diagFlow.WrapContents = $false
 $diagFlow.BackColor = $script:P.Bg
 $diagnosticsPage.Controls.Add($diagFlow)
 $script:Ui.DiagFlow = $diagFlow
 
-$diagHealthCard = New-StudioSettingsCard -Title 'System health' -Description 'A local check of snapshots, background protection and browser capture.' -Height 160
+$diagHealthCard = New-StudioSettingsCard -Title (T 'DiagSystemHealth' 'System health') -Description (T 'DiagSysDesc' 'A local check of snapshots, background protection and browser capture.') -Height 180 -WrapDescription
 $diagFlow.Controls.Add($diagHealthCard)
-$diagHealthTitle = New-StudioLabel -Text 'Checking...' -X 20 -Y 70 -Width 500 -Height 30 -Font $script:FontTitle -Color $script:P.Text
-# Long headlines must ellipsize instead of running under the Run checks button.
-$diagHealthTitle.AutoEllipsis = $true
+# Long localized headlines wrap to a second line instead of running under the
+# Run checks button; the detail line follows beneath them.
+$diagHealthTitle = New-StudioLabel -Text (T 'CheckingWord' 'Checking...') -X 20 -Y 60 -Width 500 -Height 64 -Font (New-Object System.Drawing.Font('Segoe UI Semibold', 16)) -Color $script:P.Text
 $diagHealthCard.Controls.Add($diagHealthTitle)
 $script:Ui.DiagHealthTitle = $diagHealthTitle
-$diagHealthDetail = New-StudioLabel -Text 'Reading local status...' -X 20 -Y 108 -Width 520 -Height 32 -Font $script:FontBodySmall -Color $script:P.Muted
-$diagHealthDetail.AutoEllipsis = $true
+$diagHealthDetail = New-StudioLabel -Text (T 'ReadingStatus' 'Reading local status...') -X 20 -Y 122 -Width 520 -Height 34 -Font $script:FontBodySmall -Color $script:P.Muted
 $diagHealthCard.Controls.Add($diagHealthDetail)
 $script:Ui.DiagHealthDetail = $diagHealthDetail
 
@@ -3579,13 +3871,13 @@ $diagRing.CaptionColor = $script:P.Subtle
 $diagHealthCard.Controls.Add($diagRing)
 $script:Ui.DiagRing = $diagRing
 
-$diagRefresh = New-StudioButton -Text 'Run checks' -X 430 -Y 70 -Width 160 -Height 34 -Glyph ([string][char]0xE72C)
+$diagRefresh = New-StudioButton -Text (T 'BtnRunChecks' 'Run checks') -X 430 -Y 140 -Width 204 -Height 34 -Glyph ([string][char]0xE72C)
 $diagRefresh.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
 $diagRefresh.Add_Click({ Refresh-StudioDiagnostics })
 $diagHealthCard.Controls.Add($diagRefresh)
 $script:Ui.DiagRefresh = $diagRefresh
 
-$diagChecksCard = New-StudioSettingsCard -Title 'Checks' -Description 'No cloud services and no account. These checks run against this PC only.' -Height 230
+$diagChecksCard = New-StudioSettingsCard -Title (T 'DiagChecks' 'Checks') -Description (T 'DiagChecksDesc' 'No cloud services and no account. These checks run against this PC only.') -Height 230
 $diagFlow.Controls.Add($diagChecksCard)
 $diagCheckFlow = New-Object System.Windows.Forms.FlowLayoutPanel
 $diagCheckFlow.Location = New-Object System.Drawing.Point(20, 60)
@@ -3599,13 +3891,13 @@ $diagChecksCard.Controls.Add($diagCheckFlow)
 $script:Ui.DiagCheckFlow = $diagCheckFlow
 $script:DiagnosticRows = @()
 
-$diagBrowserCard = New-StudioSettingsCard -Title 'Detected browsers' -Description 'Supported browsers found on this PC. Firefox uses its session store; Chromium browsers use session files plus the live fallback.' -Height 152
+$diagBrowserCard = New-StudioSettingsCard -Title (T 'DiagBrowsers' 'Detected browsers') -Description (T 'DiagBrowsersDesc' 'Supported browsers found on this PC.') -Height 152
 $diagFlow.Controls.Add($diagBrowserCard)
-$diagBrowserLabel = New-StudioLabel -Text 'Checking...' -X 20 -Y 70 -Width 760 -Height 64 -Font $script:FontBodySmall -Color $script:P.Muted
+$diagBrowserLabel = New-StudioLabel -Text (T 'CheckingWord' 'Checking...') -X 20 -Y 70 -Width 760 -Height 64 -Font $script:FontBodySmall -Color $script:P.Muted
 $diagBrowserCard.Controls.Add($diagBrowserLabel)
 $script:Ui.DiagBrowserLabel = $diagBrowserLabel
 
-$diagLogCard = New-StudioSettingsCard -Title 'Activity log' -Description 'The most recent local log entries.' -Height 310
+$diagLogCard = New-StudioSettingsCard -Title (T 'DiagActivityLog' 'Activity log') -Description (T 'DiagLogDesc' 'The most recent local log entries.') -Height 310
 $diagFlow.Controls.Add($diagLogCard)
 $diagLogText = New-StudioTextBox -X 20 -Y 62 -Width 760 -Height 180
 $diagLogText.Multiline = $true
@@ -3618,23 +3910,49 @@ $diagLogText.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Wind
 $diagLogCard.Controls.Add($diagLogText)
 $script:Ui.DiagLogText = $diagLogText
 
-$diagOpenLogs = New-StudioButton -Text 'Open logs' -X 20 -Y 252 -Width 124 -Height 32 -Glyph ([string][char]0xE838)
+$diagOpenLogs = New-StudioButton -Text (T 'BtnOpenLogs' 'Open logs') -X 20 -Y 252 -Width 170 -Height 32 -Glyph ([string][char]0xE838)
 $diagOpenLogs.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
 $diagOpenLogs.Add_Click({ Open-StudioPath (Get-SRLogDirectory) })
 $diagLogCard.Controls.Add($diagOpenLogs)
-$diagCopy = New-StudioButton -Text 'Copy report' -X 154 -Y 252 -Width 132 -Height 32 -Glyph ''
+$diagCopy = New-StudioButton -Text (T 'BtnCopyReport' 'Copy report') -X 200 -Y 252 -Width 132 -Height 32 -Glyph ''
 $diagCopy.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
 $diagCopy.Add_Click({
     try {
         [System.Windows.Forms.Clipboard]::SetText([string]$script:DiagnosticsReport)
-        Show-StudioToast 'Diagnostics report copied.' $script:P.Green
+        Show-StudioToast (T 'ToastReportCopied' 'Diagnostics report copied.') $script:P.Green
     } catch {
-        Show-StudioToast ('Could not copy report: ' + $_.Exception.Message) $script:P.Red
+        Show-StudioToast ((T 'CopyReportFail' 'Could not copy report: {0}') -f $_.Exception.Message) $script:P.Red
     }
 })
 $diagLogCard.Controls.Add($diagCopy)
 
 $diagnosticsPage.Add_Resize({ Layout-StudioDiagnostics })
+
+function Update-StudioDiagnosticRowLayout {
+    # Long details, especially absolute paths, wrap onto a second line instead
+    # of being ellipsized. This keeps every diagnostics check fully readable
+    # at the minimum window size in every language.
+    param($Row)
+    if ($null -eq $Row -or $Row.Controls.Count -lt 2) { return }
+    $message = [string]$Row.Tag
+    $label = $Row.Controls[1]
+    $available = [Math]::Max(80, $Row.Width - 32)
+    $singleLine = [System.Windows.Forms.TextFormatFlags]::SingleLine -bor [System.Windows.Forms.TextFormatFlags]::NoPadding
+    $wordBreak = [System.Windows.Forms.TextFormatFlags]::WordBreak -bor [System.Windows.Forms.TextFormatFlags]::NoPadding
+    $oneLine = [System.Windows.Forms.TextRenderer]::MeasureText($message, $label.Font, (New-Object System.Drawing.Size([int]::MaxValue, 20)), $singleLine)
+    if ($oneLine.Width -le $available) {
+        $Row.Height = 24
+        $label.AutoEllipsis = $true
+        $label.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+        $label.SetBounds(28, 2, $available, 20)
+    } else {
+        $measured = [System.Windows.Forms.TextRenderer]::MeasureText($message, $label.Font, (New-Object System.Drawing.Size($available, [int]::MaxValue)), $wordBreak)
+        $Row.Height = [Math]::Max(40, $measured.Height + 6)
+        $label.AutoEllipsis = $false
+        $label.TextAlign = [System.Drawing.ContentAlignment]::TopLeft
+        $label.SetBounds(28, 3, $available, $Row.Height - 5)
+    }
+}
 
 function Add-StudioDiagnosticRow {
     param([bool]$Ok, [string]$Text, [string]$Detail = '')
@@ -3646,12 +3964,17 @@ function Add-StudioDiagnosticRow {
     $row.Margin = New-Object System.Windows.Forms.Padding(0)
     $iconColor = if ($Ok) { $script:P.Green } else { $script:P.Amber }
     $icon = New-StudioLabel -Text $(if ($Ok) { [string][char]0xE73E } else { [string][char]0xE7BA }) -X 4 -Y 2 -Width 20 -Height 20 -Font (New-Object System.Drawing.Font('Segoe MDL2 Assets', 10)) -Color $iconColor -Align 'MiddleCenter'
+    # The glyph is a single icon, not text. AutoEllipsis would turn it into
+    # a tiny "..." at this width.
+    $icon.AutoEllipsis = $false
     $row.Controls.Add($icon)
     $message = $Text
     if (-not [string]::IsNullOrWhiteSpace($Detail)) { $message += '  —  ' + $Detail }
     $label = New-StudioLabel -Text $message -X 28 -Y 2 -Width ($row.Width - 32) -Height 20 -Font $script:FontBodySmall -Color $script:P.Text
     $label.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
     $row.Controls.Add($label)
+    $row.Tag = $message
+    Update-StudioDiagnosticRowLayout -Row $row
     [void]$script:Ui.DiagCheckFlow.Controls.Add($row)
     $script:DiagnosticRows += $row
 }
@@ -3662,9 +3985,9 @@ function Show-StudioDiagnosticsLoading {
     $script:DiagnosticRows = @()
     $script:Ui.DiagCheckFlow.Controls.Clear()
     $messages = @(
-        'Reading local configuration...',
-        'Checking snapshots and background protection...',
-        'Detecting supported browsers...'
+        (T 'DiagLoadConfig' 'Reading local configuration...'),
+        (T 'DiagLoadSnapshots' 'Checking snapshots and background protection...'),
+        (T 'DiagLoadBrowsers' 'Detecting supported browsers...')
     )
     foreach ($message in $messages) {
         $row = New-Object System.Windows.Forms.Panel
@@ -3680,8 +4003,8 @@ function Show-StudioDiagnosticsLoading {
         [void]$script:Ui.DiagCheckFlow.Controls.Add($row)
         $script:DiagnosticRows += $row
     }
-    $script:Ui.DiagBrowserLabel.Text = 'Checking installed browsers...'
-    $script:Ui.DiagLogText.Text = 'Reading recent activity...'
+    $script:Ui.DiagBrowserLabel.Text = (T 'BrowsersChecking' 'Checking installed browsers...')
+    $script:Ui.DiagLogText.Text = (T 'LogReading' 'Reading recent activity...')
 }
 
 function Render-StudioDiagnostics {
@@ -3720,7 +4043,7 @@ function Render-StudioDiagnostics {
             $script:Ui.DiagHealthTitle.Text = (T 'ProtectionAttention' 'Protection needs attention')
             $script:Ui.DiagHealthTitle.ForeColor = $script:P.Red
         }
-        $script:Ui.DiagHealthDetail.Text = ((T 'DiagSummary' '{0} snapshot(s)  •  {1}  •  {2} browser(s) detected') -f $diag.SnapshotCount, [string]$diag.ScheduleMode, @($diag.Browsers).Count)
+        $script:Ui.DiagHealthDetail.Text = ((T 'DiagSummary' '{0} snapshot(s)  •  {1}  •  {2} browser(s) detected') -f $diag.SnapshotCount, (Get-StudioModeText ([string]$diag.ScheduleMode)), @($diag.Browsers).Count)
 
         foreach ($row in $script:DiagnosticRows) { $row.Dispose() }
         $script:DiagnosticRows = @()
@@ -3741,13 +4064,13 @@ function Render-StudioDiagnostics {
         if ([string]$diag.ScheduleMode -eq 'Not running') {
             $disabledTask = @($diag.ScheduledTasks | Where-Object { -not [bool]$_.Enabled }).Count -gt 0
             $detail = if ($disabledTask) {
-                'The Windows task is disabled. Enable it or start the background app.'
+                (T 'CheckBgTaskDisabled' 'The Windows task is disabled. Enable it or start the background app.')
             } else {
-                'Start the background app from Settings.'
+                (T 'CheckBgStartHint' 'Start the background app from Settings.')
             }
             Add-StudioDiagnosticRow -Ok $false -Text (T 'CheckBgNone' 'Background protection is not running') -Detail $detail
         } else {
-            Add-StudioDiagnosticRow -Ok $true -Text (T 'CheckBgOk' 'Background protection is active') -Detail ([string]$diag.ScheduleMode)
+            Add-StudioDiagnosticRow -Ok $true -Text (T 'CheckBgOk' 'Background protection is active') -Detail (Get-StudioModeText ([string]$diag.ScheduleMode))
         }
         if (@($diag.Browsers).Count -gt 0) {
             Add-StudioDiagnosticRow -Ok $true -Text (T 'CheckBrowsersOk' 'Supported browsers detected') -Detail (@($diag.Browsers | ForEach-Object { $_.Name }) -join ', ')
@@ -3766,7 +4089,7 @@ function Render-StudioDiagnostics {
 
         $browsers = @($diag.Browsers)
         if ($browsers.Count -eq 0) {
-            $script:Ui.DiagBrowserLabel.Text = 'No supported browsers were detected. Session Recovery will still capture apps and folders.'
+            $script:Ui.DiagBrowserLabel.Text = (T 'NoBrowsersDetected' 'No supported browsers were detected. Session Recovery will still capture apps and folders.')
         } else {
             $script:Ui.DiagBrowserLabel.Text = ($browsers | ForEach-Object { '{0}  —  {1}' -f $_.Name, $_.Exe }) -join "`r`n"
         }
@@ -3776,7 +4099,7 @@ function Render-StudioDiagnostics {
             $log = @(Get-Content -LiteralPath $logPath -Tail 160 -ErrorAction SilentlyContinue)
             $script:Ui.DiagLogText.Text = ($log -join "`r`n")
         } else {
-            $script:Ui.DiagLogText.Text = 'No log file yet. Once a snapshot or restore runs, activity appears here.'
+            $script:Ui.DiagLogText.Text = (T 'NoLogYet' 'No log file yet. Once a snapshot or restore runs, activity appears here.')
         }
         $script:DiagnosticsReport = @(
             'Session Recovery diagnostics',
@@ -3793,7 +4116,7 @@ function Render-StudioDiagnostics {
         ) -join "`r`n"
         Layout-StudioDiagnostics
     } catch {
-        $script:Ui.DiagHealthTitle.Text = 'Diagnostics could not run'
+        $script:Ui.DiagHealthTitle.Text = (T 'DiagFailed' 'Diagnostics could not run')
         $script:Ui.DiagHealthTitle.ForeColor = $script:P.Red
         $script:Ui.DiagHealthDetail.Text = $_.Exception.Message
         $script:Ui.DiagRing.Value = 0
@@ -3872,7 +4195,7 @@ function Start-StudioDiagnosticsRefresh {
         $script:DiagnosticsLoading = $false
         Stop-StudioDiagnosticsLoading
         $script:DiagnosticsDirty = $true
-        $script:Ui.DiagHealthTitle.Text = 'Diagnostics could not start'
+        $script:Ui.DiagHealthTitle.Text = (T 'DiagStartFailed' 'Diagnostics could not start')
         $script:Ui.DiagHealthTitle.ForeColor = $script:P.Red
         $script:Ui.DiagHealthDetail.Text = $_.Exception.Message
     }
@@ -3888,7 +4211,7 @@ function Complete-StudioDiagnosticsWorker {
     Stop-StudioDiagnosticsLoading
     if (-not [string]::IsNullOrWhiteSpace([string]$Result.Error)) {
         $script:DiagnosticsDirty = $true
-        $script:Ui.DiagHealthTitle.Text = 'Diagnostics could not run'
+        $script:Ui.DiagHealthTitle.Text = (T 'DiagFailed' 'Diagnostics could not run')
         $script:Ui.DiagHealthTitle.ForeColor = $script:P.Red
         $script:Ui.DiagHealthDetail.Text = [string]$Result.Error
         $script:Ui.DiagRing.Value = 0
@@ -3902,7 +4225,7 @@ function Complete-StudioDiagnosticsWorker {
         Render-StudioDiagnostics -Diag $diag
     } catch {
         $script:DiagnosticsDirty = $true
-        $script:Ui.DiagHealthTitle.Text = 'Diagnostics could not run'
+        $script:Ui.DiagHealthTitle.Text = (T 'DiagFailed' 'Diagnostics could not run')
         $script:Ui.DiagHealthTitle.ForeColor = $script:P.Red
         $script:Ui.DiagHealthDetail.Text = $_.Exception.Message
         $script:Ui.DiagRing.Value = 0
@@ -3912,21 +4235,35 @@ function Complete-StudioDiagnosticsWorker {
 
 function Layout-StudioDiagnostics {
     if (-not $script:Ui.DiagFlow) { return }
-    $width = [Math]::Max(620, $script:Ui.DiagFlow.ClientSize.Width - 52)
-    $diagHealthCard.Width = $width
-    $diagChecksCard.Width = $width
-    $diagBrowserCard.Width = $width
-    $diagLogCard.Width = $width
-    # Ring and button sit at the right edge; the headline and detail texts
-    # must stop well before the button so long headlines can never run
-    # underneath it.
+    $width = Set-StudioVerticalStack -Panel $script:Ui.DiagFlow -Cards @($diagHealthCard, $diagChecksCard, $diagBrowserCard, $diagLogCard) -Padding 24 -BottomPadding 24 -MinWidth 620
+    # Ring at the right edge, with the Run checks button beneath it. The
+    # headline and description may use the full width beside the ring, so
+    # every translated headline still fits on one line. The detail summary
+    # shares the button band and stops before it.
     $diagRing.Left = $width - $diagRing.Width - 26
     $diagRing.Top = [Math]::Max(12, [int](($diagHealthCard.Height - $diagRing.Height) / 2))
     $diagRefresh.Left = $diagRing.Left - $diagRefresh.Width - 16
-    $diagRefresh.Top = $diagRing.Top + [int](($diagRing.Height - $diagRefresh.Height) / 2)
+    $diagRefresh.Top = 140
     $textWidth = [Math]::Max(200, $diagRefresh.Left - 40)
-    $diagHealthTitle.Width = $textWidth
+    $fullTextWidth = [Math]::Max(200, $diagRing.Left - 40)
+    $diagHealthTitle.Width = $fullTextWidth
     $diagHealthDetail.Width = $textWidth
+    # The health card's static description is anchored left/right by the
+    # card helper; detach the right anchor so the ring's width is genuinely
+    # reserved.
+    $healthDescription = $null
+    foreach ($child in @($diagHealthCard.Controls)) {
+        if ($child -is [System.Windows.Forms.Label] -and (($child.Anchor -band [System.Windows.Forms.AnchorStyles]::Right) -eq [System.Windows.Forms.AnchorStyles]::Right)) {
+            $healthDescription = $child
+            break
+        }
+    }
+    if ($null -ne $healthDescription) {
+        $healthDescription.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left
+        $healthDescription.Width = $fullTextWidth
+    }
+    $diagHealthTitle.Top = 76
+    $diagHealthDetail.Top = 140
     $diagCheckFlow.Width = [Math]::Max(200, $width - 40)
     $diagBrowserLabel.Width = [Math]::Max(200, $width - 40)
     $diagLogText.Width = [Math]::Max(200, $width - 40)
@@ -3935,6 +4272,7 @@ function Layout-StudioDiagnostics {
     $diagCopy.Top = $diagLogCard.Height - 42
     foreach ($row in $script:DiagnosticRows) {
         $row.Width = [Math]::Max(200, $diagCheckFlow.ClientSize.Width - 8)
+        Update-StudioDiagnosticRowLayout -Row $row
     }
 }
 
@@ -3943,12 +4281,10 @@ function Layout-StudioDiagnostics {
 # ---------------------------------------------------------------------------
 
 $aboutPage = New-StudioPage -Name 'About'
-$aboutFlow = New-Object System.Windows.Forms.FlowLayoutPanel
+$aboutFlow = New-Object System.Windows.Forms.Panel
 $aboutFlow.Dock = [System.Windows.Forms.DockStyle]::Fill
 $aboutFlow.Padding = New-Object System.Windows.Forms.Padding(24)
 $aboutFlow.AutoScroll = $true
-$aboutFlow.FlowDirection = [System.Windows.Forms.FlowDirection]::TopDown
-$aboutFlow.WrapContents = $false
 $aboutFlow.BackColor = $script:P.Bg
 $aboutPage.Controls.Add($aboutFlow)
 $script:Ui.AboutFlow = $aboutFlow
@@ -3968,64 +4304,63 @@ if ($script:IconPath) {
 $aboutHero.Controls.Add($aboutIcon)
 $aboutName = New-StudioLabel -Text 'Session Recovery' -X 110 -Y 26 -Width 460 -Height 40 -Font (New-Object System.Drawing.Font('Segoe UI Semibold', 24)) -Color $script:P.Text
 $aboutHero.Controls.Add($aboutName)
-$aboutTagline = New-StudioLabel -Text 'Your session, exactly as you left it.' -X 112 -Y 67 -Width 460 -Height 20 -Font $script:FontBody -Color $script:P.Muted
+$aboutTagline = New-StudioLabel -Text (T 'SubDashboard' 'Your session, exactly as you left it.') -X 112 -Y 67 -Width 460 -Height 20 -Font $script:FontBody -Color $script:P.Muted
 $aboutHero.Controls.Add($aboutTagline)
-$aboutVersion = New-StudioBadge -Text ('VERSION ' + $script:AppVersion) -Width 128 -Height 24 -Fill $script:P.AccentSoft -TextColor $script:P.Accent
+$aboutVersion = New-StudioBadge -Text ((T 'AboutVersionLabel' 'VERSION') + ' ' + $script:AppVersion) -Width 128 -Height 24 -Fill $script:P.AccentSoft -TextColor $script:P.Accent
 $aboutVersion.Location = New-Object System.Drawing.Point(112, 98)
 $aboutHero.Controls.Add($aboutVersion)
-$aboutGithub = New-StudioButton -Text 'View on GitHub' -X 24 -Y 128 -Width 150 -Height 34 -Glyph ''
+$aboutGithub = New-StudioButton -Text (T 'BtnViewGithub' 'View on GitHub') -X 24 -Y 128 -Width 150 -Height 34 -Glyph ''
 $aboutGithub.Add_Click({ Start-Process 'https://github.com/Bilalmesk/session-recovery' | Out-Null })
 $aboutHero.Controls.Add($aboutGithub)
-$aboutCopy = New-StudioButton -Text 'Copy diagnostics' -X 184 -Y 128 -Width 160 -Height 34 -Glyph ''
+$aboutCopy = New-StudioButton -Text (T 'BtnCopyDiagnostics' 'Copy diagnostics') -X 184 -Y 128 -Width 180 -Height 34 -Glyph ''
 $aboutCopy.Add_Click({
     try {
         $report = if ($script:DiagnosticsReport) { [string]$script:DiagnosticsReport } else { 'Session Recovery ' + $script:AppVersion }
         [System.Windows.Forms.Clipboard]::SetText($report)
-        Show-StudioToast 'Diagnostics report copied.' $script:P.Green
+        Show-StudioToast (T 'ToastReportCopied' 'Diagnostics report copied.') $script:P.Green
     } catch {
-        Show-StudioToast ('Could not copy: ' + $_.Exception.Message) $script:P.Red
+        Show-StudioToast ((T 'UpdateCopyFail' 'Could not copy: {0}') -f $_.Exception.Message) $script:P.Red
     }
 })
 $aboutHero.Controls.Add($aboutCopy)
 
-$aboutLocal = New-StudioSettingsCard -Title 'Local by design' -Description 'No account, no cloud service and no telemetry.' -Height 160
+$aboutLocal = New-StudioSettingsCard -Title (T 'AboutLocalTitle' 'Local by design') -Description (T 'AboutLocalDesc' 'No account, no cloud service and no telemetry.') -Height 180
 $aboutFlow.Controls.Add($aboutLocal)
-$aboutLocalText = New-StudioLabel -Text "Snapshots are plain JSON files in your Windows profile. Browser tabs are read locally, and restore opens apps and folders without rewriting files.`r`n`r`nThe background app keeps capturing while you work. Everything can be inspected, backed up or deleted from this Studio." -X 20 -Y 64 -Width 740 -Height 80 -Font $script:FontBody -Color $script:P.Muted
+$aboutLocalText = New-StudioLabel -Text (T 'AboutLocalText' "Snapshots are plain JSON files in your Windows profile. Browser tabs are read locally, and restore opens apps and folders without rewriting files.`r`n`r`nThe background app keeps capturing while you work. Everything can be inspected, backed up or deleted from this Studio.") -X 20 -Y 64 -Width 740 -Height 100 -Font $script:FontBody -Color $script:P.Muted
 $aboutLocal.Controls.Add($aboutLocalText)
 
-$aboutNew = New-StudioSettingsCard -Title 'What is new in 2.5' -Description 'Visual snapshots, dev workspace restore and crash facts.' -Height 214
+$aboutNew = New-StudioSettingsCard -Title ((T 'WhatsNewTitle' 'What is new in {0}') -f $script:AppVersion) -Description (T 'WhatsNewDesc' 'Fixed text layout in every language, and closed privacy gaps.') -Height 260
 $aboutFlow.Controls.Add($aboutNew)
-$aboutNewText = New-StudioLabel -Text "• Window thumbnails (opt-in): the timeline can show what your screen looked like, not just names.`r`n• Dev workspace restore: VS Code, Cursor, JetBrains and Windows Terminal folders reopen automatically.`r`n• The restore window now says why Windows stopped: power loss, blue screen or clean restart.`r`n• Office AutoRecover files are listed after a crash, pointing straight at recoverable work.`r`n• Named workspaces in the tray: save 'Work' or 'Study' and restore them in one click.`r`n• Smart capture: event snapshots on lock, sleep and low battery; unchanged moments are skipped.`r`n• URL query strings are stripped by default, and snapshots can be gzip-compressed.`r`n• Nine languages and fourteen themes carry over from 2.4." -X 20 -Y 64 -Width 740 -Height 150 -Font $script:FontBody -Color $script:P.Muted
+$aboutNewText = New-StudioLabel -Text (T 'AboutWhatsNewText' "• Text no longer runs into other controls: labels ellipsize and badges resize in all nine languages.`r`n• Snapshots can be sealed with DPAPI encryption; gzip files now respect retention.`r`n• Virtual desktops are remembered per window and restored when possible.`r`n• Windows from unplugged monitors are mapped onto the current layout, not clamped.`r`n• PuTTY sessions and Remote Desktop targets reconnect directly on restore.`r`n• mpv reports exact playback positions through its IPC pipe.`r`n• Launch ordering rules, a restore preview, snapshot compare and a control pipe.`r`n• Pester tests and GitHub Actions CI build and verify every change.") -X 20 -Y 64 -Width 740 -Height 170 -Font $script:FontBody -Color $script:P.Muted
 $aboutNew.Controls.Add($aboutNewText)
 
-$aboutUpdates = New-StudioSettingsCard -Title 'Application updates' -Description 'Check the private GitHub release channel for a newer build.' -Height 218
+$aboutUpdates = New-StudioSettingsCard -Title (T 'SetUpdates' 'Application updates') -Description (T 'SetUpdatesDesc' 'Check the private GitHub release channel for a newer build.') -Height 240
 $aboutFlow.Controls.Add($aboutUpdates)
-$updateStatus = New-StudioLabel -Text ('You are running version {0}. Check for a newer build without leaving the Studio.' -f $script:AppVersion) -X 20 -Y 64 -Width 740 -Height 42 -Font $script:FontBody -Color $script:P.Muted
+$updateStatus = New-StudioLabel -Text ((T 'AboutVersionLine' 'You are running version {0}. Check for a newer build without leaving the Studio.') -f $script:AppVersion) -X 20 -Y 64 -Width 740 -Height 58 -Font $script:FontBody -Color $script:P.Muted
 $aboutUpdates.Controls.Add($updateStatus)
-$updateDetail = New-StudioLabel -Text '' -X 20 -Y 108 -Width 740 -Height 36 -Font $script:FontBodySmall -Color $script:P.Subtle
+$updateDetail = New-StudioLabel -Text '' -X 20 -Y 126 -Width 740 -Height 38 -Font $script:FontBodySmall -Color $script:P.Subtle
 $aboutUpdates.Controls.Add($updateDetail)
-$updateCheck = New-StudioButton -Text 'Check for updates' -X 20 -Y 156 -Width 172 -Height 34 -Glyph ([string][char]0xE895)
+$updateCheck = New-StudioButton -Text (T 'BtnCheckUpdates' 'Check for updates') -X 20 -Y 178 -Width 190 -Height 34 -Glyph ''
 $aboutUpdates.Controls.Add($updateCheck)
-$updateInstall = New-StudioButton -Text 'Download and install' -X 204 -Y 156 -Width 188 -Height 34 -Glyph ([string][char]0xE896)
+$updateInstall = New-StudioButton -Text (T 'BtnDownloadInstall' 'Download and install') -X 226 -Y 178 -Width 200 -Height 34 -Glyph ''
 $updateInstall.Visible = $false
 $aboutUpdates.Controls.Add($updateInstall)
-$updateRelease = New-StudioButton -Text 'Release notes' -X 404 -Y 156 -Width 146 -Height 34 -Glyph ([string][char]0xE8A7)
+$updateRelease = New-StudioButton -Text (T 'BtnReleaseNotes' 'Release notes') -X 442 -Y 178 -Width 156 -Height 34 -Glyph ''
 $updateRelease.Visible = $false
 $aboutUpdates.Controls.Add($updateRelease)
 
-$aboutData = New-StudioSettingsCard -Title 'Data & support' -Description 'Session Recovery is private and local. These are the only places it writes.' -Height 188
+$aboutData = New-StudioSettingsCard -Title (T 'AboutDataTitle' 'Data & support') -Description (T 'AboutDataDesc' 'Session Recovery is private and local. These are the only places it writes.') -Height 210
 $aboutFlow.Controls.Add($aboutData)
-$aboutDataText = New-StudioLabel -Text '' -X 20 -Y 64 -Width 740 -Height 74 -Font $script:FontMono -Color $script:P.Muted
+$aboutDataText = New-StudioLabel -Text '' -X 20 -Y 64 -Width 740 -Height 84 -Font $script:FontMono -Color $script:P.Muted
 $aboutData.Controls.Add($aboutDataText)
-$aboutDataText.Text = ('DATA     {0}' -f (Get-SRRoot)) + "`r`n" + ('CONFIG   {0}' -f (Get-SRConfigPath)) + "`r`n" + ('SNAPSHOTS {0}' -f (Get-SRSnapshotDirectory))
-$aboutDataOpen = New-StudioButton -Text 'Open data folder' -X 20 -Y 140 -Width 160 -Height 32 -Glyph ([string][char]0xE838)
+$aboutDataText.Text = ((T 'AboutDataLabelData' 'DATA') + '     ' + (Get-SRRoot)) + "`r`n" + ((T 'AboutDataLabelConfig' 'CONFIG') + '   ' + (Get-SRConfigPath)) + "`r`n" + ((T 'AboutDataLabelSnapshots' 'SNAPSHOTS') + ' ' + (Get-SRSnapshotDirectory))
+$aboutDataOpen = New-StudioButton -Text (T 'BtnOpenData' 'Open data folder') -X 20 -Y 158 -Width 220 -Height 32 -Glyph ([string][char]0xE838)
 $aboutDataOpen.Add_Click({ Open-StudioPath (Get-SRRoot) })
 $aboutData.Controls.Add($aboutDataOpen)
 
-$aboutFooter = New-StudioLabel -Text ('Session Recovery {0}  •  MIT licensed  •  made for Windows 10 and 11' -f $script:AppVersion) -X 0 -Y 0 -Width 800 -Height 18 -Font $script:FontBodySmall -Color $script:P.Subtle
+$aboutFooter = New-StudioLabel -Text ((T 'AboutFooterNote' 'Session Recovery {0}  •  MIT licensed  •  made for Windows 10 and 11') -f $script:AppVersion) -X 0 -Y 0 -Width 800 -Height 18 -Font $script:FontBodySmall -Color $script:P.Subtle
 $aboutFooter.Margin = New-Object System.Windows.Forms.Padding(0, 2, 0, 0)
 $aboutFlow.Controls.Add($aboutFooter)
-$aboutFlow.Controls.SetChildIndex($aboutUpdates, 1)
 
 $script:Ui.UpdateStatus = $updateStatus
 $script:Ui.UpdateDetail = $updateDetail
@@ -4053,7 +4388,7 @@ function Start-StudioUpdateCheck {
     $script:Ui.UpdateCheck.Enabled = $false
     $script:Ui.UpdateInstall.Visible = $false
     $script:Ui.UpdateRelease.Visible = $false
-    Set-StudioUpdateStatus -Text 'Checking GitHub Releases...' -Color $script:P.Accent -Detail 'The check runs in the background and never uploads snapshots.'
+    Set-StudioUpdateStatus -Text (T 'UpdateChecking' 'Checking GitHub Releases...') -Color $script:P.Accent -Detail (T 'UpdateCheckDetail' 'The check runs in the background and never uploads snapshots.')
     try {
         Start-StudioWorker -Name 'Update' -Script {
             param($modulePath, $currentVersion, $action, $payload)
@@ -4068,7 +4403,7 @@ function Start-StudioUpdateCheck {
     } catch {
         $script:UpdateBusy = $false
         $script:Ui.UpdateCheck.Enabled = $true
-        Set-StudioUpdateStatus -Text 'Could not start the update check.' -Color $script:P.Red -Detail $_.Exception.Message
+        Set-StudioUpdateStatus -Text (T 'UpdateCheckStartFail' 'Could not start the update check.') -Color $script:P.Red -Detail $_.Exception.Message
     }
 }
 
@@ -4083,7 +4418,7 @@ function Start-StudioUpdateDownload {
     $script:UpdateBusy = $true
     $script:Ui.UpdateCheck.Enabled = $false
     $script:Ui.UpdateInstall.Enabled = $false
-    Set-StudioUpdateStatus -Text ('Downloading version {0}...' -f $script:AvailableUpdate.LatestVersion) -Color $script:P.Accent -Detail 'The MSI will be checked against the release SHA256 before installation.'
+    Set-StudioUpdateStatus -Text ((T 'UpdateDownloading' 'Downloading version {0}...') -f $script:AvailableUpdate.LatestVersion) -Color $script:P.Accent -Detail (T 'UpdateDownloadDetail' 'The MSI will be checked against the release SHA256 before installation.')
     try {
         $payload = $script:AvailableUpdate | ConvertTo-Json -Depth 8 -Compress
         Start-StudioWorker -Name 'Update' -Script {
@@ -4100,7 +4435,7 @@ function Start-StudioUpdateDownload {
         $script:UpdateBusy = $false
         $script:Ui.UpdateCheck.Enabled = $true
         $script:Ui.UpdateInstall.Enabled = $true
-        Set-StudioUpdateStatus -Text 'Could not start the update download.' -Color $script:P.Red -Detail $_.Exception.Message
+        Set-StudioUpdateStatus -Text (T 'UpdateDownloadStartFail' 'Could not start the update download.') -Color $script:P.Red -Detail $_.Exception.Message
     }
 }
 
@@ -4110,13 +4445,13 @@ function Install-StudioUpdatePackage {
         [string]$Version = ''
     )
     if (-not (Test-Path -LiteralPath $MsiPath -PathType Leaf)) {
-        Set-StudioUpdateStatus -Text 'The downloaded update package is missing.' -Color $script:P.Red -Detail 'Check again to download a fresh copy.'
+        Set-StudioUpdateStatus -Text (T 'UpdatePackageMissing' 'The downloaded update package is missing.') -Color $script:P.Red -Detail (T 'UpdateCheckAgain' 'Check again to download a fresh copy.')
         return
     }
     $script:UpdateInstalling = $true
     $script:Ui.UpdateCheck.Enabled = $false
     $script:Ui.UpdateInstall.Enabled = $false
-    Set-StudioUpdateStatus -Text ('Starting the Windows installer for {0}...' -f $Version) -Color $script:P.Accent -Detail 'The Studio will close while the update installs. Snapshots and settings are preserved.'
+    Set-StudioUpdateStatus -Text ((T 'UpdateInstalling' 'Starting the Windows installer for {0}...') -f $Version) -Color $script:P.Accent -Detail (T 'UpdateInstallDetail' 'The Studio will close while the update installs. Snapshots and settings are preserved.')
     [System.Windows.Forms.Application]::DoEvents()
     try {
         Start-SRUpdateInstall -MsiPath $MsiPath | Out-Null
@@ -4125,7 +4460,7 @@ function Install-StudioUpdatePackage {
         $script:UpdateInstalling = $false
         $script:Ui.UpdateCheck.Enabled = $true
         $script:Ui.UpdateInstall.Enabled = $true
-        Set-StudioUpdateStatus -Text 'The update could not be started.' -Color $script:P.Red -Detail $_.Exception.Message
+        Set-StudioUpdateStatus -Text (T 'UpdateInstallFail' 'The update could not be started.') -Color $script:P.Red -Detail $_.Exception.Message
     }
 }
 
@@ -4133,14 +4468,14 @@ function Confirm-StudioUpdateInstall {
     if ($null -eq $script:DownloadedUpdate) { return }
     $version = [string]$script:DownloadedUpdate.Version
     $answer = [System.Windows.Forms.MessageBox]::Show(
-        ("Version {0} is downloaded and its SHA256 hash matches the release.`r`n`r`nInstall now? The Studio will close while the per-user MSI updates the app. Your snapshots, settings and exclusions are kept." -f $version),
-        'Install Session Recovery update',
+        ((T 'UpdateConfirmText' "Version {0} is downloaded and its SHA256 hash matches the release.`r`n`r`nInstall now? The Studio will close while the per-user MSI updates the app. Your snapshots, settings and exclusions are kept.") -f $version),
+        (T 'UpdateConfirmTitle' 'Install Session Recovery update'),
         [System.Windows.Forms.MessageBoxButtons]::YesNo,
         [System.Windows.Forms.MessageBoxIcon]::Question)
     if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) {
         Install-StudioUpdatePackage -MsiPath $script:DownloadedUpdate.MsiPath -Version $version
     } else {
-        Set-StudioUpdateStatus -Text ('Version {0} is ready to install.' -f $version) -Color $script:P.Green -Detail 'Click Install update when you are ready. The downloaded package stays in your profile.'
+        Set-StudioUpdateStatus -Text ((T 'UpdateReady' 'Version {0} is ready to install.') -f $version) -Color $script:P.Green -Detail (T 'UpdateReadyDetail' 'Click Install update when you are ready. The downloaded package stays in your profile.')
     }
 }
 
@@ -4158,43 +4493,43 @@ function Complete-StudioUpdateWorker {
     } catch { }
 
     if ($null -eq $data) {
-        $message = if (-not [string]::IsNullOrWhiteSpace([string]$Result.Error)) { [string]$Result.Error } else { 'The update service returned no result.' }
-        Set-StudioUpdateStatus -Text 'Could not check for updates.' -Color $script:P.Red -Detail $message
+        $message = if (-not [string]::IsNullOrWhiteSpace([string]$Result.Error)) { [string]$Result.Error } else { (T 'UpdateNoResult' 'The update service returned no result.') }
+        Set-StudioUpdateStatus -Text (T 'UpdateCheckFail' 'Could not check for updates.') -Color $script:P.Red -Detail $message
         return
     }
 
     if ($action -eq 'check') {
         if (-not [bool]$data.Ok) {
             $hint = if ($data.PSObject.Properties['Hint'] -and -not [string]::IsNullOrWhiteSpace([string]$data.Hint)) { [string]$data.Hint } else { [string]$data.Error }
-            Set-StudioUpdateStatus -Text 'Could not check for updates.' -Color $script:P.Red -Detail $hint
+            Set-StudioUpdateStatus -Text (T 'UpdateCheckFail' 'Could not check for updates.') -Color $script:P.Red -Detail $hint
             return
         }
         if ([bool]$data.HasUpdate) {
             if ([string]::IsNullOrWhiteSpace([string]$data.MsiName) -or [string]::IsNullOrWhiteSpace([string]$data.ShaName)) {
                 $script:AvailableUpdate = $data
                 $script:Ui.UpdateRelease.Visible = $true
-                Set-StudioUpdateStatus -Text ('Version {0} is available, but the release is incomplete.' -f $data.LatestVersion) -Color $script:P.Amber -Detail 'The release needs both a SessionRecovery MSI and a .msi.sha256 asset before the Studio can install it.'
+                Set-StudioUpdateStatus -Text ((T 'UpdateIncomplete' 'Version {0} is available, but the release is incomplete.') -f $data.LatestVersion) -Color $script:P.Amber -Detail (T 'UpdateIncompleteDetail' 'The release needs both a SessionRecovery MSI and a .msi.sha256 asset before the Studio can install it.')
                 return
             }
             $script:AvailableUpdate = $data
-            $script:Ui.UpdateInstall.Text = 'Download and install'
+            $script:Ui.UpdateInstall.Text = (T 'BtnDownloadInstall' 'Download and install')
             $script:Ui.UpdateInstall.Visible = $true
             $script:Ui.UpdateRelease.Visible = $true
-            Set-StudioUpdateStatus -Text ('Version {0} is available.' -f $data.LatestVersion) -Color $script:P.Green -Detail ([string]$data.Name)
+            Set-StudioUpdateStatus -Text ((T 'UpdateAvailable' 'Version {0} is available.') -f $data.LatestVersion) -Color $script:P.Green -Detail ([string]$data.Name)
         } else {
-            Set-StudioUpdateStatus -Text 'You are up to date.' -Color $script:P.Green -Detail ('Version {0} is the latest release.' -f $data.LatestVersion)
+            Set-StudioUpdateStatus -Text (T 'UpdateUpToDate' 'You are up to date.') -Color $script:P.Green -Detail ((T 'UpdateLatest' 'Version {0} is the latest release.') -f $data.LatestVersion)
         }
         return
     }
 
     if (-not [bool]$data.Ok) {
-        Set-StudioUpdateStatus -Text 'The update download failed.' -Color $script:P.Red -Detail ([string]$data.Error)
+        Set-StudioUpdateStatus -Text (T 'UpdateDownloadFail' 'The update download failed.') -Color $script:P.Red -Detail ([string]$data.Error)
         return
     }
     $script:DownloadedUpdate = $data
-    $script:Ui.UpdateInstall.Text = 'Install update'
+    $script:Ui.UpdateInstall.Text = (T 'UpdateInstallButton' 'Install update')
     $script:Ui.UpdateInstall.Visible = $true
-    Set-StudioUpdateStatus -Text ('Version {0} is downloaded and verified.' -f $data.Version) -Color $script:P.Green -Detail 'SHA256 verified. The installer keeps your snapshots, settings and exclusions.'
+    Set-StudioUpdateStatus -Text ((T 'UpdateVerified' 'Version {0} is downloaded and verified.') -f $data.Version) -Color $script:P.Green -Detail (T 'UpdateVerifiedDetail' 'SHA256 verified. The installer keeps your snapshots, settings and exclusions.')
     Confirm-StudioUpdateInstall
 }
 
@@ -4208,12 +4543,7 @@ $updateRelease.Add_Click({
 
 function Layout-StudioAbout {
     if (-not $script:Ui.AboutFlow) { return }
-    $width = [Math]::Max(620, $script:Ui.AboutFlow.ClientSize.Width - 52)
-    $aboutHero.Width = $width
-    $aboutLocal.Width = $width
-    $aboutNew.Width = $width
-    $aboutUpdates.Width = $width
-    $aboutData.Width = $width
+    $width = Set-StudioVerticalStack -Panel $script:Ui.AboutFlow -Cards @($aboutHero, $aboutUpdates, $aboutLocal, $aboutNew, $aboutData, $aboutFooter) -Padding 24 -BottomPadding 24 -MinWidth 620
     $aboutLocalText.Width = $width - 40
     $aboutNewText.Width = $width - 40
     $updateStatus.Width = $width - 40
@@ -4258,6 +4588,10 @@ function Layout-StudioHeader {
         $right = $refreshButton.Left - 16
     }
     $localBadge.Left = $right - $localBadge.Width
+    # The page title must stop before the status badge. Its old fixed width
+    # let long translated headers (and the wider RTL badge labels) share the
+    # same pixels even when the visible text was short.
+    $pageTitle.Width = [Math]::Max(300, $localBadge.Left - 44)
 }
 
 function Layout-StudioDashboard {
@@ -4266,6 +4600,11 @@ function Layout-StudioDashboard {
     $height = $dashboard.ClientSize.Height
     $hero.Width = $width - 48
     $heroRing.Left = $hero.Width - 158
+    # Long translations wrap onto a second line, then stop before the ring.
+    $heroSub.Width = [Math]::Max(240, $hero.Width - 220)
+    $heroSub.Height = 36
+    $heroLast.Width = [Math]::Max(240, $hero.Width - 200)
+    $heroNext.Width = [Math]::Max(240, $hero.Width - 200)
     $statRow.Width = $width - 48
     $cards = @($statSnapshots, $statApps, $statTabs, $statStorage)
     $gap = 14
@@ -4288,7 +4627,7 @@ function Layout-StudioDashboard {
     $quickCard.Top = $lowerTop
     $quickCard.Width = $quickWidth
     $quickCard.Height = $lowerHeight
-    $recentViewAll.Left = $recentCard.Width - 118
+    $recentViewAll.Left = $recentCard.Width - 178
     $recentFlow.Width = $recentCard.Width - 32
     $recentFlow.Height = [Math]::Max(72, $lowerHeight - 94)
     $recentSpark.Top = $lowerHeight - 42
@@ -4308,14 +4647,56 @@ function Layout-StudioSnapshots {
     $width = $snapshotsPage.ClientSize.Width
     $height = $snapshotsPage.ClientSize.Height
     $snapToolbar.Width = $width - 48
-    $snapRefresh.Left = $snapToolbar.Width - 120
-    $snapOpenFolder.Left = $snapRefresh.Left - 128
-    $snapCount.Width = [Math]::Max(80, $snapOpenFolder.Left - 456)
-    $snapExport.Left = [Math]::Max(220, $snapListCard.ClientSize.Width - 118)
-    $snapImport.Left = [Math]::Max(116, $snapExport.Left - 108)
+    # Right-align the toolbar actions first, then give the search/filter the
+    # room that is left. The snapshot count is the first thing to go when the
+    # window is too narrow for all five controls.
+    $right = $snapToolbar.Width - 28
+    $snapRefresh.Left = $right - $snapRefresh.Width
+    $right = $snapRefresh.Left - 12
+    $snapOpenFolder.Left = $right - $snapOpenFolder.Width
+    $right = $snapOpenFolder.Left - 12
+    $available = $right - 16
+    if ($available -ge 540) {
+        $searchWidth = 230
+        $filterWidth = 170
+    } else {
+        $searchWidth = 190
+        $filterWidth = 150
+    }
+    $snapSearch.Width = $searchWidth
+    $snapFilter.Left = 16 + $searchWidth + 12
+    $snapFilter.Width = $filterWidth
+    $snapCount.Left = $snapFilter.Left + $filterWidth + 12
+    $countWidth = $right - $snapCount.Left
+    $snapCount.Visible = ($countWidth -ge 96)
+    $snapCount.Width = [Math]::Max(80, $countWidth)
     $snapSplit.Location = New-Object System.Drawing.Point(24, 90)
     $snapSplit.Size = New-Object System.Drawing.Size(($width - 48), [Math]::Max(260, $height - 110))
+    # On very narrow splits two labelled buttons leave no room for the
+    # timeline heading. Keep the glyph buttons and free the header room.
+    $listWidth = [Math]::Max(320, $snapSplit.Panel1.ClientSize.Width)
+    $compactList = $listWidth -lt 440
+    if ($compactList) {
+        $snapExport.Text = ''
+        $snapExport.Width = 44
+        $snapImport.Text = ''
+        $snapImport.Width = 44
+    } else {
+        $snapExport.Text = (T 'BtnExport' 'Export')
+        $snapExport.Width = 120
+        $snapImport.Text = (T 'BtnImport' 'Import')
+        $snapImport.Width = 120
+    }
+    $snapExport.Left = $listWidth - 18 - $snapExport.Width
+    $snapImport.Left = $snapExport.Left - 12 - $snapImport.Width
+    $headingRoom = [Math]::Max(80, $snapImport.Left - 26)
+    $snapListHeading.Width = [Math]::Min(260, $headingRoom)
+    $snapListHint.Width = [Math]::Min(260, $headingRoom)
     $rowWidth = [Math]::Max(300, $snapFlow.ClientSize.Width - 22)
+    # The empty-state text belongs to the list panel. Keep it inside the
+    # splitter at the minimum window size instead of letting it run under the
+    # detail card.
+    if ($script:Ui.SnapEmpty) { $script:Ui.SnapEmpty.Width = [Math]::Max(160, $listWidth - 36) }
     if ($script:LastSnapFlowWidth -eq $rowWidth) { return }
     $script:LastSnapFlowWidth = $rowWidth
     if ($script:CurrentPage -eq 'Snapshots') {
@@ -4422,7 +4803,213 @@ function Show-StudioPage {
         'Settings' { if (-not $script:SettingsLoaded) { Load-StudioSettings } }
         'Diagnostics' { if ($firstShow -or $script:DiagnosticsDirty) { Start-StudioDiagnosticsRefresh } }
     }
+    if ($firstShow) {
+        # WinForms can scroll a fresh AutoScroll panel to the last control
+        # that was added or focused. Reset after the page's own loading code so
+        # the first card is always the one users see when they open the page.
+        foreach ($scrollFlow in @($script:Ui.SettingsFlow, $script:Ui.DiagFlow, $script:Ui.AboutFlow)) {
+            if ($null -ne $scrollFlow) {
+                $scrollFlow.AutoScrollPosition = New-Object System.Drawing.Point(0, 0)
+            }
+        }
+    }
     $script:PageLoaded[$Name] = $true
+}
+
+function Test-StudioLayout {
+    # Deterministic layout audit for the render mode: overlapping visible text
+    # controls, and fixed-height labels whose text would wrap or clip instead
+    # of ellipsizing. Catches the "long translation runs into the next
+    # control" class of bug in every language without human review.
+    param($Root, [string]$Page, [string]$ReportPath)
+    $issues = New-Object System.Collections.Generic.List[string]
+    $textual = New-Object System.Collections.Generic.List[object]
+    $textTypeNames = @(
+        'System.Windows.Forms.Label', 'System.Windows.Forms.Button', 'System.Windows.Forms.CheckBox',
+        'System.Windows.Forms.TextBox', 'System.Windows.Forms.NumericUpDown', 'System.Windows.Forms.ComboBox',
+        'SessionRecovery.Studio.StudioBadge', 'SessionRecovery.Studio.StudioButton',
+        'SessionRecovery.Studio.StudioToggle', 'SessionRecovery.Studio.StudioNavButton',
+        'SessionRecovery.Studio.StudioStatCard', 'SessionRecovery.Studio.StudioRing'
+    )
+
+    $stack = New-Object System.Collections.Stack
+    $stack.Push($Root)
+    $parents = @{}
+    while ($stack.Count -gt 0) {
+        $current = $stack.Pop()
+        foreach ($child in @($current.Controls)) {
+            if ($null -eq $child) { continue }
+            $parents[$child] = $current
+            if ($child.Visible) { $stack.Push($child) }
+        }
+        $typeName = $current.GetType().FullName
+        if ($textTypeNames -contains $typeName) {
+            $text = ''
+            try { $text = [string]$current.Text } catch { }
+            if (-not [string]::IsNullOrWhiteSpace($text) -or $typeName -like '*TextBox*' -or $typeName -like '*NumericUpDown*' -or $typeName -like '*ComboBox*' -or $typeName -like '*StatCard*' -or $typeName -like '*Ring*') {
+                $screenRect = $current.RectangleToScreen($current.ClientRectangle)
+                $formRect = $Root.RectangleToClient($screenRect)
+                # Controls scrolled out of an AutoScroll panel are clipped by
+                # the panel and not visible; auditing them reports phantom
+                # overlaps with neighbouring pages and bars.
+                $scrollClipped = $false
+                $walk = $current
+                while ($parents.ContainsKey($walk)) {
+                    $ancestor = $parents[$walk]
+                    try {
+                        if ($ancestor.AutoScroll) {
+                            $ancestorRect = $Root.RectangleToClient($ancestor.RectangleToScreen($ancestor.ClientRectangle))
+                            if ($formRect.Bottom -gt ($ancestorRect.Bottom + 4) -or $formRect.Right -gt ($ancestorRect.Right + 4) -or
+                                $formRect.Top -lt ($ancestorRect.Top - 4) -or $formRect.Left -lt ($ancestorRect.Left - 4)) {
+                                $scrollClipped = $true
+                                break
+                            }
+                        }
+                    } catch { }
+                    $walk = $ancestor
+                }
+                if (-not $scrollClipped) {
+                    $textual.Add([pscustomobject]@{
+                        Control = $current
+                        Type    = $typeName
+                        Text    = $text
+                        Rect    = $formRect
+                    })
+                }
+            }
+        }
+    }
+
+    for ($outer = 0; $outer -lt $textual.Count; $outer++) {
+        for ($inner = $outer + 1; $inner -lt $textual.Count; $inner++) {
+            $a = $textual[$outer]
+            $b = $textual[$inner]
+            # Skip ancestor/descendant pairs (a label inside a button-hosting
+            # panel is normal containment, not overlap).
+            $walk = $a.Control
+            $contained = $false
+            while ($null -ne $walk) {
+                if ($walk -eq $b.Control) { $contained = $true; break }
+                if ($parents.ContainsKey($walk)) { $walk = $parents[$walk] } else { break }
+            }
+            if (-not $contained) {
+                $walk = $b.Control
+                while ($null -ne $walk) {
+                    if ($walk -eq $a.Control) { $contained = $true; break }
+                    if ($parents.ContainsKey($walk)) { $walk = $parents[$walk] } else { break }
+                }
+            }
+            if ($contained) { continue }
+            $r1 = $a.Rect; $r2 = $b.Rect
+            $overlapWidth = [Math]::Min($r1.Right, $r2.Right) - [Math]::Max($r1.X, $r2.X)
+            $overlapHeight = [Math]::Min($r1.Bottom, $r2.Bottom) - [Math]::Max($r1.Y, $r2.Y)
+            if ($overlapWidth -gt 2 -and $overlapHeight -gt 2) {
+                $issues.Add(('OVERLAP  [{0}] "{1}" {2}  <->  [{3}] "{4}" {5}' -f $a.Type, ($a.Text -replace "`r`n", ' '), $r1, $b.Type, ($b.Text -replace "`r`n", ' '), $r2))
+            }
+        }
+    }
+
+    $singleLine = [System.Windows.Forms.TextFormatFlags]::SingleLine -bor [System.Windows.Forms.TextFormatFlags]::NoPadding
+    $wordBreak = [System.Windows.Forms.TextFormatFlags]::WordBreak -bor [System.Windows.Forms.TextFormatFlags]::NoPadding
+    foreach ($entry in $textual) {
+        if ([string]::IsNullOrWhiteSpace($entry.Text) -and $entry.Type -notin @('SessionRecovery.Studio.StudioStatCard', 'SessionRecovery.Studio.StudioRing')) { continue }
+        $control = $entry.Control
+        $flatText = ($entry.Text -replace "`r`n", ' ')
+        try {
+            if ($entry.Type -eq 'System.Windows.Forms.Label') {
+                if ($control.AutoSize) { continue }
+                $lineHeight = [System.Windows.Forms.TextRenderer]::MeasureText('Ag', $control.Font, (New-Object System.Drawing.Size([int]::MaxValue, [int]::MaxValue)), $singleLine).Height
+                if ($control.Height -le ($lineHeight + 8)) {
+                    $measured = [System.Windows.Forms.TextRenderer]::MeasureText($entry.Text, $control.Font, (New-Object System.Drawing.Size([int]::MaxValue, $control.ClientSize.Height)), $singleLine)
+                    if ($measured.Width -gt ($control.ClientSize.Width + 2)) {
+                        $hint = if ($control.AutoEllipsis) { 'ellipsized' } else { 'no ellipsis' }
+                        $issues.Add(('TRUNCATED [{0}] "{1}" needs {2}px, box {3}px wide ({4})' -f $entry.Type, $flatText, $measured.Width, $control.ClientSize.Width, $hint))
+                    }
+                } else {
+                    # MeasureText includes internal leading; large single-line
+                    # titles measure a few pixels taller than they render. Scale
+                    # the tolerance with the font so only real clipping reports.
+                    $measured = [System.Windows.Forms.TextRenderer]::MeasureText($entry.Text, $control.Font, (New-Object System.Drawing.Size([Math]::Max(1, $control.ClientSize.Width), [int]::MaxValue)), $wordBreak)
+                    $tolerance = 3 + [int]($control.Font.Size * 0.25)
+                    if ($measured.Height -gt ($control.ClientSize.Height + $tolerance)) {
+                        $issues.Add(('CLIPPED   [{0}] "{1}" needs {2}px height, box {3}px' -f $entry.Type, $flatText, $measured.Height, $control.ClientSize.Height))
+                    }
+                }
+            } elseif ($entry.Type -eq 'SessionRecovery.Studio.StudioButton' -or $entry.Type -eq 'System.Windows.Forms.Button' -or $entry.Type -eq 'SessionRecovery.Studio.StudioNavButton') {
+                $glyphRoom = 0
+                if ($entry.Type -eq 'SessionRecovery.Studio.StudioButton') {
+                    if (-not [string]::IsNullOrEmpty([string]$control.Glyph)) { $glyphRoom = 34 }
+                } elseif ($entry.Type -eq 'SessionRecovery.Studio.StudioNavButton') {
+                    $glyphRoom = 46
+                } else {
+                    $glyphRoom = 8
+                }
+                $available = $control.Width - $glyphRoom - 6
+                if ($available -gt 0) {
+                    $measured = [System.Windows.Forms.TextRenderer]::MeasureText($entry.Text, $control.Font, (New-Object System.Drawing.Size([int]::MaxValue, $control.ClientSize.Height)), $singleLine)
+                    if ($measured.Width -gt ($available + 2)) {
+                        $issues.Add(('BUTTON    [{0}] "{1}" needs {2}px, available {3}px in {4}px button' -f $entry.Type, $flatText, $measured.Width, $available, $control.Width))
+                    }
+                }
+            } elseif ($entry.Type -eq 'SessionRecovery.Studio.StudioRing') {
+                # Ring captions are painted, not labels. They wrap onto two
+                # lines, so audit the real caption rectangle in every language.
+                $caption = [string]$control.Caption
+                if ([string]::IsNullOrWhiteSpace($caption)) { continue }
+                $ringSize = [Math]::Min($control.Width, $control.Height)
+                $captionWidth = [Math]::Max(1, $ringSize - [int]$control.Thickness - 4)
+                $captionFont = New-Object System.Drawing.Font('Segoe UI', 7.5)
+                $upper = $caption.ToUpperInvariant()
+                $measured = [System.Windows.Forms.TextRenderer]::MeasureText($upper, $captionFont, (New-Object System.Drawing.Size($captionWidth, [int]::MaxValue)), $wordBreak)
+                $single = [System.Windows.Forms.TextRenderer]::MeasureText($upper, $captionFont, (New-Object System.Drawing.Size([int]::MaxValue, 18)), $singleLine)
+                if ($measured.Height -gt 32) {
+                    $issues.Add(('RING      [{0}] "{1}" needs {2}px height, box 30px' -f $entry.Type, $upper, $measured.Height))
+                } elseif (($single.Width -gt ($captionWidth + 2)) -and ($upper -notmatch '\s')) {
+                    $issues.Add(('RING      [{0}] "{1}" needs {2}px wide, box {3}px' -f $entry.Type, $upper, $single.Width, $captionWidth))
+                }
+            } elseif ($entry.Type -eq 'SessionRecovery.Studio.StudioStatCard') {
+                # StudioStatCard paints its own title/value/detail strings.
+                # Titles and details wrap onto a second line, so verify the
+                # real paint rectangles fit instead of letting long
+                # translations disappear behind an ellipsis.
+                $checks = @(
+                    @{ Name = 'title'; Text = [string]$control.Title; Font = (New-Object System.Drawing.Font('Segoe UI', 8)); Width = [Math]::Max(1, $control.Width - 70); Height = 30; Wrap = $true; Upper = $true },
+                    @{ Name = 'value'; Text = [string]$control.Value; Font = (New-Object System.Drawing.Font('Segoe UI Semibold', 20)); Width = [Math]::Max(1, $control.Width - 72); Height = 34; Wrap = $false; Upper = $false },
+                    @{ Name = 'detail'; Text = [string]$control.Detail; Font = (New-Object System.Drawing.Font('Segoe UI', 8.25)); Width = [Math]::Max(1, $control.Width - 36); Height = 36; Wrap = $true; Upper = $false }
+                )
+                foreach ($check in $checks) {
+                    if ([string]::IsNullOrWhiteSpace($check.Text)) { continue }
+                    $text = if ($check.Upper) { $check.Text.ToUpperInvariant() } else { $check.Text }
+                    if ($check.Wrap) {
+                        $measured = [System.Windows.Forms.TextRenderer]::MeasureText($text, $check.Font, (New-Object System.Drawing.Size($check.Width, [int]::MaxValue)), $wordBreak)
+                        $single = [System.Windows.Forms.TextRenderer]::MeasureText($text, $check.Font, (New-Object System.Drawing.Size([int]::MaxValue, 18)), $singleLine)
+                        if ($measured.Height -gt ($check.Height + 2)) {
+                            $issues.Add(('STATCARD  [{0}] {1} "{2}" needs {3}px height, box {4}px' -f $entry.Type, $check.Name, ($text -replace "`r`n", ' '), $measured.Height, $check.Height))
+                        } elseif (($single.Width -gt ($check.Width + 2)) -and ($text -notmatch '\s')) {
+                            # A single word cannot wrap; report the horizontal overflow.
+                            $issues.Add(('STATCARD  [{0}] {1} "{2}" needs {3}px wide, box {4}px' -f $entry.Type, $check.Name, ($text -replace "`r`n", ' '), $single.Width, $check.Width))
+                        }
+                    } else {
+                        $measured = [System.Windows.Forms.TextRenderer]::MeasureText($text, $check.Font, (New-Object System.Drawing.Size([int]::MaxValue, $check.Height)), $singleLine)
+                        if ($measured.Width -gt ($check.Width + 2)) {
+                            $issues.Add(('STATCARD  [{0}] {1} "{2}" needs {3}px wide, box {4}px' -f $entry.Type, $check.Name, ($text -replace "`r`n", ' '), $measured.Width, $check.Width))
+                        }
+                    }
+                }
+            }
+        } catch { }
+    }
+
+    $lines = @()
+    $lines += ('Studio layout audit: {0}  ({1} controls checked)' -f $Page, $textual.Count)
+    if ($issues.Count -eq 0) {
+        $lines += 'OK: no overlapping controls, no clipped labels.'
+    } else {
+        $lines += ('{0} issue(s):' -f $issues.Count)
+        $lines += $issues
+    }
+    [System.IO.File]::WriteAllLines($ReportPath, $lines)
+    Write-Output ($lines -join "`r`n")
 }
 
 function Wait-StudioRenderPump {
@@ -4575,11 +5162,35 @@ if (-not [string]::IsNullOrWhiteSpace($RenderDir)) {
     } catch { }
     foreach ($renderPage in @('Dashboard', 'Snapshots', 'Exclusions', 'Settings', 'Diagnostics', 'About')) {
         Show-StudioPage -Name $renderPage
-        $renderDeadline = [DateTime]::UtcNow.AddMilliseconds($renderWaitMs)
-        while ([DateTime]::UtcNow -lt $renderDeadline) {
-            [System.Windows.Forms.Application]::DoEvents()
-            Start-Sleep -Milliseconds 50
-            [System.Windows.Forms.Application]::DoEvents()
+        # The diagnostics page fills in from a background worker. Pump the
+        # worker queue and wait for the loaded state so the audit covers the
+        # real labels, not the temporary "Checking..." placeholders.
+        if ($renderPage -eq 'Diagnostics') {
+            Wait-StudioRenderPump -Milliseconds $renderWaitMs -Until { -not $script:DiagnosticsLoading } -TimeoutMilliseconds 20000
+        } else {
+            Wait-StudioRenderPump -Milliseconds $renderWaitMs
+        }
+        # Optional: audit the lower half of long pages. The default capture
+        # only shows the first cards, so Settings/About/Diagnostics are also
+        # rendered scrolled to the bottom into a separate output folder.
+        if ([string]$env:SESSIONRECOVERY_RENDER_SCROLL -eq 'bottom') {
+            $scrollFlow = switch ($renderPage) {
+                'Settings' { $script:Ui.SettingsFlow }
+                'Diagnostics' { $script:Ui.DiagFlow }
+                'About' { $script:Ui.AboutFlow }
+                default { $null }
+            }
+            if ($null -ne $scrollFlow) {
+                # Scroll by a large offset and let WinForms clamp to the real
+                # maximum, then repeat after pending layout so a late resize
+                # cannot leave the capture short of the true bottom.
+                for ($attempt = 0; $attempt -lt 3; $attempt++) {
+                    $scrollFlow.AutoScrollPosition = New-Object System.Drawing.Point(0, 1000000)
+                    [System.Windows.Forms.Application]::DoEvents()
+                    Start-Sleep -Milliseconds 80
+                    [System.Windows.Forms.Application]::DoEvents()
+                }
+            }
         }
         $bitmap = New-Object System.Drawing.Bitmap($form.ClientSize.Width, $form.ClientSize.Height)
         $rect = New-Object System.Drawing.Rectangle(0, 0, $bitmap.Width, $bitmap.Height)
@@ -4587,16 +5198,34 @@ if (-not [string]::IsNullOrWhiteSpace($RenderDir)) {
         $renderPath = Join-Path $RenderDir ($renderPage + '.png')
         $bitmap.Save($renderPath, [System.Drawing.Imaging.ImageFormat]::Png)
         $bitmap.Dispose()
-        if ($renderPage -eq 'Diagnostics' -and -not [string]::IsNullOrWhiteSpace($env:SESSIONRECOVERY_RENDER_DUMP)) {
-            $dump = New-Object System.Collections.Generic.List[string]
-            $dump.Add(('form client: {0}x{1}' -f $form.ClientSize.Width, $form.ClientSize.Height))
-            $dump.Add(('diagFlow client: {0}x{1}  scroll: {2}x{3}' -f $script:Ui.DiagFlow.ClientSize.Width, $script:Ui.DiagFlow.ClientSize.Height, $script:Ui.DiagFlow.DisplayRectangle.Width, $script:Ui.DiagFlow.DisplayRectangle.Height))
-            $dump.Add(('healthCard: {0}' -f $diagHealthCard.Bounds))
-            $dump.Add(('ring: {0}' -f $script:Ui.DiagRing.Bounds))
-            $dump.Add(('refresh: {0}' -f $script:Ui.DiagRefresh.Bounds))
-            $dump.Add(('headline: {0}' -f $script:Ui.DiagHealthTitle.Bounds))
-            $dump.Add(('detail: {0}' -f $script:Ui.DiagHealthDetail.Bounds))
-            [System.IO.File]::WriteAllLines($env:SESSIONRECOVERY_RENDER_DUMP, $dump)
+        if (-not [string]::IsNullOrWhiteSpace($env:SESSIONRECOVERY_RENDER_CHECK)) {
+            # Deterministic layout audit: overlapping visible text controls,
+            # truncated labels/buttons and wrapped text that no longer fits.
+            $reportPath = Join-Path $RenderDir ($renderPage + '.check.txt')
+            Test-StudioLayout -Root $form -Page $renderPage -ReportPath $reportPath
+        }
+        if (-not [string]::IsNullOrWhiteSpace($env:SESSIONRECOVERY_RENDER_TREE)) {
+            $treePath = Join-Path $RenderDir ($renderPage + '.tree.txt')
+            $treeLines = New-Object System.Collections.Generic.List[string]
+            $treeStack = New-Object System.Collections.Stack
+            $treeStack.Push(@($form, 0))
+            while ($treeStack.Count -gt 0) {
+                $item = $treeStack.Pop()
+                $node = $item[0]
+                $depth = [int]$item[1]
+                try {
+                    $screenRect = $node.RectangleToScreen($node.ClientRectangle)
+                    $localRect = $form.RectangleToClient($screenRect)
+                } catch { $localRect = New-Object System.Drawing.Rectangle(0, 0, 0, 0) }
+                $nodeText = ''
+                $textProperty = $node.PSObject.Properties['Text']
+                if ($null -ne $textProperty) { $nodeText = ([string]$textProperty.Value -replace "`r`n", ' ') }
+                $treeLines.Add(('{0}{1} visible={2} bounds={3} text="{4}"' -f ('  ' * $depth), $node.GetType().FullName, $node.Visible, $localRect, $nodeText))
+                foreach ($child in @($node.Controls)) {
+                    if ($null -ne $child) { $treeStack.Push(@($child, $depth + 1)) }
+                }
+            }
+            [System.IO.File]::WriteAllLines($treePath, $treeLines)
         }
     }
     $form.Close()

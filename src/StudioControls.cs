@@ -107,6 +107,8 @@ namespace SessionRecovery.Studio
         private string _timeText = "";
         private string _metaText = "";
         private string _ageText = "";
+        private string _approxLabel = "APPROX";
+        private string _pinnedLabel = "PINNED";
         private bool _approximate;
         private bool _pinned;
         private bool _selected;
@@ -121,6 +123,8 @@ namespace SessionRecovery.Studio
         public string TimeText { get { return _timeText; } set { _timeText = value ?? ""; Invalidate(); } }
         public string MetaText { get { return _metaText; } set { _metaText = value ?? ""; Invalidate(); } }
         public string AgeText { get { return _ageText; } set { _ageText = value ?? ""; Invalidate(); } }
+        public string ApproxLabel { get { return _approxLabel; } set { _approxLabel = string.IsNullOrWhiteSpace(value) ? "APPROX" : value; Invalidate(); } }
+        public string PinnedLabel { get { return _pinnedLabel; } set { _pinnedLabel = string.IsNullOrWhiteSpace(value) ? "PINNED" : value; Invalidate(); } }
         public bool Approximate { get { return _approximate; } set { _approximate = value; Invalidate(); } }
         public bool Pinned { get { return _pinned; } set { _pinned = value; Invalidate(); } }
         public bool Selected { get { return _selected; } set { _selected = value; Invalidate(); } }
@@ -162,15 +166,17 @@ namespace SessionRecovery.Studio
             TextRenderer.DrawText(e.Graphics, _ageText, MetaFont, new Rectangle(14, 45, 200, 14), _subtleColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
             if (_approximate)
             {
-                Rectangle badge = new Rectangle(Math.Max(82, Width - 102), 8, 58, 18);
+                int approxWidth = Math.Max(58, TextRenderer.MeasureText(_approxLabel, MetaFont, new Size(int.MaxValue, 18), TextFormatFlags.NoPadding).Width + 12);
+                Rectangle badge = new Rectangle(Math.Max(82, Width - 44 - approxWidth), 8, approxWidth, 18);
                 Draw.FillRoundRect(e.Graphics, badge, 5, _amberSoft);
-                TextRenderer.DrawText(e.Graphics, "APPROX", MetaFont, badge, _amberColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                TextRenderer.DrawText(e.Graphics, _approxLabel, MetaFont, badge, _amberColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
             }
             if (_pinned)
             {
-                Rectangle badge = new Rectangle(Math.Max(82, Width - 96), 43, 60, 18);
+                int pinnedWidth = Math.Max(60, TextRenderer.MeasureText(_pinnedLabel, MetaFont, new Size(int.MaxValue, 18), TextFormatFlags.NoPadding).Width + 12);
+                Rectangle badge = new Rectangle(Math.Max(82, Width - 36 - pinnedWidth), 43, pinnedWidth, 18);
                 Draw.FillRoundRect(e.Graphics, badge, 5, _pinnedSoft);
-                TextRenderer.DrawText(e.Graphics, "PINNED", MetaFont, badge, _accentColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                TextRenderer.DrawText(e.Graphics, _pinnedLabel, MetaFont, badge, _accentColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
             }
             Rectangle chevron = new Rectangle(Width - 34, 22, 20, 20);
             TextRenderer.DrawText(e.Graphics, "\uE76C", GlyphFont, chevron, _subtleColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
@@ -407,7 +413,7 @@ namespace SessionRecovery.Studio
         private Color _titleColor = Color.FromArgb(130, 145, 165);
         private Color _valueColor = Color.FromArgb(238, 244, 252);
         private Color _detailColor = Color.FromArgb(116, 132, 151);
-        private Font _titleFont = new Font("Segoe UI", 8.5f, FontStyle.Regular, GraphicsUnit.Point);
+        private Font _titleFont = new Font("Segoe UI", 8f, FontStyle.Regular, GraphicsUnit.Point);
         private Font _valueFont = new Font("Segoe UI Semibold", 20f, FontStyle.Regular, GraphicsUnit.Point);
         private Font _detailFont = new Font("Segoe UI", 8.25f, FontStyle.Regular, GraphicsUnit.Point);
         private Font _glyphFont = new Font("Segoe MDL2 Assets", 16f, FontStyle.Regular, GraphicsUnit.Point);
@@ -437,9 +443,12 @@ namespace SessionRecovery.Studio
                 e.Graphics.FillPath(brush, path);
             }
             TextRenderer.DrawText(e.Graphics, _glyph, _glyphFont, iconRect, _accentColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
-            TextRenderer.DrawText(e.Graphics, _title.ToUpperInvariant(), _titleFont, new Rectangle(64, 14, Width - 80, 18), _titleColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-            TextRenderer.DrawText(e.Graphics, _value, _valueFont, new Rectangle(64, 30, Width - 80, 34), _valueColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-            TextRenderer.DrawText(e.Graphics, _detail, _detailFont, new Rectangle(18, Height - 29, Width - 36, 18), _detailColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            // Translated stat labels are longer than the English originals.
+            // Wrap the title and detail instead of ellipsizing them, so every
+            // language stays fully readable at the minimum window size.
+            TextRenderer.DrawText(e.Graphics, _title.ToUpperInvariant(), _titleFont, new Rectangle(58, 6, Width - 70, 30), _titleColor, TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.WordBreak | TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(e.Graphics, _value, _valueFont, new Rectangle(60, 34, Width - 72, 34), _valueColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            TextRenderer.DrawText(e.Graphics, _detail, _detailFont, new Rectangle(18, 70, Width - 36, 36), _detailColor, TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.WordBreak | TextFormatFlags.NoPadding);
         }
 
         protected override void Dispose(bool disposing)
@@ -508,8 +517,10 @@ namespace SessionRecovery.Studio
             TextRenderer.DrawText(e.Graphics, _centerText, _centerFont, rect, _centerTextColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
             if (!String.IsNullOrEmpty(_caption))
             {
-                Rectangle captionRect = new Rectangle(rect.Left, rect.Top + (rect.Height / 2) + 18, rect.Width, 16);
-                TextRenderer.DrawText(e.Graphics, _caption.ToUpperInvariant(), _captionFont, captionRect, _captionColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.Top | TextFormatFlags.NoPadding);
+                // Long ring captions ("LETZTER SCHNAPPSCHUSS") wrap onto a
+                // second line rather than being cut off inside the ring.
+                Rectangle captionRect = new Rectangle(rect.Left, rect.Top + (rect.Height / 2) + 16, rect.Width, 30);
+                TextRenderer.DrawText(e.Graphics, _caption.ToUpperInvariant(), _captionFont, captionRect, _captionColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.Top | TextFormatFlags.WordBreak | TextFormatFlags.NoPadding);
             }
         }
 
@@ -525,6 +536,10 @@ namespace SessionRecovery.Studio
         private Color _fillColor = Color.FromArgb(29, 45, 38);
         private Color _textColor = Color.FromArgb(83, 221, 151);
         private int _cornerRadius = 8;
+        // Translated badge text ("PROTÉGÉ", "انتباه", ...) is often wider than
+        // the English original. The badge grows to fit its text instead of
+        // letting the text spill over neighbouring controls.
+        private const int MaxAutoWidth = 280;
         private Font _font = new Font("Segoe UI Semibold", 7.5f, FontStyle.Regular, GraphicsUnit.Point);
 
         public Color FillColor { get { return _fillColor; } set { _fillColor = value; Invalidate(); } }
@@ -538,6 +553,39 @@ namespace SessionRecovery.Studio
             Size = new Size(90, 24);
         }
 
+        protected override void OnTextChanged(EventArgs e)
+        {
+            base.OnTextChanged(e);
+            FitToText();
+        }
+
+        protected override void OnFontChanged(EventArgs e)
+        {
+            base.OnFontChanged(e);
+            FitToText();
+        }
+
+        private void FitToText()
+        {
+            if (IsDisposed || Disposing) return;
+            if (string.IsNullOrEmpty(Text)) return;
+            try
+            {
+                Size measured = TextRenderer.MeasureText(Text, _font, new Size(int.MaxValue, Height), TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
+                int wanted = measured.Width + 18;
+                if (wanted > MaxAutoWidth) wanted = MaxAutoWidth;
+                if (wanted != Width && Parent != null)
+                {
+                    // Badges sit at a fixed left edge; growing rightwards keeps
+                    // them inside their card in every language.
+                    SuspendLayout();
+                    Width = wanted;
+                    ResumeLayout();
+                }
+            }
+            catch { }
+        }
+
         protected override void OnPaint(PaintEventArgs e)
         {
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
@@ -549,7 +597,7 @@ namespace SessionRecovery.Studio
             {
                 e.Graphics.FillPath(brush, path);
             }
-            TextRenderer.DrawText(e.Graphics, Text, _font, rect, _textColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(e.Graphics, Text, _font, rect, _textColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis);
         }
 
         protected override void Dispose(bool disposing)

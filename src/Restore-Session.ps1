@@ -218,11 +218,21 @@ function Select-RSPlan {
         })
     }
 
+    $dev = @()
+    try { $dev = @($Plan.dev) } catch { }
+    $monitors = $null
+    try { $monitors = @($Plan.monitors) } catch { }
+    $remote = @()
+    try { $remote = @($Plan.remote) } catch { }
+
     return [pscustomobject]@{
         apps     = $apps
         explorer = $folders
         browsers = $browsers
         tabMode  = $Plan.tabMode
+        dev      = $dev
+        monitors = $monitors
+        remote   = $remote
     }
 }
 
@@ -378,6 +388,19 @@ function Populate-RSList {
             if ($profileParts.Count -gt 0) { $details += '; ' + ($profileParts -join '; ') }
             Add-RSListItem -List $List -Kind 'browser' -Name ([string]$browser.name) -Details $details -Value $browser -IconPath ([string]$browser.exe)
         }
+
+        # Remote sessions: PuTTY and Remote Desktop targets captured open.
+        $remoteProperty = $Snapshot.PSObject.Properties['remote']
+        if ($null -ne $remoteProperty) {
+            foreach ($session in @($remoteProperty.Value)) {
+                if ($null -eq $session) { continue }
+                if ([string]$session.kind -eq 'putty') {
+                    Add-RSListItem -List $List -Kind 'remote' -Name ('PuTTY: ' + [string]$session.session) -Details 'SSH session (reconnects with -load)' -Value $session -IconIndex 0
+                } elseif ([string]$session.kind -eq 'rdp') {
+                    Add-RSListItem -List $List -Kind 'remote' -Name ('Remote Desktop: ' + [string]$session.target) -Details 'Remote Desktop window' -Value $session -IconIndex 0
+                }
+            }
+        }
     } finally {
         $List.EndUpdate()
     }
@@ -516,12 +539,25 @@ if ($DryRun) {
     Write-Output ('Captured: {0} ({1})' -f $entry.CapturedAt.ToString('g'), (Format-RSAge -CapturedAt $entry.CapturedAt))
     Write-Output ('Contents: {0} app(s), {1} folder(s), {2} browser(s), {3} tab(s)' -f $stats.Apps, $stats.Folders, $stats.Browsers, $stats.Tabs)
     Write-Output ('Tab mode: {0}' -f $TabMode)
+    try {
+        $preview = Get-SRRestorePreview -Plan $planAll
+        Write-Output ('Preview: {0} already running, {1} will start, {2} missing' -f $preview.Running, $preview.WillStart, $preview.Missing)
+    } catch { }
     foreach ($app in @($planAll.apps)) { Write-Output ('APP    {0}  [{1}]' -f $app.name, $app.exe) }
     foreach ($folder in @($planAll.explorer)) { Write-Output ('FOLDER {0}' -f $folder) }
     foreach ($browser in @($planAll.browsers)) {
         foreach ($profile in @($browser.profiles)) {
             Write-Output ('TABS   {0} / {1}: {2}' -f $browser.name, $profile.displayName, @($profile.tabs).Count)
         }
+    }
+    foreach ($workspace in @($planAll.dev)) {
+        if ($null -eq $workspace) { continue }
+        foreach ($folder in @($workspace.folders)) { Write-Output ('DEV    {0}: {1}' -f $workspace.tool, $folder) }
+    }
+    foreach ($session in @($planAll.remote)) {
+        if ($null -eq $session) { continue }
+        if ([string]$session.kind -eq 'putty') { Write-Output ('REMOTE PuTTY {0}' -f $session.session) }
+        elseif ([string]$session.kind -eq 'rdp') { Write-Output ('REMOTE RDP   {0}' -f $session.target) }
     }
     exit 0
 }
@@ -858,7 +894,7 @@ $brandName.Location = New-Object System.Drawing.Point(80, 18)
 $header.Controls.Add($brandName)
 
 $brandMeta = New-Object System.Windows.Forms.Label
-$brandMeta.Text = 'LOCAL SNAPSHOTS  /  V2.5.0'
+$brandMeta.Text = 'LOCAL SNAPSHOTS  /  V2.6.0'
 $brandMeta.Font = New-Object System.Drawing.Font('Consolas', 7.5)
 $brandMeta.ForeColor = $rsMuted
 $brandMeta.AutoSize = $true
@@ -880,8 +916,11 @@ $titleLabel = New-Object System.Windows.Forms.Label
 $titleLabel.Text = (T 'RstTitle' 'Restore your previous session')
 $titleLabel.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 20)
 $titleLabel.ForeColor = $rsInk
-$titleLabel.AutoSize = $true
+$titleLabel.AutoSize = $false
+$titleLabel.Size = New-Object System.Drawing.Size(830, 36)
+$titleLabel.AutoEllipsis = $true
 $titleLabel.Location = New-Object System.Drawing.Point(34, 62)
+$titleLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
 $header.Controls.Add($titleLabel)
 
 $subtitleLabel = New-Object System.Windows.Forms.Label
@@ -896,9 +935,22 @@ try {
 } catch { }
 $subtitleLabel.Font = New-Object System.Drawing.Font('Segoe UI', 9.5)
 $subtitleLabel.ForeColor = $rsMuted
-$subtitleLabel.AutoSize = $true
+# Long crash reasons in any language must ellipsize inside the header band
+# instead of running over the snapshot card below it.
+$subtitleLabel.AutoSize = $false
+$subtitleLabel.Size = New-Object System.Drawing.Size(830, 20)
+$subtitleLabel.AutoEllipsis = $true
 $subtitleLabel.Location = New-Object System.Drawing.Point(36, 97)
+$subtitleLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
 $header.Controls.Add($subtitleLabel)
+
+# Right-to-left languages get correctly shaped, right-aligned text. Layout
+# mirroring is intentionally not used: it scrambles custom-painted controls.
+try {
+    if (Test-SRRtlLanguage -Language $restoreLanguage) {
+        $form.RightToLeft = [System.Windows.Forms.RightToLeft]::Yes
+    }
+} catch { }
 
 $content = New-Object System.Windows.Forms.Panel
 $content.Location = New-Object System.Drawing.Point(0, 124)
@@ -941,6 +993,7 @@ $ageLabel.BackColor = $rsWhite
 $ageLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
 $ageLabel.AutoSize = $false
 $ageLabel.Size = New-Object System.Drawing.Size(180, 24)
+$ageLabel.AutoEllipsis = $true
 $ageLabel.Location = New-Object System.Drawing.Point(636, 32)
 $ageLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
 $snapshotCard.Controls.Add($ageLabel)
@@ -1090,7 +1143,8 @@ $optionsCard.Controls.Add($forceCheck)
 $statusLabel = New-Object System.Windows.Forms.Label
 $statusLabel.Text = ''
 $statusLabel.AutoSize = $false
-$statusLabel.Size = New-Object System.Drawing.Size(460, 30)
+$statusLabel.Size = New-Object System.Drawing.Size(540, 30)
+$statusLabel.AutoEllipsis = $true
 $statusLabel.Font = New-Object System.Drawing.Font('Consolas', 8.5)
 $statusLabel.ForeColor = $rsMuted
 $statusLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
@@ -1152,6 +1206,13 @@ function Update-RSSelection {
         $stats = Get-RSStats -Snapshot $selected.Snapshot
         $statusLabel.Text = ('{0} apps  /  {1} folders  /  {2} browsers  /  {3} tabs' -f $stats.Apps, $stats.Folders, $stats.Browsers, $stats.Tabs)
         $selectAll.Checked = $true
+        # Restore preview: what is already running versus what would start.
+        try {
+            $preview = Get-SRRestorePreview -Plan (New-SRRestorePlan -Snapshot $selected.Snapshot -All -TabMode 'Smart')
+            if ($preview.Running -gt 0) {
+                $statusLabel.Text += ('  |  {0} running, {1} to start' -f $preview.Running, $preview.WillStart)
+            }
+        } catch { }
     } finally {
         $script:rsUpdating = $false
     }
@@ -1185,6 +1246,7 @@ $restoreButton.Add_Click({
     $selectedApps = New-Object System.Collections.Generic.List[object]
     $selectedFolders = New-Object System.Collections.Generic.List[string]
     $selectedBrowsers = New-Object System.Collections.Generic.List[object]
+    $selectedRemote = New-Object System.Collections.Generic.List[object]
 
     foreach ($item in $list.CheckedItems) {
         $tag = $item.Tag
@@ -1193,6 +1255,7 @@ $restoreButton.Add_Click({
             'app' { $selectedApps.Add($tag.Value) }
             'folder' { $selectedFolders.Add([string]$tag.Value) }
             'browser' { $selectedBrowsers.Add($tag.Value) }
+            'remote' { $selectedRemote.Add($tag.Value) }
         }
     }
 
@@ -1215,6 +1278,8 @@ $restoreButton.Add_Click({
         browsers = $selectedBrowsers.ToArray()
         tabMode  = $mode
         dev      = @($entry.Snapshot.devWorkspaces)
+        monitors = @($entry.Snapshot.monitors)
+        remote   = $selectedRemote.ToArray()
     }
 
     $script:rsRestoring = $true

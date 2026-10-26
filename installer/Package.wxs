@@ -16,9 +16,10 @@
 
     <Icon Id="SessionRecoveryIcon" SourceFile="..\assets\SessionRecovery.ico" />
 
-    <!-- Per-user installation: no UAC prompt and no files in Program Files. -->
-    <Property Id="ALLUSERS" Value="2" />
-    <Property Id="MSIINSTALLPERUSER" Value="1" />
+    <!-- Per-user installation: no UAC prompt and no files in Program Files.
+         Scope="perUser" handles the install context. Do not set ALLUSERS or
+         MSIINSTALLPERUSER here: they conflict with the UAC-limited package
+         and make the ARP entry land in HKLM instead of HKCU. -->
     <Property Id="ARPPRODUCTICON" Value="SessionRecoveryIcon" />
     <Property Id="ARPNOREPAIR" Value="1" />
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
@@ -74,9 +75,28 @@
         <File Id="DiagnosticsPs1" Source="..\src\Diagnostics.ps1" />
         <File Id="RunHiddenVbs" Source="..\src\RunHidden.vbs" />
         <File Id="StudioPs1" Source="..\src\Studio-SessionRecovery.ps1" />
+        <File Id="StringsPs1" Source="..\src\Strings.ps1" />
         <File Id="StudioControlsCs" Source="..\src\StudioControls.cs" />
+        <File Id="ControlSessionRecoveryPs1" Source="..\src\Control-SessionRecovery.ps1" />
         <File Id="BrandIconFile" Source="..\assets\SessionRecovery.ico" />
         <File Id="ReadmeMd" Source="..\README.md" />
+        <!-- Scripts are unversioned and can be left behind by an older
+             install or a manual copy. RemoveFiles runs before InstallFiles,
+             so every upgrade replaces them instead of silently keeping old
+             UI strings or an old capture engine. -->
+        <RemoveFile Id="RemovePsm1" Name="SessionRecovery.psm1" On="install" />
+        <RemoveFile Id="RemoveSaveSession" Name="Save-Session.ps1" On="install" />
+        <RemoveFile Id="RemoveRestoreSession" Name="Restore-Session.ps1" On="install" />
+        <RemoveFile Id="RemoveTrayApp" Name="Tray-SessionRecovery.ps1" On="install" />
+        <RemoveFile Id="RemoveWatchSession" Name="Watch-Session.ps1" On="install" />
+        <RemoveFile Id="RemoveDiagnostics" Name="Diagnostics.ps1" On="install" />
+        <RemoveFile Id="RemoveRunHidden" Name="RunHidden.vbs" On="install" />
+        <RemoveFile Id="RemoveStudio" Name="Studio-SessionRecovery.ps1" On="install" />
+        <RemoveFile Id="RemoveStrings" Name="Strings.ps1" On="install" />
+        <RemoveFile Id="RemoveStudioControls" Name="StudioControls.cs" On="install" />
+        <RemoveFile Id="RemoveControlSessionRecovery" Name="Control-SessionRecovery.ps1" On="install" />
+        <RemoveFile Id="RemoveBrandIcon" Name="SessionRecovery.ico" On="install" />
+        <RemoveFile Id="RemoveReadme" Name="README.md" On="install" />
         <RegistryValue Root="HKCU" Key="Software\SessionRecovery\Components" Name="ApplicationFiles" Type="integer" Value="1" KeyPath="yes" />
         <RemoveFile Id="RemoveLegacyUninstaller" Name="Uninstall-SessionRecovery.ps1" On="install" />
         <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />

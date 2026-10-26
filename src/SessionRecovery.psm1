@@ -1075,8 +1075,13 @@ function Get-SRDefaultConfig {
         captureThumbnails       = $false
         redactUrls              = $true
         compressSnapshots       = $false
+        encryptSnapshots        = $false
         eventSnapshots          = $true
         captureDevWorkspaces    = $true
+        restoreVirtualDesktops  = $true
+        launchOrder             = @()
+        appLaunchDelays         = @{}
+        launchWaits             = @{}
         workspaces              = @()
         excludeApps             = @()
         excludeFolders          = @()
@@ -1316,7 +1321,8 @@ function Get-SRWindowPlacement {
 function Start-SRApplication {
     param(
         [Parameter(Mandatory = $true)]$App,
-        [switch]$Force
+        [switch]$Force,
+        $SnapshotMonitors = $null
     )
     if (-not $App.exe -or -not (Test-Path -LiteralPath $App.exe)) {
         return [pscustomobject]@{ Started = $false; Message = "Missing executable: $($App.exe)"; App = $App }
@@ -1360,8 +1366,29 @@ function Start-SRApplication {
         if ($placeWindows -and -not $App.startMinimized -and $null -ne $process -and ('SessionRecovery.WindowPlacer' -as [type])) {
             $placement = Get-SRWindowPlacement -App $App
             if ($null -ne $placement) {
+                # Translate the captured position into the current monitor
+                # layout (an undocked laptop keeps its windows proportionally).
+                $placement = ConvertTo-SRScreenPlacement -Placement $placement -SnapshotMonitors $SnapshotMonitors
                 [void][SessionRecovery.WindowPlacer]::QueueProcessWindow(
                     $process.Id, 6000, $placement.X, $placement.Y, $placement.Width, $placement.Height, $placement.Maximized)
+            }
+        }
+        # Virtual desktop: put the window back on the desktop it was captured
+        # on, when that desktop still exists. Best-effort and quiet on failure.
+        if ($null -ne $process) {
+            $desktopProperty = $App.PSObject.Properties['desktopId']
+            if ($null -ne $desktopProperty -and -not [string]::IsNullOrWhiteSpace([string]$desktopProperty.Value)) {
+                $restoreDesktops = $true
+                try {
+                    $configDesktops = Get-SRConfig
+                    $restoreDesktopsProperty = $configDesktops.PSObject.Properties['restoreVirtualDesktops']
+                    if ($null -ne $restoreDesktopsProperty) { $restoreDesktops = [bool]$restoreDesktopsProperty.Value }
+                } catch { }
+                if ($restoreDesktops -and (Get-SRVirtualDesktopHelper)) {
+                    try {
+                        [SessionRecovery.VirtualDesktop]::QueueMove([int]$process.Id, [string]$desktopProperty.Value, 8000)
+                    } catch { }
+                }
             }
         }
         return [pscustomobject]@{ Started = $true; Message = "Started: $($App.name)"; App = $App }
@@ -2814,6 +2841,10 @@ function Get-SRMediaPlayerMedia {
         if ([string]::IsNullOrWhiteSpace($file)) { continue }
         $seenKeys[[string]$player.key] = $true
 
+        # mpv only: ask its JSON IPC pipe for the exact position first.
+        $mpvExact = $null
+        if ([string]$player.key -eq 'mpv') { $mpvExact = Get-SRMpvPlayback }
+
         $entry = $null
         if ($state.players.ContainsKey([string]$player.key)) { $entry = $state.players[[string]$player.key] }
         $anchorMs = [long]0
@@ -2832,6 +2863,18 @@ function Get-SRMediaPlayerMedia {
         $durationSeconds = Get-SRMediaDurationSeconds -Path $file
         $positionMs = $anchorMs + [int64](($now - $anchorAt).TotalMilliseconds)
         if ($positionMs -lt 0) { $positionMs = 0 }
+        $estimated = $true
+        if ($null -ne $mpvExact -and $null -ne $mpvExact.Position -and [double]$mpvExact.Position -ge 0) {
+            # Exact state straight from the player.
+            $positionMs = [int64]([double]$mpvExact.Position * 1000)
+            $anchorMs = $positionMs
+            $anchorAt = $now
+            $estimated = $false
+            if ($null -ne $mpvExact.Duration -and [double]$mpvExact.Duration -gt 0) { $durationSeconds = [double]$mpvExact.Duration }
+            if (-not [string]::IsNullOrWhiteSpace([string]$mpvExact.File) -and (Test-Path -LiteralPath ([string]$mpvExact.File))) {
+                $file = [string]$mpvExact.File
+            }
+        }
         if ($null -ne $durationSeconds -and $durationSeconds -gt 0) {
             $capMs = [int64]($durationSeconds * 1000) - 5000
             if ($capMs -lt 0) { $capMs = 0 }
@@ -2843,7 +2886,7 @@ function Get-SRMediaPlayerMedia {
             title           = Split-Path -Leaf $file
             positionSeconds = [Math]::Round($positionMs / 1000.0, 1)
             durationSeconds = $durationSeconds
-            estimated       = $true
+            estimated       = $estimated
         }
         $app | Add-Member -NotePropertyName media -NotePropertyValue $media -Force
         $state.players[[string]$player.key] = [pscustomobject]@{
@@ -2914,12 +2957,478 @@ function Get-SRMediaLaunchArguments {
     return @($file)
 }
 
+function Get-SRMpvPlayback {
+    # Exact playback state from mpv's JSON IPC pipe. Only available when mpv
+    # was started with --input-ipc-server; everything else keeps the
+    # title-based estimate.
+    param([string[]]$PipeNames = @('mpvsocket', 'mpvpipe', 'mpv-socket'))
+    foreach ($name in @($PipeNames)) {
+        $pipe = $null
+        try {
+            $pipe = New-Object System.IO.Pipes.NamedPipeClientStream('.', $name, [System.IO.Pipes.PipeDirection]::InOut)
+            $pipe.Connect(400)
+            $writer = New-Object System.IO.StreamWriter($pipe)
+            $writer.AutoFlush = $true
+            $writer.NewLine = "`n"
+            $reader = New-Object System.IO.StreamReader($pipe)
+            [void]$reader.ReadLine() # greeting line
+
+            $answers = @{}
+            $requests = @(
+                @{ Id = 101; Command = 'path' },
+                @{ Id = 102; Command = 'time-pos' },
+                @{ Id = 103; Command = 'duration' },
+                @{ Id = 104; Command = 'pause' }
+            )
+            foreach ($request in $requests) {
+                $writer.WriteLine(('{{"command":["get_property","{0}"],"request_id":{1}}}' -f $request.Command, $request.Id))
+            }
+            $deadline = [DateTime]::UtcNow.AddMilliseconds(1200)
+            while ([DateTime]::UtcNow -lt $deadline -and $answers.Count -lt $requests.Count) {
+                $task = $reader.ReadLineAsync()
+                if (-not $task.Wait(250)) { continue }
+                $line = $task.Result
+                if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                try {
+                    $reply = $line | ConvertFrom-Json
+                    if ($null -ne $reply -and $null -ne $reply.PSObject.Properties['request_id']) {
+                        $answers[[int]$reply.request_id] = $reply
+                    }
+                } catch { }
+            }
+            $path = $null
+            $timePos = $null
+            $duration = $null
+            $paused = $false
+            try { if ($answers.ContainsKey(101) -and $answers[101].data) { $path = [string]$answers[101].data } } catch { }
+            try { if ($answers.ContainsKey(102) -and $null -ne $answers[102].data) { $timePos = [double]$answers[102].data } } catch { }
+            try { if ($answers.ContainsKey(103) -and $null -ne $answers[103].data) { $duration = [double]$answers[103].data } } catch { }
+            try { if ($answers.ContainsKey(104)) { $paused = [bool]$answers[104].data } } catch { }
+            if ([string]::IsNullOrWhiteSpace($path) -and $null -eq $timePos) { continue }
+            return [pscustomobject]@{
+                File        = $path
+                Position    = $timePos
+                Duration    = $duration
+                Paused      = $paused
+                PipeName    = $name
+            }
+        } catch {
+            if ($null -ne $pipe) { try { $pipe.Dispose() } catch { } }
+        }
+    }
+    return $null
+}
+
+# ---------------------------------------------------------------------------
+# Virtual desktops, monitor layout, remote sessions
+# ---------------------------------------------------------------------------
+
+$script:SRVirtualDesktopType = $null
+function Get-SRVirtualDesktopHelper {
+    # Documented IVirtualDesktopManager: it can read which desktop a window is
+    # on and move windows. Best-effort only; every failure is non-fatal.
+    if ($null -ne $script:SRVirtualDesktopType) { return $script:SRVirtualDesktopType }
+    try {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace SessionRecovery
+{
+    [ComImport]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    [Guid("a5cd92ff-29be-454c-8d04-d82879fb3f1b")]
+    public interface IVirtualDesktopManager
+    {
+        [PreserveSig] int IsWindowOnCurrentVirtualDesktop(IntPtr topLevelWindow, out bool onCurrentDesktop);
+        [PreserveSig] int GetWindowDesktopId(IntPtr topLevelWindow, out Guid desktopId);
+        [PreserveSig] int MoveWindowToDesktop(IntPtr topLevelWindow, ref Guid desktopId);
+    }
+
+    [ComImport]
+    [Guid("aa509086-5ca9-4c25-b814-4ce35a3a0e10")]
+    public class VirtualDesktopManagerComObject { }
+
+    public static class VirtualDesktop
+    {
+        public static string GetDesktopId(IntPtr window)
+        {
+            try
+            {
+                IVirtualDesktopManager manager = (IVirtualDesktopManager)new VirtualDesktopManagerComObject();
+                Guid id;
+                int hr = manager.GetWindowDesktopId(window, out id);
+                if (hr != 0 || id == Guid.Empty) return null;
+                return id.ToString("D");
+            }
+            catch { return null; }
+        }
+
+        public static bool MoveToDesktop(IntPtr window, string desktopIdText)
+        {
+            try
+            {
+                Guid id = new Guid(desktopIdText);
+                IVirtualDesktopManager manager = (IVirtualDesktopManager)new VirtualDesktopManagerComObject();
+                int hr = manager.MoveWindowToDesktop(window, ref id);
+                return hr == 0;
+            }
+            catch { return false; }
+        }
+
+        public static void QueueMove(int processId, string desktopIdText, int timeoutMs)
+        {
+            // Own background thread: wait for the process to show its main
+            // window, then move it to the desktop it was captured on. If the
+            // desktop no longer exists (rebuilt profile, different machine)
+            // the call simply fails and the window stays where Windows put it.
+            System.Threading.Thread thread = new System.Threading.Thread(delegate()
+            {
+                try { MoveProcessWhenReady(processId, desktopIdText, timeoutMs); }
+                catch { }
+            });
+            thread.IsBackground = true;
+            thread.Start();
+        }
+
+        private static void MoveProcessWhenReady(int processId, string desktopIdText, int timeoutMs)
+        {
+            try
+            {
+                IntPtr handle = IntPtr.Zero;
+                DateTime deadline = DateTime.UtcNow.AddMilliseconds(Math.Max(500, timeoutMs));
+                while (DateTime.UtcNow < deadline)
+                {
+                    try
+                    {
+                        System.Diagnostics.Process process = System.Diagnostics.Process.GetProcessById(processId);
+                        process.Refresh();
+                        if (process.MainWindowHandle != IntPtr.Zero) { handle = process.MainWindowHandle; break; }
+                    }
+                    catch { break; }
+                    System.Threading.Thread.Sleep(250);
+                }
+                if (handle == IntPtr.Zero) return;
+                System.Threading.Thread.Sleep(400);
+                try
+                {
+                    System.Diagnostics.Process process = System.Diagnostics.Process.GetProcessById(processId);
+                    process.Refresh();
+                    if (process.MainWindowHandle != IntPtr.Zero) handle = process.MainWindowHandle;
+                }
+                catch { }
+                MoveToDesktop(handle, desktopIdText);
+            }
+            catch { }
+        }
+    }
+}
+'@ -ErrorAction Stop
+        $script:SRVirtualDesktopType = $true
+    } catch {
+        $script:SRVirtualDesktopType = $false
+    }
+    return $script:SRVirtualDesktopType
+}
+
+function Get-SRWindowDesktopId {
+    param([Parameter(Mandatory = $true)][IntPtr]$WindowHandle)
+    if (-not (Get-SRVirtualDesktopHelper)) { return $null }
+    try {
+        return [SessionRecovery.VirtualDesktop]::GetDesktopId($WindowHandle)
+    } catch { return $null }
+}
+
+function Move-SRWindowToDesktop {
+    param(
+        [Parameter(Mandatory = $true)][IntPtr]$WindowHandle,
+        [Parameter(Mandatory = $true)][string]$DesktopId
+    )
+    if (-not (Get-SRVirtualDesktopHelper)) { return $false }
+    try {
+        return [bool][SessionRecovery.VirtualDesktop]::MoveToDesktop($WindowHandle, $DesktopId)
+    } catch { return $false }
+}
+
+function Get-SRMonitors {
+    # Current monitor layout, remembered in each snapshot so restore can map
+    # windows from missing monitors instead of only clamping them.
+    $result = New-Object System.Collections.Generic.List[object]
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+        foreach ($screen in @([System.Windows.Forms.Screen]::AllScreens)) {
+            $bounds = $screen.Bounds
+            $result.Add([pscustomobject]@{
+                device  = [string]$screen.DeviceName
+                x       = [int]$bounds.X
+                y       = [int]$bounds.Y
+                width   = [int]$bounds.Width
+                height  = [int]$bounds.Height
+                primary = [bool]$screen.Primary
+            })
+        }
+    } catch { }
+    return $result.ToArray()
+}
+
+function ConvertTo-SRScreenPlacement {
+    # Translates a captured window position into the current monitor layout.
+    # Same device present: keep coordinates. Monitor missing (undocked laptop):
+    # keep the window's relative position on the best-matching current monitor
+    # instead of dumping it at a clamped screen edge.
+    param(
+        [Parameter(Mandatory = $true)]$Placement,
+        $SnapshotMonitors
+    )
+    if ($null -eq $Placement) { return $Placement }
+    $current = @(Get-SRMonitors)
+    if ($current.Count -eq 0) { return $Placement }
+
+    if (@($SnapshotMonitors).Count -eq 0) {
+        # Old snapshot without monitor info: keep as-is, the placer clamps.
+        return $Placement
+    }
+
+    $centerX = $Placement.X + [int]($Placement.Width / 2)
+    $centerY = $Placement.Y + [int]($Placement.Height / 2)
+
+    $source = $null
+    foreach ($monitor in @($SnapshotMonitors)) {
+        if ($centerX -ge [int]$monitor.x -and $centerX -lt ([int]$monitor.x + [int]$monitor.width) -and
+            $centerY -ge [int]$monitor.y -and $centerY -lt ([int]$monitor.y + [int]$monitor.height)) {
+            $source = $monitor
+            break
+        }
+    }
+    if ($null -eq $source) { return $Placement }
+
+    foreach ($monitor in $current) {
+        if ([string]::Equals([string]$monitor.device, [string]$source.device, [System.StringComparison]::OrdinalIgnoreCase)) {
+            # The captured monitor still exists: coordinates stay valid.
+            return $Placement
+        }
+    }
+
+    # Monitor is gone. Prefer the primary, else the largest remaining screen.
+    $target = @($current | Where-Object { $_.primary } | Select-Object -First 1)
+    if ($target.Count -eq 0) {
+        $target = @($current | Sort-Object -Property @{ Expression = { $_.width * $_.height } } -Descending | Select-Object -First 1)
+    }
+    if ($target.Count -eq 0) { return $Placement }
+    $target = $target[0]
+
+    $sourceWidth = [Math]::Max(1, [int]$source.width)
+    $sourceHeight = [Math]::Max(1, [int]$source.height)
+    $fractionX = ([double]($centerX - [int]$source.x)) / $sourceWidth
+    $fractionY = ([double]($centerY - [int]$source.y)) / $sourceHeight
+
+    $width = [Math]::Min([int]$Placement.Width, [int]$target.width)
+    $height = [Math]::Min([int]$Placement.Height, [int]$target.height)
+    $x = [int]$target.x + [int][Math]::Round($fractionX * ([int]$target.width - $width))
+    $y = [int]$target.y + [int][Math]::Round($fractionY * ([int]$target.height - $height))
+    $x = [Math]::Max([int]$target.x, [Math]::Min($x, [int]$target.x + [int]$target.width - $width))
+    $y = [Math]::Max([int]$target.y, [Math]::Min($y, [int]$target.y + [int]$target.height - $height))
+
+    return [pscustomobject]@{
+        X        = $x
+        Y        = $y
+        Width    = $width
+        Height   = $height
+        Maximized = [bool]$Placement.Maximized
+    }
+}
+
+function Get-SRRemoteSessions {
+    # PuTTY session names and Remote Desktop targets that were actually open,
+    # so restore can reconnect to them instead of opening a blank client.
+    param([Parameter(Mandatory = $true)]$Windows)
+
+    $result = New-Object System.Collections.Generic.List[object]
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+
+    $puttySessions = @()
+    try {
+        $sessionsKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\SimonTatham\PuTTY\Sessions')
+        if ($null -ne $sessionsKey) {
+            try {
+                foreach ($name in $sessionsKey.GetSubKeyNames()) {
+                    $decoded = [Uri]::UnescapeDataString($name.Replace('%20', ' '))
+                    $puttySessions += $decoded
+                }
+            } finally { $sessionsKey.Dispose() }
+        }
+    } catch { }
+
+    foreach ($window in @($Windows)) {
+        $processName = ([string]$window.ProcessName).ToLowerInvariant()
+        $title = ([string]$window.Title).Trim()
+        if ([string]::IsNullOrWhiteSpace($title)) { continue }
+        if ($processName -eq 'putty') {
+            $session = $title -replace '(?i)\s*-\s*PuTTY\s*$', ''
+            if ($session -and ($puttySessions -contains $session)) {
+                $key = 'putty:' + $session
+                if ($seen.Add($key)) {
+                    $result.Add([pscustomobject]@{ kind = 'putty'; session = $session; title = $title })
+                }
+            }
+        } elseif ($processName -eq 'mstsc') {
+            $target = $title -replace '(?i)\s*-\s*(Remote Desktop Connection|Connexion Bureau à distance|Editor de conexão de área de trabalho remota)\s*$', ''
+            if ($target) {
+                $key = 'rdp:' + $target
+                if ($seen.Add($key)) {
+                    $result.Add([pscustomobject]@{ kind = 'rdp'; target = $target; title = $title })
+                }
+            }
+        }
+    }
+    return $result.ToArray()
+}
+
+function Resolve-SRRdpFile {
+    # Finds the .rdp file for a captured Remote Desktop window title, if any.
+    param([Parameter(Mandatory = $true)][string]$Target)
+    $candidates = @()
+    try { $candidates += (Join-Path [Environment]::GetFolderPath('MyDocuments') ($Target + '.rdp')) } catch { }
+    try { $candidates += (Join-Path [Environment]::GetFolderPath('MyDocuments') $Target) } catch { }
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    }
+    return $null
+}
+
+# ---------------------------------------------------------------------------
+# Snapshot comparison and restore preview
+# ---------------------------------------------------------------------------
+
+function Compare-SRSnapshot {
+    # Side-by-side diff of two snapshots: which apps, folders and tabs were
+    # added or removed between two moments.
+    param(
+        [Parameter(Mandatory = $true)]$Reference,
+        [Parameter(Mandatory = $true)]$Difference
+    )
+    $appNameOf = {
+        param($App)
+        $n = [string]$App.displayName
+        if ([string]::IsNullOrWhiteSpace($n)) { $n = [string]$App.name }
+        if ([string]::IsNullOrWhiteSpace($n)) { $n = [string]$App.exe }
+        return $n
+    }
+    $refApps = @(@($Reference.apps) | ForEach-Object { & $appNameOf $_ } | Where-Object { $_ })
+    $diffApps = @(@($Difference.apps) | ForEach-Object { & $appNameOf $_ } | Where-Object { $_ })
+    $refFolders = @(@($Reference.explorer) | ForEach-Object { [string]$_ } | Where-Object { $_ })
+    $diffFolders = @(@($Difference.explorer) | ForEach-Object { [string]$_ } | Where-Object { $_ })
+    $refUrls = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $diffUrls = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($browser in @($Reference.browsers)) {
+        foreach ($profile in @($browser.profiles)) {
+            foreach ($tab in @($profile.tabs)) { if ($tab.url) { [void]$refUrls.Add([string]$tab.url) } }
+        }
+    }
+    foreach ($browser in @($Difference.browsers)) {
+        foreach ($profile in @($browser.profiles)) {
+            foreach ($tab in @($profile.tabs)) { if ($tab.url) { [void]$diffUrls.Add([string]$tab.url) } }
+        }
+    }
+    $refDev = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $diffDev = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($workspace in @($Reference.devWorkspaces)) { foreach ($folder in @($workspace.folders)) { [void]$refDev.Add([string]$folder) } }
+    foreach ($workspace in @($Difference.devWorkspaces)) { foreach ($folder in @($workspace.folders)) { [void]$diffDev.Add([string]$folder) } }
+
+    return [pscustomobject]@{
+        AppsAdded        = @($diffApps | Where-Object { $refApps -notcontains $_ })
+        AppsRemoved      = @($refApps | Where-Object { $diffApps -notcontains $_ })
+        FoldersAdded     = @($diffFolders | Where-Object { $refFolders -notcontains $_ })
+        FoldersRemoved   = @($refFolders | Where-Object { $diffFolders -notcontains $_ })
+        TabsAdded        = @($diffUrls | Where-Object { -not $refUrls.Contains($_) })
+        TabsRemoved      = @($refUrls | Where-Object { -not $diffUrls.Contains($_) })
+        DevFoldersAdded  = @($diffDev | Where-Object { -not $refDev.Contains($_) })
+        DevFoldersRemoved = @($refDev | Where-Object { -not $diffDev.Contains($_) })
+    }
+}
+
+function Get-SRRestorePreview {
+    # What a restore would do right now: which apps are already running, which
+    # will start, and which are missing from this machine.
+    param([Parameter(Mandatory = $true)]$Plan)
+    $rows = New-Object System.Collections.Generic.List[object]
+    foreach ($app in @($Plan.apps)) {
+        if ($null -eq $app) { continue }
+        $exe = [string]$app.exe
+        $state = 'will-start'
+        if ([string]::IsNullOrWhiteSpace($exe) -or -not (Test-Path -LiteralPath $exe)) { $state = 'missing' }
+        elseif (Test-SRExeRunning -ExePath $exe) { $state = 'running' }
+        $rows.Add([pscustomobject]@{
+            Kind  = 'app'
+            Name  = if ($app.name) { [string]$app.name } else { $exe }
+            State = $state
+        })
+    }
+    foreach ($folder in @($Plan.explorer)) {
+        if ([string]::IsNullOrWhiteSpace([string]$folder)) { continue }
+        $rows.Add([pscustomobject]@{
+            Kind  = 'folder'
+            Name  = [string]$folder
+            State = if (Test-Path -LiteralPath ([string]$folder)) { 'will-open' } else { 'missing' }
+        })
+    }
+    foreach ($browser in @($Plan.browsers)) {
+        if ($null -eq $browser) { continue }
+        $exe = [string]$browser.exe
+        $state = 'will-start'
+        if ([string]::IsNullOrWhiteSpace($exe) -or -not (Test-Path -LiteralPath $exe)) { $state = 'missing' }
+        elseif (Test-SRExeRunning -ExePath $exe) { $state = 'running' }
+        $rows.Add([pscustomobject]@{
+            Kind  = 'browser'
+            Name  = [string]$browser.name
+            State = $state
+        })
+    }
+    return [pscustomobject]@{
+        Rows       = $rows.ToArray()
+        Running    = @($rows | Where-Object { $_.State -eq 'running' }).Count
+        WillStart  = @($rows | Where-Object { $_.State -in 'will-start', 'will-open' }).Count
+        Missing    = @($rows | Where-Object { $_.State -eq 'missing' }).Count
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Local control API (named pipe, used by the tray and Control-SessionRecovery)
+# ---------------------------------------------------------------------------
+
+function Send-SRControl {
+    # Sends one command to the running tray app over the SessionRecoveryControl
+    # named pipe. Commands: snapshot, pause, resume, status, restore-latest,
+    # workspace-save <name>, workspace-restore <name>.
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('snapshot', 'pause', 'resume', 'status', 'restore-latest', 'workspace-save', 'workspace-restore')][string]$Command,
+        [string]$Name = '',
+        [int]$TimeoutMilliseconds = 4000
+    )
+    $pipe = New-Object System.IO.Pipes.NamedPipeClientStream('.', 'SessionRecoveryControl', [System.IO.Pipes.PipeDirection]::InOut)
+    try {
+        $pipe.Connect($TimeoutMilliseconds)
+        $payload = @{ command = $Command; name = $Name } | ConvertTo-Json -Compress
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
+        $pipe.Write($bytes, 0, $bytes.Length)
+        $pipe.WriteByte(10)
+        $pipe.Flush()
+        $pipe.ReadMode = [System.IO.Pipes.PipeTransmissionMode]::Byte
+        $reader = New-Object System.IO.StreamReader($pipe)
+        $task = $reader.ReadLineAsync()
+        if (-not $task.Wait($TimeoutMilliseconds)) { throw 'The control pipe did not answer in time.' }
+        return ($task.Result | ConvertFrom-Json)
+    } finally {
+        try { $pipe.Dispose() } catch { }
+    }
+}
+
 # ---------------------------------------------------------------------------
 # Snapshot creation
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# Window thumbnails (opt-in), URL redaction, gzip storage
+# Window thumbnails (opt-in), URL redaction, gzip and encrypted storage
 # ---------------------------------------------------------------------------
 
 $script:SRThumbHelper = $null
@@ -3107,11 +3616,43 @@ function Get-SRSnapshotStateHash {
     try { return ([System.BitConverter]::ToString($md5.ComputeHash($bytes)) -replace '-', '') } finally { $md5.Dispose() }
 }
 
+function Get-SRSnapshotEncryptionEntropy {
+    # Fixed secondary entropy so every Session Recovery install on the machine
+    # agrees with itself. The real protection is the DPAPI user key.
+    return [System.Text.Encoding]::ASCII.GetBytes('SessionRecovery.Snapshot.v1')
+}
+
+function Protect-SRSnapshotBytes {
+    # DPAPI (per-user) encryption for snapshot payloads. Returns a "SRDP1"
+    # header followed by the protected blob so readers can detect it.
+    param([Parameter(Mandatory = $true)][byte[]]$Bytes)
+    Add-Type -AssemblyName System.Security -ErrorAction Stop
+    $entropy = Get-SRSnapshotEncryptionEntropy
+    $protected = [System.Security.Cryptography.ProtectedData]::Protect($Bytes, $entropy, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+    $stream = New-Object System.IO.MemoryStream
+    $stream.Write([System.Text.Encoding]::ASCII.GetBytes('SRDP1'), 0, 5)
+    $stream.Write($protected, 0, $protected.Length)
+    return $stream.ToArray()
+}
+
+function Unprotect-SRSnapshotBytes {
+    param([Parameter(Mandatory = $true)][byte[]]$Bytes)
+    if ($Bytes.Length -le 5) { throw 'Encrypted snapshot payload is empty.' }
+    Add-Type -AssemblyName System.Security -ErrorAction Stop
+    $entropy = Get-SRSnapshotEncryptionEntropy
+    $protected = New-Object byte[] ($Bytes.Length - 5)
+    [Array]::Copy($Bytes, 5, $protected, 0, $protected.Length)
+    return [System.Security.Cryptography.ProtectedData]::Unprotect($protected, $entropy, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+}
+
 function Read-SRSnapshotFile {
-    # Reads a snapshot as parsed JSON, transparently handling gzip files
-    # (session-*.json.gz) written when compressSnapshots is enabled.
+    # Reads a snapshot as parsed JSON, transparently handling DPAPI-encrypted
+    # ("SRDP1" header) and gzip (session-*.json.gz) files.
     param([Parameter(Mandatory = $true)][string]$Path)
     $bytes = [System.IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -ge 5 -and $bytes[0] -eq 0x53 -and $bytes[1] -eq 0x52 -and $bytes[2] -eq 0x44 -and $bytes[3] -eq 0x50 -and $bytes[4] -eq 0x31) {
+        $bytes = Unprotect-SRSnapshotBytes -Bytes $bytes
+    }
     if ($bytes.Length -ge 2 -and $bytes[0] -eq 0x1F -and $bytes[1] -eq 0x8B) {
         $inputStream = $null; $gzip = $null
         try {
@@ -3144,6 +3685,10 @@ function ConvertFrom-SRFileUri {
     try {
         $rest = $Value.Substring('file://'.Length)
         $rest = [Uri]::UnescapeDataString($rest)
+        if (-not $rest.StartsWith('/')) {
+            # file://server/share is the UNC host form.
+            return '\\' + $rest.Replace('/', '\')
+        }
         if ($rest.StartsWith('/')) {
             # file:/<host>/share for UNC paths, file:///c:/ for local drives.
             $trimmed = $rest.TrimStart('/')
@@ -3287,6 +3832,56 @@ function Get-SRDevWorkspaces {
     return $result.ToArray()
 }
 
+function Get-SRJetBrainsLauncher {
+    # Maps a JetBrains config folder (for example IntelliJIdea2024.1) to the
+    # installed IDE launcher so restore can open the project directly instead
+    # of falling back to an Explorer window.
+    param([string]$Product)
+    if ([string]::IsNullOrWhiteSpace($Product)) { return $null }
+
+    $executables = @{
+        'IntelliJIdea' = 'idea64.exe'
+        'IdeaIC'       = 'idea64.exe'
+        'PyCharm'      = 'pycharm64.exe'
+        'WebStorm'     = 'webstorm64.exe'
+        'PhpStorm'     = 'phpstorm64.exe'
+        'RubyMine'     = 'rubymine64.exe'
+        'CLion'        = 'clion64.exe'
+        'GoLand'       = 'goland64.exe'
+        'Rider'        = 'rider64.exe'
+        'DataGrip'     = 'datagrip64.exe'
+        'DataSpell'    = 'dataspell64.exe'
+        'AppCode'      = 'appcode64.exe'
+        'Aqua'         = 'aqua64.exe'
+        'RustRover'    = 'rustrover64.exe'
+        'Writerside'   = 'writerside64.exe'
+    }
+    $exeName = $null
+    foreach ($prefix in @($executables.Keys | Sort-Object -Property Length -Descending)) {
+        if ($Product -like ($prefix + '*')) {
+            $exeName = [string]$executables[$prefix]
+            break
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($exeName)) { return $null }
+
+    $roots = @(
+        (Join-Path $env:LOCALAPPDATA 'Programs'),
+        (Join-Path $env:LOCALAPPDATA 'JetBrains\Toolbox\apps'),
+        (Join-Path $env:ProgramFiles 'JetBrains'),
+        (Join-Path ${env:ProgramFiles(x86)} 'JetBrains')
+    )
+    foreach ($root in $roots) {
+        if ([string]::IsNullOrWhiteSpace([string]$root) -or -not (Test-Path -LiteralPath $root)) { continue }
+        try {
+            $found = Get-ChildItem -LiteralPath $root -Filter $exeName -File -Recurse -Depth 4 -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+            if ($null -ne $found) { return $found.FullName }
+        } catch { }
+    }
+    return $null
+}
+
 function Get-SRLastShutdownReason {
     # Plain-language reason for the most recent shutdown, and whether it was
     # a crash. Replaces guesswork in the restore prompt with facts.
@@ -3369,7 +3964,7 @@ function Get-SROfficeRecoveryFiles {
         try {
             if (-not (Test-Path -LiteralPath $root.Path)) { continue }
             $files = @(Get-ChildItem -LiteralPath $root.Path -File -ErrorAction SilentlyContinue |
-                Where-Object { $_.Extension -in '.asd', '.wbk', '.xar' -and $_.LastWriteTime -gt (Get-Date).AddDays(-3) })
+                Where-Object { $_.Extension -in '.asd', '.wbk', '.xar', '.xlsb' -and $_.LastWriteTime -gt (Get-Date).AddDays(-3) })
             foreach ($file in $files) {
                 $result.Add([pscustomobject]@{
                     app  = $root.App
@@ -3447,6 +4042,11 @@ function New-SRSnapshot {
         $apps = @($apps | Where-Object {
             -not (Test-SRPatternMatch -Patterns $excludeApps -Values @([string]$_.name, [string]$_.exe))
         })
+        # A browser the user excluded must not keep capturing tabs or window
+        # thumbnails through the browser path.
+        $browsers = @($browsers | Where-Object {
+            -not (Test-SRPatternMatch -Patterns $excludeApps -Values @([string]$_.key, [string]$_.name, [string]$_.exe))
+        })
     }
 
     $excludeFolders = @($config.excludeFolders)
@@ -3523,6 +4123,44 @@ function New-SRSnapshot {
     } catch { }
     if ($devCapture) { $devWorkspaces = @(Get-SRDevWorkspaces) }
 
+    # Virtual desktops (best-effort, documented IVirtualDesktopManager): each
+    # captured app remembers the desktop its window lived on.
+    $restoreDesktops = $true
+    try {
+        $desktopsProperty = $config.PSObject.Properties['restoreVirtualDesktops']
+        if ($null -ne $desktopsProperty) { $restoreDesktops = [bool]$desktopsProperty.Value }
+    } catch { }
+    if ($restoreDesktops -and (Get-SRVirtualDesktopHelper)) {
+        foreach ($app in $apps) {
+            $matchName = ([string]$app.name).ToLowerInvariant()
+            $best = $null
+            foreach ($window in $windows) {
+                if (([string]$window.ProcessName).ToLowerInvariant() -ne $matchName) { continue }
+                if ([bool]$window.Minimized) { continue }
+                $best = $window
+                break
+            }
+            if ($null -eq $best) {
+                foreach ($window in $windows) {
+                    if (([string]$window.ProcessName).ToLowerInvariant() -eq $matchName) { $best = $window; break }
+                }
+            }
+            if ($null -ne $best) {
+                $desktopId = Get-SRWindowDesktopId -WindowHandle ([IntPtr][int64]$best.Handle)
+                if (-not [string]::IsNullOrWhiteSpace($desktopId)) {
+                    $app | Add-Member -NotePropertyName desktopId -NotePropertyValue $desktopId -Force
+                }
+            }
+        }
+    }
+
+    # Remote sessions: open PuTTY sessions and Remote Desktop targets.
+    $remote = @(Get-SRRemoteSessions -Windows $windows)
+
+    # Monitor layout at capture time, so restore can map windows from
+    # monitors that no longer exist instead of only clamping them.
+    $monitors = @(Get-SRMonitors)
+
     # Kept for the thumbnail pass in Save-SRSnapshot; never serialized.
     $script:SRLastWindows = $windows
 
@@ -3539,6 +4177,8 @@ function New-SRSnapshot {
         explorer      = $folders
         browsers      = $browsers
         devWorkspaces = $devWorkspaces
+        remote        = $remote
+        monitors      = $monitors
         stats         = [pscustomobject]@{
             windows  = $windows.Count
             apps     = $apps.Count
@@ -3566,7 +4206,7 @@ function Remove-OldSRSnapshots {
         if (-not [string]::IsNullOrWhiteSpace([string]$name)) { [void]$pinnedNames.Add([string]$name) }
     }
 
-    $files = @(Get-ChildItem -LiteralPath $script:SRSnapshotDir -Filter 'session-*.json' -File -ErrorAction SilentlyContinue |
+    $files = @(Get-ChildItem -LiteralPath $script:SRSnapshotDir -Filter 'session-*.json*' -File -ErrorAction SilentlyContinue |
         Sort-Object -Property LastWriteTime -Descending)
 
     if ($MaxAgeDays -gt 0) {
@@ -3574,18 +4214,34 @@ function Remove-OldSRSnapshots {
         foreach ($file in $files) {
             if ($pinnedNames.Contains($file.Name)) { continue }
             if ($file.LastWriteTime -lt $cutoff) {
-                try { Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop } catch { }
+                Remove-SRSnapshotAndThumbnails -File $file
             }
         }
-        $files = @(Get-ChildItem -LiteralPath $script:SRSnapshotDir -Filter 'session-*.json' -File -ErrorAction SilentlyContinue |
+        $files = @(Get-ChildItem -LiteralPath $script:SRSnapshotDir -Filter 'session-*.json*' -File -ErrorAction SilentlyContinue |
             Sort-Object -Property LastWriteTime -Descending)
     }
 
     $removable = @($files | Where-Object { -not $pinnedNames.Contains($_.Name) })
     if ($removable.Count -le $Keep) { return }
     foreach ($file in $removable[$Keep..($removable.Count - 1)]) {
-        try { Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop } catch { }
+        Remove-SRSnapshotAndThumbnails -File $file
     }
+}
+
+function Remove-SRSnapshotAndThumbnails {
+    # Deletes a snapshot file and its thumbnail folder together. Without this,
+    # retention emptied the JSON directory while the thumbs tree kept growing.
+    param([Parameter(Mandatory = $true)]$File)
+    try {
+        Remove-Item -LiteralPath $File.FullName -Force -ErrorAction Stop
+    } catch { }
+    try {
+        $thumbName = [System.IO.Path]::GetFileName($File.Name) -replace '^session-', ''
+        $thumbName = $thumbName -replace '\.json(\.gz)?$', ''
+        if (-not [string]::IsNullOrWhiteSpace($thumbName)) {
+            Remove-SRThumbnails -SnapshotName $thumbName
+        }
+    } catch { }
 }
 
 function Get-SRIdleSeconds {
@@ -3742,25 +4398,36 @@ function Save-SRSnapshot {
             } catch { Write-SRLog -Level DEBUG -Message ("Thumbnails failed: {0}" -f $_.Exception.Message) }
         }
 
-        $fileName = 'session-{0}.json{1}' -f $captured.ToString('yyyyMMdd-HHmmss-fff'), $(if ($compress) { '.gz' } else { '' })
+        $encrypt = $false
+        try {
+            $encryptProperty = $config.PSObject.Properties['encryptSnapshots']
+            if ($null -ne $encryptProperty) { $encrypt = [bool]$encryptProperty.Value }
+        } catch { }
+
+        $fileName = 'session-{0}.json{1}' -f $captured.ToString('yyyyMMdd-HHmmss-fff'), $(if ($compress -and -not $encrypt) { '.gz' } else { '' })
         $path = Join-Path $script:SRSnapshotDir $fileName
         $json = $snapshot | ConvertTo-Json -Depth 12
+        # Payload pipeline: JSON text -> (optional gzip) -> (optional DPAPI).
+        # Encryption wraps compression because encrypted bytes do not compress.
+        $payload = [System.Text.Encoding]::UTF8.GetBytes($json)
         if ($compress) {
-            $inputStream = $null; $gzip = $null; $fileStream = $null
+            $plainStream = New-Object System.IO.MemoryStream (,$payload)
+            $packed = New-Object System.IO.MemoryStream
+            $gzipPlain = $null
             try {
-                $payload = [System.Text.Encoding]::UTF8.GetBytes($json)
-                $inputStream = New-Object System.IO.MemoryStream (,$payload)
-                $fileStream = [System.IO.File]::Open($path, [System.IO.FileMode]::CreateNew)
-                $gzip = New-Object System.IO.Compression.GZipStream($fileStream, [System.IO.Compression.CompressionLevel]::Optimal)
-                $inputStream.CopyTo($gzip)
+                $gzipPlain = New-Object System.IO.Compression.GZipStream($packed, [System.IO.Compression.CompressionLevel]::Optimal, $true)
+                $plainStream.CopyTo($gzipPlain)
             } finally {
-                if ($null -ne $gzip) { $gzip.Dispose() }
-                elseif ($null -ne $fileStream) { $fileStream.Dispose() }
-                if ($null -ne $inputStream) { $inputStream.Dispose() }
+                if ($null -ne $gzipPlain) { $gzipPlain.Dispose() }
+                $plainStream.Dispose()
             }
-        } else {
-            [System.IO.File]::WriteAllText($path, $json, (New-Object System.Text.UTF8Encoding($false)))
+            $payload = $packed.ToArray()
+            $packed.Dispose()
         }
+        if ($encrypt) {
+            $payload = Protect-SRSnapshotBytes -Bytes $payload
+        }
+        [System.IO.File]::WriteAllBytes($path, $payload)
         Remove-OldSRSnapshots -Keep ([int]$config.keepSnapshots) -MaxAgeDays ([int]$config.keepSnapshotDays) -Pinned @($config.pinnedSnapshots)
         Write-SRLog -Message ("Snapshot saved: {0} ({1} apps, {2} folders, {3} browsers, {4} tabs)" -f $path, $snapshot.stats.apps, $snapshot.stats.folders, $snapshot.stats.browsers, $snapshot.stats.tabs)
         try {
@@ -3772,7 +4439,7 @@ function Save-SRSnapshot {
                     New-Item -ItemType Directory -Path $exportFolder -Force | Out-Null
                 }
                 Copy-Item -LiteralPath $path -Destination (Join-Path $exportFolder (Split-Path -Leaf $path)) -Force
-                $exports = @(Get-ChildItem -LiteralPath $exportFolder -Filter 'session-*.json' -File -ErrorAction SilentlyContinue |
+                $exports = @(Get-ChildItem -LiteralPath $exportFolder -Filter 'session-*.json*' -File -ErrorAction SilentlyContinue |
                     Sort-Object -Property LastWriteTime -Descending)
                 if ($exports.Count -gt 10) {
                     foreach ($old in ($exports | Select-Object -Skip 10)) {
@@ -4158,19 +4825,79 @@ function Invoke-SRRestore {
 
     $results = New-Object System.Collections.Generic.List[object]
 
+    $config = Get-SRConfig
+
+    # Launch ordering: apps listed in launchOrder start first, in that order,
+    # so a VPN or database is up before the apps that need it. Per-app waits
+    # (launchWaits: app -> process name) block until that process appears.
+    $launchOrder = @()
+    try { $launchOrder = @($config.launchOrder) } catch { }
+    $appDelays = @{}
+    try {
+        $delaysProperty = $config.PSObject.Properties['appLaunchDelays']
+        if ($null -ne $delaysProperty) {
+            foreach ($property in $delaysProperty.Value.PSObject.Properties) { $appDelays[$property.Name] = $property.Value }
+        }
+    } catch { }
+    $appWaits = @{}
+    try {
+        $waitsProperty = $config.PSObject.Properties['launchWaits']
+        if ($null -ne $waitsProperty) {
+            foreach ($property in $waitsProperty.Value.PSObject.Properties) { $appWaits[$property.Name] = $property.Value }
+        }
+    } catch { }
+
+    $orderedApps = @($Plan.apps | Where-Object { $null -ne $_ })
+    if (@($launchOrder).Count -gt 0) {
+        $orderedApps = @(
+            # Listed apps in launchOrder sequence, then everything else.
+            foreach ($name in @($launchOrder)) {
+                $leaf = ([string]$name).ToLowerInvariant()
+                $orderedApps | Where-Object { (([string]$_.name).ToLowerInvariant() -eq $leaf) -or ([string]$_.exe -like ('*\' + $name)) }
+            }
+            $orderedApps | Where-Object {
+                $app = $_
+                $leaf = ([string]$app.name).ToLowerInvariant()
+                $listed = $false
+                foreach ($name in @($launchOrder)) {
+                    if (([string]$name).ToLowerInvariant() -eq $leaf) { $listed = $true }
+                }
+                -not $listed
+            }
+        )
+    }
+
     $total = 0
-    foreach ($app in @($Plan.apps)) { if ($null -ne $app) { $total++ } }
+    foreach ($app in @($orderedApps)) { $total++ }
     foreach ($folder in @($Plan.explorer)) { if (-not [string]::IsNullOrWhiteSpace([string]$folder)) { $total++ } }
     foreach ($browser in @($Plan.browsers)) { if ($null -ne $browser) { $total++ } }
     $index = 0
 
-    foreach ($app in @($Plan.apps)) {
+    foreach ($app in @($orderedApps)) {
         if ($null -eq $app) { continue }
         $index++
         if ($null -ne $Progress) {
             try { & $Progress $index $total ([string]$app.name) } catch { }
         }
-        $appResult = Start-SRApplication -App $app -Force:$Force
+        $appKey = ([string]$app.name).ToLowerInvariant()
+        if ($appWaits.ContainsKey($appKey)) {
+            $waitMinutes = 0
+            $rawWait = [string]$appWaits[$appKey]
+            if ($rawWait -match '^(.+?)\s+after\s+(.+)$') { $rawWait = $Matches[1]; $waitMinutes = [int]$Matches[2] }
+            $waitFor = ([string]$rawWait).Trim()
+            if (-not [string]::IsNullOrWhiteSpace($waitFor) -and -not (Get-Process -Name $waitFor -ErrorAction SilentlyContinue)) {
+                $deadline = (Get-Date).AddMinutes([Math]::Max(1, $waitMinutes))
+                while ((Get-Date) -lt $deadline -and -not (Get-Process -Name $waitFor -ErrorAction SilentlyContinue)) {
+                    Start-Sleep -Milliseconds 1500
+                }
+            }
+        }
+        if ($appDelays.ContainsKey($appKey)) {
+            $delaySeconds = 0
+            try { $delaySeconds = [int]$appDelays[$appKey] } catch { }
+            if ($delaySeconds -gt 0) { Start-Sleep -Seconds ([Math]::Min(120, $delaySeconds)) }
+        }
+        $appResult = Start-SRApplication -App $app -Force:$Force -SnapshotMonitors $Plan.monitors
         $appResult | Add-Member -NotePropertyName Target -NotePropertyValue ([string]$app.name) -Force
         $results.Add($appResult)
     }
@@ -4228,6 +4955,8 @@ function Invoke-SRRestore {
         } elseif ($kind -eq 'terminal') {
             $wtExe = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\wt.exe'
             if (Test-Path -LiteralPath $wtExe) { $launcher = $wtExe }
+        } elseif ($kind -eq 'jetbrains') {
+            $launcher = Get-SRJetBrainsLauncher -Product $tool
         }
         foreach ($folder in @($workspace.folders)) {
             if ([string]::IsNullOrWhiteSpace([string]$folder) -or -not (Test-Path -LiteralPath $folder)) { continue }
@@ -4246,6 +4975,10 @@ function Invoke-SRRestore {
                     Start-Process -FilePath $launcher -ArgumentList ('-d "{0}"' -f [string]$folder)
                     $started = $true
                     $message = 'Windows Terminal opened here'
+                } elseif ($null -ne $launcher -and $kind -eq 'jetbrains') {
+                    Start-Process -FilePath $launcher -ArgumentList ('"{0}"' -f [string]$folder)
+                    $started = $true
+                    $message = 'Reopened in ' + $tool
                 } else {
                     Start-Process -FilePath 'explorer.exe' -ArgumentList ('"{0}"' -f [string]$folder)
                     $started = $true
@@ -4260,6 +4993,60 @@ function Invoke-SRRestore {
                 Message = $message
             })
         }
+    }
+
+    # Remote sessions: reopen the PuTTY sessions and Remote Desktop windows
+    # that were captured, reconnecting straight to the same targets.
+    foreach ($session in @($Plan.remote)) {
+        if ($null -eq $session) { continue }
+        $index++
+        $target = ''
+        $started = $false
+        $message = ''
+        try {
+            if ([string]$session.kind -eq 'putty') {
+                $target = 'PuTTY: ' + [string]$session.session
+                $puttyExe = Get-SRAppPath -ExeName 'putty.exe'
+                if ([string]::IsNullOrWhiteSpace([string]$puttyExe)) {
+                    foreach ($candidate in @(
+                        (Join-Path $env:ProgramFiles 'PuTTY\putty.exe'),
+                        (Join-Path ${env:ProgramFiles(x86)} 'PuTTY\putty.exe')
+                    )) {
+                        if (Test-Path -LiteralPath $candidate) { $puttyExe = $candidate; break }
+                    }
+                }
+                if (-not [string]::IsNullOrWhiteSpace([string]$puttyExe)) {
+                    [void](Start-SRDetached -FilePath ([string]$puttyExe) -Arguments @('-load', [string]$session.session))
+                    $started = $true
+                    $message = 'PuTTY session reopened'
+                } else {
+                    $message = 'PuTTY was not found on this PC'
+                }
+            } elseif ([string]$session.kind -eq 'rdp') {
+                $rdpTarget = [string]$session.target
+                $target = 'Remote Desktop: ' + $rdpTarget
+                $rdpFile = Resolve-SRRdpFile -Target $rdpTarget
+                $mstsc = Join-Path $env:SystemRoot 'System32\mstsc.exe'
+                if (-not (Test-Path -LiteralPath $mstsc)) {
+                    $message = 'Remote Desktop client was not found'
+                } elseif ($rdpFile) {
+                    [void](Start-SRDetached -FilePath $mstsc -Arguments @($rdpFile))
+                    $started = $true
+                    $message = 'Reconnected with ' + (Split-Path -Leaf $rdpFile)
+                } else {
+                    [void](Start-SRDetached -FilePath $mstsc -Arguments @(('/v:{0}' -f $rdpTarget)))
+                    $started = $true
+                    $message = 'Reconnected to ' + $rdpTarget
+                }
+            }
+        } catch {
+            $message = 'Could not reopen: ' + $_.Exception.Message
+        }
+        $results.Add([pscustomobject]@{
+            Target  = $target
+            Started = $started
+            Message = $message
+        })
     }
 
     return $results.ToArray()
@@ -4299,11 +5086,23 @@ function New-SRRestorePlan {
         }
     }
 
+    # Dev workspaces, monitor layout and remote sessions travel with the plan
+    # so both the interactive window and -NoUI restores behave identically.
+    $dev = @()
+    try { $dev = @($Snapshot.devWorkspaces) } catch { }
+    $monitors = $null
+    try { $monitors = @($Snapshot.monitors) } catch { }
+    $remote = @()
+    try { $remote = @($Snapshot.remote) } catch { }
+
     return [pscustomobject]@{
         apps      = $apps.ToArray()
         explorer  = $explorer.ToArray()
         browsers  = $browsers.ToArray()
         tabMode   = $TabMode
+        dev       = $dev
+        monitors  = $monitors
+        remote    = $remote
     }
 }
 
@@ -4777,7 +5576,7 @@ function Get-SRDiagnostics {
 
     # Diagnostics only needs the newest snapshot. Parsing the whole timeline
     # was the slowest part of this check on long-running installs.
-    $snapshotFiles = @(Get-ChildItem -LiteralPath $snapshotDir -Filter 'session-*.json' -File -ErrorAction SilentlyContinue |
+    $snapshotFiles = @(Get-ChildItem -LiteralPath $snapshotDir -Filter 'session-*.json*' -File -ErrorAction SilentlyContinue |
         Sort-Object -Property LastWriteTime -Descending)
     $snapshotCount = $snapshotFiles.Count
     $latestPath = $null

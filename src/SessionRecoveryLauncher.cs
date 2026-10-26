@@ -15,8 +15,8 @@ using WinFormsTimer = System.Windows.Forms.Timer;
 [assembly: AssemblyDescription("Session Recovery desktop host")]
 [assembly: AssemblyProduct("Session Recovery")]
 [assembly: AssemblyCompany("Bilalmesk")]
-[assembly: AssemblyVersion("2.5.0.0")]
-[assembly: AssemblyFileVersion("2.5.0.0")]
+[assembly: AssemblyVersion("2.6.0.0")]
+[assembly: AssemblyFileVersion("2.6.0.0")]
 
 namespace SessionRecoveryLauncher
 {
@@ -89,6 +89,11 @@ namespace SessionRecoveryLauncher
                 case "--diagnostics":
                     scriptName = "Studio-SessionRecovery.ps1";
                     scriptArguments = "-Page Diagnostics";
+                    showErrors = true;
+                    break;
+                case "--control":
+                    // Local command-line API (snapshot, status, workspaces...).
+                    scriptName = "Control-SessionRecovery.ps1";
                     showErrors = true;
                     break;
                 case "--settings":

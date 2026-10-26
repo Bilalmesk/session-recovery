@@ -1,0 +1,165 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Pester tests (Windows PowerShell 5.1)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Pester 5
+        shell: powershell
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module -Name Pester -MinimumVersion 5.5 -Force -Scope CurrentUser -SkipPublisherCheck
+
+      - name: Parse-check all PowerShell sources
+        shell: powershell
+        run: |
+          $files = @(
+            'src/SessionRecovery.psm1',
+            'src/Studio-SessionRecovery.ps1',
+            'src/Restore-Session.ps1',
+            'src/Tray-SessionRecovery.ps1',
+            'src/Strings.ps1',
+            'src/Control-SessionRecovery.ps1',
+            'src/Save-Session.ps1',
+            'src/Watch-Session.ps1',
+            'src/Diagnostics.ps1',
+            'installer/Build-MSI.ps1',
+            'installer/Sign-Release.ps1',
+            'tests/Invoke-UiAudit.ps1',
+            'tests/Invoke-InstallerSmoke.ps1'
+          )
+          $failed = $false
+          foreach ($file in $files) {
+            $tokens = $null; $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile((Join-Path $env:GITHUB_WORKSPACE $file), [ref]$tokens, [ref]$errors)
+            if ($errors.Count -gt 0) {
+              $failed = $true
+              Write-Host "::error file=$file::Parse errors found"
+              foreach ($error in $errors) {
+                Write-Host ("  line {0}: {1}" -f $error.Extent.StartLineNumber, $error.Message)
+              }
+            } else {
+              Write-Host "OK $file"
+            }
+          }
+          if ($failed) { exit 1 }
+
+      - name: Run Pester tests
+        shell: powershell
+        run: |
+          Import-Module Pester -MinimumVersion 5.5 -Force
+          $result = Invoke-Pester -Path tests -CI -PassThru -Output Detailed
+          exit $result.FailedCount
+
+  build:
+    name: Build MSI
+    runs-on: windows-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build the MSI
+        shell: powershell
+        run: |
+          # Tag pushes build their exact version; branches and PRs build the
+          # script's default version.
+          $refVersion = $env:GITHUB_REF_NAME -replace '^v',''
+          if ($refVersion -match '^\d+\.\d+\.\d+(\.\d+)?$') {
+            & .\installer\Build-MSI.ps1 -Version $refVersion
+          } else {
+            & .\installer\Build-MSI.ps1
+          }
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Sign the MSI (when signing secrets exist)
+        shell: powershell
+        run: |
+          & .\installer\Sign-Release.ps1 -Path (Join-Path $env:GITHUB_WORKSPACE 'dist\SessionRecovery-*.msi') -ErrorAction SilentlyContinue
+          # Missing secrets are not a CI failure; unsigned builds are expected
+          # from forks.
+
+      - name: Compute SHA256
+        shell: powershell
+        run: |
+          Get-ChildItem dist\SessionRecovery-*.msi | ForEach-Object {
+            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+            "$hash  $($_.Name)" | Set-Content -LiteralPath ($_.FullName + '.sha256')
+            Write-Host "$hash  $($_.Name)"
+          }
+
+      - name: Upload MSI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SessionRecovery-msi
+          path: |
+            dist/SessionRecovery-*.msi
+            dist/SessionRecovery-*.msi.sha256
+          if-no-files-found: error
+
+  ui-audit:
+    name: UI layout audit (9 languages)
+    runs-on: windows-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Render and audit every supported language
+        shell: powershell
+        run: |
+          & .\tests\Invoke-UiAudit.ps1 -Size 1040x700 -Scroll both -OutputRoot (Join-Path $env:GITHUB_WORKSPACE 'ui-audit')
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Upload layout reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-audit
+          path: ui-audit
+          if-no-files-found: ignore
+
+  installer-smoke:
+    name: Installer smoke test
+    runs-on: windows-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the built MSI
+        uses: actions/download-artifact@v4
+        with:
+          name: SessionRecovery-msi
+          path: dist
+
+      - name: Install, verify, render and uninstall
+        shell: powershell
+        run: |
+          $msi = Get-ChildItem dist\SessionRecovery-*.msi | Select-Object -First 1
+          if (-not $msi) { throw 'No MSI artifact was downloaded.' }
+          & .\tests\Invoke-InstallerSmoke.ps1 -MsiPath $msi.FullName -OutputRoot (Join-Path $env:GITHUB_WORKSPACE 'installer-smoke')
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Upload installer logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-smoke
+          path: installer-smoke
+          if-no-files-found: ignore

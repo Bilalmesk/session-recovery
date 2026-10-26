@@ -13,7 +13,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string]$Version = '2.5.0',
+    [string]$Version = '2.6.0',
     [switch]$NoRestore
 )
 
@@ -75,29 +75,28 @@ Session Recovery {0}
 Reopen the apps, File Explorer folders and browser tabs that were open before
 a crash, power cut or unexpected restart.
 
-What's new in 2.5
+What's new in 2.6
 -----------------
-- Window thumbnails (opt-in): each snapshot can store a small JPEG of every
-  window, so the timeline shows what your screen actually looked like.
-  Excluded apps are never captured. Off by default for privacy.
-- Dev workspace restore: folders open in VS Code, Cursor and JetBrains IDEs
-  are captured from the editors' own state files and reopened on restore;
-  Windows Terminal directories reopen with wt.exe -d.
-- Crash facts: the restore window and Diagnostics now show why Windows
-  stopped (power loss, blue screen with stop code, or a clean restart),
-  read from the System event log.
-- Office AutoRecover awareness: after a crash the restore window lists the
-  .asd/.wbk/.xar files Office kept, pointing straight at recoverable work.
-- Named workspaces: save the current session as "Work" or "Study" from the
-  tray and restore it later in one click.
-- Event-driven snapshots: extra captures on lock, sleep/resume and when the
-  battery runs low (all optional).
-- Change detection: identical moments are skipped, so retention covers more
-  real changes; snapshots can optionally be gzip-compressed.
-- URL redaction: query strings and fragments are stripped from captured
-  URLs by default, keeping tokens out of the snapshot files.
-- Nine languages, fourteen themes, media restore beyond VLC, broader
-  browser detection and silent automatic snapshots carry over from 2.4.
+- Every page and dialog now fits long translations in all nine languages:
+  long labels wrap or ellipsize, hint text wraps, badges size to their text,
+  and the layout audit checks every page at normal and minimum window sizes.
+- Snapshots can be sealed with DPAPI encryption using your Windows user key;
+  gzip-compressed snapshots now follow the same retention rules.
+- Virtual desktops are remembered per window and restored when the desktop
+  still exists. Windows from unplugged monitors are mapped onto the current
+  layout instead of being clamped off-screen.
+- Dev workspace restore reopens VS Code, Cursor, JetBrains IDEs and Windows
+  Terminal folders directly from the editors' own recent-project state.
+- Crash facts show why Windows stopped (power loss, blue screen with stop
+  code, or a clean restart), and Office AutoRecover files (.asd/.wbk/.xar/
+  .xlsb) are listed after a crash.
+- PuTTY sessions and Remote Desktop targets reconnect directly on restore;
+  mpv reports exact playback positions through its IPC pipe.
+- Launch ordering rules, per-app delays and waits, a restore preview,
+  snapshot compare and a local control pipe.
+- Pester tests, a nine-language UI audit, an MSI build and an installer smoke
+  test run automatically on every pull request.
+- Window thumbnails remain opt-in and skip excluded apps and browsers.
 Install
 -------
 1. Download both files from the GitHub Releases page:
@@ -108,8 +107,9 @@ Install
    current user in:
      %LOCALAPPDATA%\SessionRecovery\app
    No administrator rights are required.
-   The MSI is not code-signed. If Windows SmartScreen appears, choose
-   More info > Run anyway after checking the SHA256 below.
+   The MSI is unsigned unless the release was built with signing credentials.
+   If Windows SmartScreen appears, choose More info > Run anyway after
+   checking the SHA256 below.
 3. A Session Recovery desktop icon opens the Studio. The background app starts
    after the next sign-in; you can also open Start Menu > Session Recovery >
    Run in Background.
@@ -130,7 +130,10 @@ Your data
 Snapshots, logs and settings are stored locally in:
   %LOCALAPPDATA%\SessionRecovery
 
-Nothing is uploaded. Snapshots are not encrypted.
+Nothing is uploaded. Snapshots are plain JSON by default; if you enable
+encryption in Settings, the payload is sealed with DPAPI and only your
+Windows user on this PC can read it. Excluded apps, folders and URLs never
+reach the snapshot files.
 
 Uninstall
 ---------
