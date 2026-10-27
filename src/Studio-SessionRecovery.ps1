@@ -29,6 +29,10 @@ $script:Pages = [ordered]@{}
 $script:NavButtons = @{}
 $script:Ui = @{}
 $script:UiReady = $false
+# Render mode is used by the layout audit. Set it before the first sidebar
+# refresh so audit runs are deterministic and always exercise the longest
+# status text (no background app and no scheduled task) on any machine.
+$script:RenderMode = -not [string]::IsNullOrWhiteSpace($RenderDir)
 $script:CurrentPage = 'Dashboard'
 $script:SettingsLoaded = $false
 $script:ExclusionCards = @()
@@ -1499,6 +1503,22 @@ function Get-StudioTrayState {
     if (-not $Force -and $null -ne $script:TrayStateCache -and ($now - $script:TrayStateCacheAt).TotalSeconds -lt 30) {
         return $script:TrayStateCache
     }
+    if ($script:RenderMode) {
+        # The render audit must not depend on whether the build machine has
+        # Session Recovery tasks registered. "Not running" is the longest
+        # sidebar status across all nine languages.
+        $state = [pscustomobject]@{
+            Running     = $false
+            Tasks       = $false
+            Mode        = 'Not running'
+            Count       = 0
+            TaskState   = ''
+            TaskEnabled = $false
+        }
+        $script:TrayStateCache = $state
+        $script:TrayStateCacheAt = $now
+        return $state
+    }
 
     $trayPids = @()
     $nativeProcesses = @(Get-Process -Name 'SessionRecovery' -ErrorAction SilentlyContinue)
@@ -1911,7 +1931,7 @@ $restoreSidebar.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [Syste
 $restoreSidebar.Add_Click({ Open-StudioRestore })
 $sidebar.Controls.Add($restoreSidebar)
 
-$sidebarStatusCard = New-StudioCard -X 14 -Y 0 -Width 208 -Height 140 -Fill $script:P.CardAlt -Border $script:P.BorderSoft -Radius 12
+$sidebarStatusCard = New-StudioCard -X 14 -Y 0 -Width 208 -Height 156 -Fill $script:P.CardAlt -Border $script:P.BorderSoft -Radius 12
 $sidebarStatusCard.CanvasColor = $script:P.Sidebar
 $sidebarStatusCard.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
 $sidebar.Controls.Add($sidebarStatusCard)
@@ -1926,11 +1946,12 @@ $sidebarStatusCard.Controls.Add($sidebarTitle)
 $sidebarStatus = New-StudioLabel -Text 'Checking...' -X 14 -Y 60 -Width 200 -Height 18 -Font $script:FontSemibold -Color $script:P.Text
 $sidebarStatusCard.Controls.Add($sidebarStatus)
 $script:Ui.SidebarStatus = $sidebarStatus
-$sidebarDetail = New-StudioLabel -Text '' -X 14 -Y 78 -Width 200 -Height 16 -Font $script:FontBodySmall -Color $script:P.Muted
+# French, Spanish, Portuguese and Russian need two lines at this width.
+$sidebarDetail = New-StudioLabel -Text '' -X 14 -Y 78 -Width 180 -Height 30 -Font $script:FontBodySmall -Color $script:P.Muted
 $sidebarStatusCard.Controls.Add($sidebarDetail)
 $script:Ui.SidebarDetail = $sidebarDetail
 
-$trayButton = New-StudioButton -Text 'Start background app' -X 14 -Y 98 -Width 180 -Height 30 -Glyph ''
+$trayButton = New-StudioButton -Text 'Start background app' -X 14 -Y 114 -Width 180 -Height 30 -Glyph ''
 $trayButton.Visible = $true
 $trayButton.Add_Click({ Start-StudioBackground })
 $sidebarStatusCard.Controls.Add($trayButton)
@@ -4563,8 +4584,8 @@ foreach ($bufferedControl in @($main, $sidebar, $header, $snapSplit, $snapFlow, 
 function Layout-StudioSidebar {
     $height = $sidebar.ClientSize.Height
     if ($height -le 100) { return }
-    $restoreSidebar.Top = $height - 234
-    $sidebarStatusCard.Top = $height - 182
+    $restoreSidebar.Top = $height - 250
+    $sidebarStatusCard.Top = $height - 198
     $sidebarVersion.Top = $height - 28
 }
 
@@ -4628,6 +4649,9 @@ function Layout-StudioDashboard {
     $quickCard.Width = $quickWidth
     $quickCard.Height = $lowerHeight
     $recentViewAll.Left = $recentCard.Width - 178
+    # Keep the heading box clear of the right-aligned button at the minimum
+    # window size; the longest translation still fits comfortably.
+    $recentHeading.Width = [Math]::Max(120, $recentViewAll.Left - 18 - 12)
     $recentFlow.Width = $recentCard.Width - 32
     $recentFlow.Height = [Math]::Max(72, $lowerHeight - 94)
     $recentSpark.Top = $lowerHeight - 42

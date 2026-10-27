@@ -17,7 +17,7 @@ param(
     [string]$MsiPath,
     [string]$SourceRoot = '',
     [string]$Language = 'fr',
-    [string]$Size = '1040x700',
+    [string]$Size = '1024x661',
     [string]$OutputRoot = ''
 )
 

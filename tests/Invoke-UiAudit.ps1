@@ -10,13 +10,14 @@
 
     Examples:
       .\tests\Invoke-UiAudit.ps1
-      .\tests\Invoke-UiAudit.ps1 -Size 1040x700 -Scroll both
+      .\tests\Invoke-UiAudit.ps1 -Size 1024x661 -Scroll both
       .\tests\Invoke-UiAudit.ps1 -Languages en,fr,ar -Size 1160x680
 #>
 [CmdletBinding()]
 param(
     [string[]]$Languages = @('en', 'ar', 'fr', 'es', 'de', 'pt', 'ru', 'zh', 'tr'),
-    [string]$Size = '1040x700',
+    # Client area at the app's minimum outer size (1040x700).
+    [string]$Size = '1024x661',
     [ValidateSet('top', 'bottom', 'both')]
     [string]$Scroll = 'both',
     [string]$OutputRoot = '',

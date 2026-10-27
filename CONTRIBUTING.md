@@ -42,7 +42,7 @@ only green PRs.
   at the smallest supported window size:
 
   ```powershell
-  powershell -File tests\Invoke-UiAudit.ps1 -Size 1040x700 -Scroll both
+  powershell -File tests\Invoke-UiAudit.ps1 -Size 1024x661 -Scroll both
   ```
 
   Long translated strings (German, Russian, Arabic) are the classic source of

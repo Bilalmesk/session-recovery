@@ -131,7 +131,10 @@ jobs:
       - name: Render and audit every supported language
         shell: powershell
         run: |
-          & .\tests\Invoke-UiAudit.ps1 -Size 1040x700 -Scroll both -OutputRoot (Join-Path $env:GITHUB_WORKSPACE 'ui-audit')
+          # 1024x661 is the client area at the minimum outer size (1040x700).
+          & .\tests\Invoke-UiAudit.ps1 -Size 1024x661 -Scroll both -OutputRoot (Join-Path $env:GITHUB_WORKSPACE 'ui-audit\minimum')
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          & .\tests\Invoke-UiAudit.ps1 -Size 1160x680 -Scroll both -OutputRoot (Join-Path $env:GITHUB_WORKSPACE 'ui-audit\normal')
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Upload layout reports on failure
