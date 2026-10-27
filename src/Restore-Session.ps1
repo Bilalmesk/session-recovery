@@ -914,7 +914,7 @@ $brandName.Location = New-Object System.Drawing.Point(80, 18)
 $header.Controls.Add($brandName)
 
 $brandMeta = New-Object System.Windows.Forms.Label
-$brandMeta.Text = 'LOCAL SNAPSHOTS  /  V2.6.0'
+$brandMeta.Text = 'LOCAL SNAPSHOTS  /  V2.6.1'
 $brandMeta.Font = New-Object System.Drawing.Font('Consolas', 7.5)
 $brandMeta.ForeColor = $rsMuted
 $brandMeta.AutoSize = $true
@@ -1293,10 +1293,10 @@ $restoreButton.Add_Click({
         return
     }
 
-    # Imported snapshots are already marked by Import-SRSnapshotFile, but the
-    # file could also be dropped into the data folder by hand. Treat the
-    # marker as untrusted input and show the exact program list before any
-    # process starts.
+    # A snapshot is trusted only when its provenance carries this install's
+    # ID. Imported files, hand-dropped files and files from another install
+    # all fail that check, so show the exact program list before any process
+    # starts.
     if (Test-SRImportedSnapshot -Snapshot $entry.Snapshot) {
         $programLines = @($selectedApps | ForEach-Object { '{0}  —  {1}' -f [string]$_.name, [string]$_.exe })
         $programText = if ($programLines.Count -gt 0) {
@@ -1304,7 +1304,7 @@ $restoreButton.Add_Click({
         } else {
             (T 'RstImportedNoApps' 'No applications are selected.')
         }
-        $confirmText = ((T 'RstImportedConfirmText' 'This snapshot was imported from another PC. These programs will start:') -f $programText)
+        $confirmText = ((T 'RstImportedConfirmText' "This snapshot was not created by this installation (for example, it was imported from another PC). These programs will start:`r`n`r`n{0}`r`n`r`nOnly .exe programs on local fixed drives with safe arguments are launched. No program from a network share will run. Continue?") -f $programText)
         $confirmTitle = (T 'RstImportedConfirmTitle' 'Imported snapshot')
         $answer = [System.Windows.Forms.MessageBox]::Show(
             $confirmText,

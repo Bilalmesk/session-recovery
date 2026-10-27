@@ -296,10 +296,10 @@ function Get-SRStrings {
         ShutdownUnexpected = 'Unexpected shutdown'
         ShutdownInitiated = 'Shutdown initiated by {0}'
         ShutdownNormal = 'Normal shutdown'
-        RstImportedConfirmTitle = 'Imported snapshot'
-        RstImportedConfirmText = "This snapshot was imported from another PC. These programs will start:`r`n`r`n{0}`r`n`r`nOnly .exe programs with safe arguments are launched. Continue?"
+        RstImportedConfirmTitle = 'Unverified snapshot'
+        RstImportedConfirmText = "This snapshot was not created by this installation (for example, it was imported from another PC). These programs will start:`r`n`r`n{0}`r`n`r`nOnly .exe programs on local fixed drives with safe arguments are launched. No program from a network share will run. Continue?"
         RstImportedNoApps = 'No applications are selected.'
-        RstImportedHeadless = 'This imported snapshot needs interactive confirmation. Run the restore without -NoUI to review its programs, or pass -AllowImportedSnapshot to confirm.'
+        RstImportedHeadless = 'This snapshot was not created by this installation and needs interactive confirmation. Run the restore without -NoUI to review its programs, or pass -AllowImportedSnapshot to confirm.'
         # Wave 2: dynamic dashboard cards, sidebar status, snapshot details,
         # settings cards and the About page. Everything the refresh paths set
         # at runtime needs a key here so no language falls back to English.
@@ -440,10 +440,15 @@ function Get-SRStrings {
         UpdateLatest = 'Version {0} is the latest release.'
         UpdateVerified = 'Version {0} is downloaded and verified.'
         UpdateVerifiedDetail = 'SHA256 verified. The installer keeps your snapshots, settings and exclusions.'
+        UpdateUnsignedVerified = 'Version {0} is downloaded, but the MSI is unsigned.'
+        UpdateUnsignedVerifiedDetail = 'SHA256 matches the release, but Windows cannot verify who published this file. The install confirmation explains the risk.'
+        UpdateUnsignedReadyDetail = 'The unsigned package was not installed. You can delete it from your profile or install it later after reviewing the warning.'
         UpdateCheckFail = 'Could not check for updates.'
         UpdateDownloadFail = 'The update download failed.'
         UpdateConfirmTitle = 'Install Session Recovery update'
         UpdateConfirmText = "Version {0} is downloaded and its SHA256 hash matches the release.`r`n`r`nInstall now? The Studio will close while the per-user MSI updates the app. Your snapshots, settings and exclusions are kept."
+        UpdateUnsignedConfirmTitle = 'Install unsigned update?'
+        UpdateUnsignedConfirmText = "UNSIGNED UPDATE. Version {0} is downloaded and its SHA256 hash matches the release, but the MSI is not digitally signed. Windows cannot verify who published or built this file.`r`n`r`nInstall it only if you trust this GitHub repository and the network you downloaded it from. Install now?"
         UpdateCopyFail = 'Could not copy: {0}'
         UpdateInstallButton = 'Install update'
         # Short action toasts.
@@ -549,10 +554,10 @@ function Get-SRStrings {
         ShutdownUnexpected = 'إيقاف غير متوقع'
         ShutdownInitiated = 'بدأ الإيقاف بواسطة {0}'
         ShutdownNormal = 'إيقاف عادي'
-        RstImportedConfirmTitle = 'لقطة مستوردة'
-        RstImportedConfirmText = "استُوردت هذه اللقطة من جهاز كمبيوتر آخر. ستبدأ هذه البرامج:`r`n`r`n{0}`r`n`r`nلا تُشغَّل إلا برامج .exe ذات الوسائط الآمنة. هل تريد المتابعة؟"
+        RstImportedConfirmTitle = 'لقطة غير موثوقة'
+        RstImportedConfirmText = "لم يُنشئ هذا التثبيت هذه اللقطة (على سبيل المثال، استُوردت من جهاز كمبيوتر آخر). ستبدأ هذه البرامج:`r`n`r`n{0}`r`n`r`nلا تُشغَّل إلا برامج .exe الموجودة على أقراص محلية ثابتة وذات الوسائط الآمنة. لن يعمل أي برنامج من مشاركة شبكة. هل تريد المتابعة؟"
         RstImportedNoApps = 'لم تُحدَّد أي تطبيقات.'
-        RstImportedHeadless = 'تحتاج هذه اللقطة المستوردة إلى تأكيد تفاعلي. شغّل الاستعادة بدون -NoUI لمراجعة برامجها، أو مرّر -AllowImportedSnapshot للتأكيد.'
+        RstImportedHeadless = 'لم يُنشئ هذا التثبيت هذه اللقطة وتحتاج إلى تأكيد تفاعلي. شغّل الاستعادة بدون -NoUI لمراجعة برامجها، أو مرّر -AllowImportedSnapshot للتأكيد.'
         StatSnapshots = 'اللقطات'; StatAppsCaptured = 'التطبيقات الملتقطة'; StatBrowserTabs = 'تبويبات المتصفح'; StatLocalStorage = 'التخزين المحلي'
         StatDetailMoments = 'لحظات محفوظة'; StatDetailLatest = 'في أحدث لقطة'; StatDetailRetaining = 'يحتفظ بـ {0}'; StatDetailCaptured = 'الُتقط {0}'; StatDetailNoSnapshot = 'لا توجد لقطة بعد'; StatDetailBrowsers = '{0} متصفح مكتشف'; StatDetailNoBrowsers = 'لا توجد تبويبات متصفح ملتقطة'; StatDetailFolders = '{0} مجلد في الأحدث'
         DetailMetaAppsTabs = '{0}  •  {1}  •  {2} تطبيقات  •  {3} مجلدات{4}'
@@ -650,10 +655,10 @@ function Get-SRStrings {
         ShutdownUnexpected = 'Arrêt inattendu'
         ShutdownInitiated = 'Arrêt lancé par {0}'
         ShutdownNormal = 'Arrêt normal'
-        RstImportedConfirmTitle = 'Instantané importé'
-        RstImportedConfirmText = "Cet instantané provient d'un autre PC. Ces programmes vont démarrer :`r`n`r`n{0}`r`n`r`nSeuls les programmes .exe avec des arguments sûrs sont lancés. Continuer ?"
+        RstImportedConfirmTitle = 'Instantané non vérifié'
+        RstImportedConfirmText = "Cet instantané n'a pas été créé par cette installation (il provient par exemple d'un autre PC). Ces programmes vont démarrer :`r`n`r`n{0}`r`n`r`nSeuls les programmes .exe situés sur des disques fixes locaux avec des arguments sûrs sont lancés. Aucun programme d'un partage réseau ne sera exécuté. Continuer ?"
         RstImportedNoApps = 'Aucune application sélectionnée.'
-        RstImportedHeadless = 'Cet instantané importé nécessite une confirmation interactive. Lancez la restauration sans -NoUI pour vérifier ses programmes, ou passez -AllowImportedSnapshot pour confirmer.'
+        RstImportedHeadless = "Cet instantané n'a pas été créé par cette installation et nécessite une confirmation interactive. Lancez la restauration sans -NoUI pour vérifier ses programmes, ou passez -AllowImportedSnapshot pour confirmer."
         StatSnapshots = 'INSTANTANÉS'; StatAppsCaptured = 'APPLICATIONS'; StatBrowserTabs = 'ONGLETS NAVIGATEUR'; StatLocalStorage = 'STOCKAGE LOCAL'
         StatDetailMoments = 'Moments enregistrés'; StatDetailLatest = 'Dans le dernier instantané'; StatDetailRetaining = 'Conservation de {0}'; StatDetailCaptured = 'Capturé {0}'; StatDetailNoSnapshot = 'Aucun instantané'; StatDetailBrowsers = '{0} navigateur(s) capturé(s)'; StatDetailNoBrowsers = 'Aucun onglet de navigateur capturé'; StatDetailFolders = '{0} dossier(s) dans le dernier'
         DetailMetaAppsTabs = '{0}  •  {1}  •  {2} app.  •  {3} dossier(s){4}'
@@ -751,10 +756,10 @@ function Get-SRStrings {
         ShutdownUnexpected = 'Apagado inesperado'
         ShutdownInitiated = 'Apagado iniciado por {0}'
         ShutdownNormal = 'Apagado normal'
-        RstImportedConfirmTitle = 'Instantánea importada'
-        RstImportedConfirmText = "Esta instantánea se importó desde otro PC. Se iniciarán estos programas:`r`n`r`n{0}`r`n`r`nSolo se ejecutan programas .exe con argumentos seguros. ¿Continuar?"
+        RstImportedConfirmTitle = 'Instantánea no verificada'
+        RstImportedConfirmText = "Esta instantánea no fue creada por esta instalación (por ejemplo, se importó desde otro PC). Se iniciarán estos programas:`r`n`r`n{0}`r`n`r`nSolo se ejecutan programas .exe de discos fijos locales con argumentos seguros. Ningún programa de un recurso compartido de red se ejecutará. ¿Continuar?"
         RstImportedNoApps = 'No hay aplicaciones seleccionadas.'
-        RstImportedHeadless = 'Esta instantánea importada requiere confirmación interactiva. Ejecuta la restauración sin -NoUI para revisar sus programas, o pasa -AllowImportedSnapshot para confirmar.'
+        RstImportedHeadless = 'Esta instantánea no fue creada por esta instalación y requiere confirmación interactiva. Ejecuta la restauración sin -NoUI para revisar sus programas, o pasa -AllowImportedSnapshot para confirmar.'
         StatSnapshots = 'INSTANTÁNEAS'; StatAppsCaptured = 'APLICACIONES'; StatBrowserTabs = 'PESTAÑAS DEL NAVEGADOR'; StatLocalStorage = 'ESPACIO LOCAL'
         StatDetailMoments = 'Momentos guardados'; StatDetailLatest = 'En la última instantánea'; StatDetailRetaining = 'Conservando hasta {0}'; StatDetailCaptured = 'Capturada {0}'; StatDetailNoSnapshot = 'Aún no hay instantánea'; StatDetailBrowsers = '{0} navegador(es) capturado(s)'; StatDetailNoBrowsers = 'Sin pestañas de navegador capturadas'; StatDetailFolders = '{0} carpeta(s) en la última'
         DetailMetaAppsTabs = '{0}  •  {1}  •  {2} aplicaciones  •  {3} carpetas{4}'
@@ -852,10 +857,10 @@ function Get-SRStrings {
         ShutdownUnexpected = 'Unerwartetes Herunterfahren'
         ShutdownInitiated = 'Herunterfahren ausgelöst von {0}'
         ShutdownNormal = 'Normales Herunterfahren'
-        RstImportedConfirmTitle = 'Importierter Schnappschuss'
-        RstImportedConfirmText = "Dieser Schnappschuss wurde von einem anderen PC importiert. Diese Programme werden gestartet:`r`n`r`n{0}`r`n`r`nEs werden nur .exe-Programme mit sicheren Argumenten gestartet. Fortfahren?"
+        RstImportedConfirmTitle = 'Nicht verifizierter Schnappschuss'
+        RstImportedConfirmText = "Dieser Schnappschuss wurde nicht von dieser Installation erstellt (zum Beispiel wurde er von einem anderen PC importiert). Diese Programme werden gestartet:`r`n`r`n{0}`r`n`r`nEs werden nur .exe-Programme auf lokalen festen Datenträgern mit sicheren Argumenten gestartet. Programme von Netzwerkfreigaben werden nicht ausgeführt. Fortfahren?"
         RstImportedNoApps = 'Es sind keine Anwendungen ausgewählt.'
-        RstImportedHeadless = 'Dieser importierte Schnappschuss erfordert eine interaktive Bestätigung. Starten Sie die Wiederherstellung ohne -NoUI, um die Programme zu prüfen, oder übergeben Sie -AllowImportedSnapshot zur Bestätigung.'
+        RstImportedHeadless = 'Dieser Schnappschuss wurde nicht von dieser Installation erstellt und erfordert eine interaktive Bestätigung. Starten Sie die Wiederherstellung ohne -NoUI, um die Programme zu prüfen, oder übergeben Sie -AllowImportedSnapshot zur Bestätigung.'
         StatSnapshots = 'SCHNAPPSCHÜSSE'; StatAppsCaptured = 'APPS ERFASST'; StatBrowserTabs = 'BROWSER-TABS'; StatLocalStorage = 'LOKALER SPEICHER'
         StatDetailMoments = 'Gespeicherte Momente'; StatDetailLatest = 'Im neuesten Schnappschuss'; StatDetailRetaining = 'Bis zu {0} behalten'; StatDetailCaptured = 'Erfasst {0}'; StatDetailNoSnapshot = 'Noch kein Schnappschuss'; StatDetailBrowsers = '{0} Browser erfasst'; StatDetailNoBrowsers = 'Keine Browser-Tabs erfasst'; StatDetailFolders = '{0} Ordner im neuesten'
         DetailMetaAppsTabs = '{0}  •  {1}  •  {2} Apps  •  {3} Ordner{4}'
@@ -953,10 +958,10 @@ function Get-SRStrings {
         ShutdownUnexpected = 'Encerramento inesperado'
         ShutdownInitiated = 'Encerramento iniciado por {0}'
         ShutdownNormal = 'Encerramento normal'
-        RstImportedConfirmTitle = 'Instantâneo importado'
-        RstImportedConfirmText = "Este instantâneo foi importado de outro PC. Estes programas serão iniciados:`r`n`r`n{0}`r`n`r`nApenas programas .exe com argumentos seguros são iniciados. Continuar?"
+        RstImportedConfirmTitle = 'Instantâneo não verificado'
+        RstImportedConfirmText = "Este instantâneo não foi criado por esta instalação (por exemplo, foi importado de outro PC). Estes programas serão iniciados:`r`n`r`n{0}`r`n`r`nApenas programas .exe em discos fixos locais com argumentos seguros são iniciados. Nenhum programa de uma partilha de rede será executado. Continuar?"
         RstImportedNoApps = 'Nenhuma aplicação selecionada.'
-        RstImportedHeadless = 'Este instantâneo importado requer confirmação interativa. Execute a restauração sem -NoUI para rever os programas, ou passe -AllowImportedSnapshot para confirmar.'
+        RstImportedHeadless = 'Este instantâneo não foi criado por esta instalação e requer confirmação interativa. Execute a restauração sem -NoUI para rever os programas, ou passe -AllowImportedSnapshot para confirmar.'
         StatSnapshots = 'INSTANTÂNEOS'; StatAppsCaptured = 'APPS CAPTURADOS'; StatBrowserTabs = 'ABAS DO NAVEGADOR'; StatLocalStorage = 'ESPAÇO LOCAL'
         StatDetailMoments = 'Momentos salvos'; StatDetailLatest = 'No instantâneo mais recente'; StatDetailRetaining = 'Mantendo até {0}'; StatDetailCaptured = 'Capturado {0}'; StatDetailNoSnapshot = 'Ainda sem instantâneo'; StatDetailBrowsers = '{0} navegador(es) capturado(s)'; StatDetailNoBrowsers = 'Sem abas de navegador capturadas'; StatDetailFolders = '{0} pasta(s) no mais recente'
         DetailMetaAppsTabs = '{0}  •  {1}  •  {2} apps  •  {3} pastas{4}'
@@ -1054,10 +1059,10 @@ function Get-SRStrings {
         ShutdownUnexpected = 'Неожиданное завершение работы'
         ShutdownInitiated = 'Завершение инициировано: {0}'
         ShutdownNormal = 'Обычное завершение работы'
-        RstImportedConfirmTitle = 'Импортированный снимок'
-        RstImportedConfirmText = "Этот снимок импортирован с другого ПК. Будут запущены эти программы:`r`n`r`n{0}`r`n`r`nЗапускаются только программы .exe с безопасными аргументами. Продолжить?"
+        RstImportedConfirmTitle = 'Непроверенный снимок'
+        RstImportedConfirmText = "Этот снимок создан не этой установкой (например, он импортирован с другого ПК). Будут запущены эти программы:`r`n`r`n{0}`r`n`r`nЗапускаются только программы .exe на локальных фиксированных дисках с безопасными аргументами. Программы из сетевых папок не запускаются. Продолжить?"
         RstImportedNoApps = 'Приложения не выбраны.'
-        RstImportedHeadless = 'Для этого импортированного снимка требуется интерактивное подтверждение. Запустите восстановление без -NoUI, чтобы проверить программы, или укажите -AllowImportedSnapshot для подтверждения.'
+        RstImportedHeadless = 'Этот снимок создан не этой установкой и требует интерактивного подтверждения. Запустите восстановление без -NoUI, чтобы проверить программы, или укажите -AllowImportedSnapshot для подтверждения.'
         StatSnapshots = 'СНИМКИ'; StatAppsCaptured = 'ПРИЛОЖЕНИЯ'; StatBrowserTabs = 'ВКЛАДКИ БРАУЗЕРА'; StatLocalStorage = 'ХРАНИЛИЩЕ'
         StatDetailMoments = 'Сохранённые моменты'; StatDetailLatest = 'В последнем снимке'; StatDetailRetaining = 'Хранится до {0}'; StatDetailCaptured = 'Снят {0}'; StatDetailNoSnapshot = 'Снимка пока нет'; StatDetailBrowsers = 'Захвачено браузеров: {0}'; StatDetailNoBrowsers = 'Вкладки браузера не захвачены'; StatDetailFolders = 'Папок в последнем: {0}'
         DetailMetaAppsTabs = '{0}  •  {1}  •  {2} прил.  •  {3} папок{4}'
@@ -1155,10 +1160,10 @@ function Get-SRStrings {
         ShutdownUnexpected = '意外关机'
         ShutdownInitiated = '关机由 {0} 发起'
         ShutdownNormal = '正常关机'
-        RstImportedConfirmTitle = '导入的快照'
-        RstImportedConfirmText = "此快照是从另一台电脑导入的。将启动以下程序：`r`n`r`n{0}`r`n`r`n仅启动带有安全参数的 .exe 程序。是否继续？"
+        RstImportedConfirmTitle = '未经验证的快照'
+        RstImportedConfirmText = "此快照不是由当前安装创建的（例如，它是从另一台电脑导入的）。将启动以下程序：`r`n`r`n{0}`r`n`r`n仅启动本地固定驱动器上带有安全参数的 .exe 程序。不会运行网络共享中的任何程序。是否继续？"
         RstImportedNoApps = '未选择任何应用程序。'
-        RstImportedHeadless = '此导入的快照需要交互确认。请在不带 -NoUI 的情况下运行还原以查看其程序，或传递 -AllowImportedSnapshot 以确认。'
+        RstImportedHeadless = '此快照不是由当前安装创建的，需要交互确认。请在不带 -NoUI 的情况下运行还原以查看其程序，或传递 -AllowImportedSnapshot 以确认。'
         StatSnapshots = '快照数'; StatAppsCaptured = '已捕获应用'; StatBrowserTabs = '浏览器标签页'; StatLocalStorage = '本地存储'
         StatDetailMoments = '已保存的时刻'; StatDetailLatest = '在最新快照中'; StatDetailRetaining = '最多保留 {0} 个'; StatDetailCaptured = '捕获于 {0}'; StatDetailNoSnapshot = '还没有快照'; StatDetailBrowsers = '已捕获 {0} 个浏览器'; StatDetailNoBrowsers = '未捕获浏览器标签页'; StatDetailFolders = '最新快照中有 {0} 个文件夹'
         DetailMetaAppsTabs = '{0}  •  {1}  •  {2} 个应用  •  {3} 个文件夹{4}'
@@ -1256,10 +1261,10 @@ function Get-SRStrings {
         ShutdownUnexpected = 'Beklenmeyen kapanma'
         ShutdownInitiated = 'Kapanmayı başlatan: {0}'
         ShutdownNormal = 'Normal kapanma'
-        RstImportedConfirmTitle = 'İçe aktarılan anlık görüntü'
-        RstImportedConfirmText = "Bu anlık görüntü başka bir bilgisayardan içe aktarıldı. Şu programlar başlatılacak:`r`n`r`n{0}`r`n`r`nYalnızca güvenli bağımsız değişkenlere sahip .exe programları başlatılır. Devam edilsin mi?"
+        RstImportedConfirmTitle = 'Doğrulanmamış anlık görüntü'
+        RstImportedConfirmText = "Bu anlık görüntü bu yükleme tarafından oluşturulmadı (örneğin, başka bir bilgisayardan içe aktarıldı). Şu programlar başlatılacak:`r`n`r`n{0}`r`n`r`nYalnızca yerel sabit sürücülerdeki güvenli bağımsız değişkenlere sahip .exe programları başlatılır. Ağ paylaşımındaki hiçbir program çalıştırılmaz. Devam edilsin mi?"
         RstImportedNoApps = 'Hiçbir uygulama seçilmedi.'
-        RstImportedHeadless = 'Bu içe aktarılan anlık görüntü etkileşimli onay gerektiriyor. Programlarını gözden geçirmek için geri yüklemeyi -NoUI olmadan çalıştırın veya onaylamak için -AllowImportedSnapshot geçirin.'
+        RstImportedHeadless = 'Bu anlık görüntü bu yükleme tarafından oluşturulmadı ve etkileşimli onay gerektiriyor. Programlarını gözden geçirmek için geri yüklemeyi -NoUI olmadan çalıştırın veya onaylamak için -AllowImportedSnapshot geçirin.'
         StatSnapshots = 'ANLIK GÖRÜNTÜLER'; StatAppsCaptured = 'YAKALANAN UYGULAMALAR'; StatBrowserTabs = 'TARAYICI SEKMELERİ'; StatLocalStorage = 'YEREL DEPOLAMA'
         StatDetailMoments = 'Kaydedilen anlar'; StatDetailLatest = 'En son anlık görüntüde'; StatDetailRetaining = '{0} adete kadar saklanır'; StatDetailCaptured = 'Yakalandı: {0}'; StatDetailNoSnapshot = 'Henüz anlık görüntü yok'; StatDetailBrowsers = '{0} tarayıcı yakalandı'; StatDetailNoBrowsers = 'Yakalanan tarayıcı sekmeleri yok'; StatDetailFolders = 'En yenide {0} klasör'
         DetailMetaAppsTabs = '{0}  •  {1}  •  {2} uygulama  •  {3} klasör{4}'
@@ -1374,6 +1379,11 @@ function Get-SRStrings {
             UpdateLatest = 'الإصدار {0} هو أحدث إصدار.'
             UpdateVerified = 'تم تنزيل الإصدار {0} والتحقق منه.'
             UpdateVerifiedDetail = 'تم التحقق من SHA256. يحتفظ المثبّت بلقطاتك وإعداداتك واستثناءاتك.'
+            UpdateUnsignedVerified = 'تم تنزيل الإصدار {0}، لكن ملف MSI غير موقّع.'
+            UpdateUnsignedVerifiedDetail = 'يطابق SHA256 الإصدار، لكن Windows لا يستطيع التحقق من ناشر هذا الملف. يوضح تأكيد التثبيت المخاطر.'
+            UpdateUnsignedReadyDetail = 'لم يتم تثبيت الحزمة غير الموقّعة. يمكنك حذفها من ملفك الشخصي أو تثبيتها لاحقًا بعد مراجعة التحذير.'
+            UpdateUnsignedConfirmTitle = 'تثبيت تحديث غير موقّع؟'
+            UpdateUnsignedConfirmText = "تحديث غير موقّع. تم تنزيل الإصدار {0} ويطابق تجزئته SHA256 الإصدار، لكن ملف MSI غير موقّع رقميًا. لا يستطيع Windows التحقق من هوية من نشر أو بنى هذا الملف.`r`n`r`nثبّته فقط إذا كنت تثق بمستودع GitHub هذا والشبكة التي نزّلته منها. هل تريد التثبيت الآن؟"
             UpdateCheckFail = 'تعذّر التحقق من التحديثات.'
             UpdateDownloadFail = 'فشل تنزيل التحديث.'
             UpdateConfirmTitle = 'تثبيت تحديث Session Recovery'
@@ -1455,6 +1465,11 @@ function Get-SRStrings {
             UpdateLatest = 'La version {0} est la dernière.'
             UpdateVerified = 'La version {0} est téléchargée et vérifiée.'
             UpdateVerifiedDetail = 'SHA256 vérifié. L''installateur conserve instantanés, paramètres et exclusions.'
+            UpdateUnsignedVerified = 'La version {0} est téléchargée, mais le MSI n''est pas signé.'
+            UpdateUnsignedVerifiedDetail = 'Le SHA256 correspond à la version, mais Windows ne peut pas vérifier qui a publié ce fichier. La confirmation d''installation explique le risque.'
+            UpdateUnsignedReadyDetail = 'Le paquet non signé n''a pas été installé. Vous pouvez le supprimer de votre profil ou l''installer plus tard après avoir examiné l''avertissement.'
+            UpdateUnsignedConfirmTitle = 'Installer une mise à jour non signée ?'
+            UpdateUnsignedConfirmText = "MISE À JOUR NON SIGNÉE. La version {0} est téléchargée et son hachage SHA256 correspond à la version, mais le MSI n'est pas signé numériquement. Windows ne peut pas vérifier qui a publié ou compilé ce fichier.`r`n`r`nInstallez-la uniquement si vous faites confiance à ce dépôt GitHub et au réseau depuis lequel vous l'avez téléchargée. Installer maintenant ?"
             UpdateCheckFail = 'Impossible de vérifier les mises à jour.'
             UpdateDownloadFail = 'Le téléchargement de la mise à jour a échoué.'
             UpdateConfirmTitle = 'Installer la mise à jour de Session Recovery'
@@ -1536,6 +1551,11 @@ function Get-SRStrings {
             UpdateLatest = 'La versión {0} es la última.'
             UpdateVerified = 'La versión {0} está descargada y verificada.'
             UpdateVerifiedDetail = 'SHA256 verificado. El instalador conserva instantáneas, ajustes y exclusiones.'
+            UpdateUnsignedVerified = 'La versión {0} está descargada, pero el MSI no está firmado.'
+            UpdateUnsignedVerifiedDetail = 'El SHA256 coincide con la versión, pero Windows no puede verificar quién publicó este archivo. La confirmación de instalación explica el riesgo.'
+            UpdateUnsignedReadyDetail = 'El paquete no firmado no se instaló. Puedes eliminarlo de tu perfil o instalarlo más tarde tras revisar la advertencia.'
+            UpdateUnsignedConfirmTitle = '¿Instalar una actualización no firmada?'
+            UpdateUnsignedConfirmText = "ACTUALIZACIÓN NO FIRMADA. La versión {0} está descargada y su hash SHA256 coincide con la versión, pero el MSI no está firmado digitalmente. Windows no puede verificar quién publicó o compiló este archivo.`r`n`r`nInstálala solo si confías en este repositorio de GitHub y en la red desde la que la descargaste. ¿Instalar ahora?"
             UpdateCheckFail = 'No se pudieron comprobar las actualizaciones.'
             UpdateDownloadFail = 'La descarga de la actualización falló.'
             UpdateConfirmTitle = 'Instalar la actualización de Session Recovery'
@@ -1617,6 +1637,11 @@ function Get-SRStrings {
             UpdateLatest = 'Version {0} ist die neueste.'
             UpdateVerified = 'Version {0} ist heruntergeladen und geprüft.'
             UpdateVerifiedDetail = 'SHA256 geprüft. Der Installer behält Snapshots, Einstellungen und Ausschlüsse.'
+            UpdateUnsignedVerified = 'Version {0} ist heruntergeladen, aber das MSI ist nicht signiert.'
+            UpdateUnsignedVerifiedDetail = 'SHA256 stimmt mit dem Release überein, aber Windows kann nicht prüfen, wer diese Datei veröffentlicht hat. Die Installationsbestätigung erklärt das Risiko.'
+            UpdateUnsignedReadyDetail = 'Das nicht signierte Paket wurde nicht installiert. Sie können es aus Ihrem Profil löschen oder später nach Prüfung der Warnung installieren.'
+            UpdateUnsignedConfirmTitle = 'Nicht signiertes Update installieren?'
+            UpdateUnsignedConfirmText = "NICHT SIGNIERTES UPDATE. Version {0} ist heruntergeladen und ihr SHA256-Hash stimmt mit dem Release überein, aber das MSI ist nicht digital signiert. Windows kann nicht prüfen, wer diese Datei veröffentlicht oder erstellt hat.`r`n`r`nInstallieren Sie es nur, wenn Sie diesem GitHub-Repository und dem Netzwerk, aus dem Sie es heruntergeladen haben, vertrauen. Jetzt installieren?"
             UpdateCheckFail = 'Updates konnten nicht geprüft werden.'
             UpdateDownloadFail = 'Der Update-Download ist fehlgeschlagen.'
             UpdateConfirmTitle = 'Session Recovery-Update installieren'
@@ -1698,6 +1723,11 @@ function Get-SRStrings {
             UpdateLatest = 'A versão {0} é a mais recente.'
             UpdateVerified = 'A versão {0} foi transferida e verificada.'
             UpdateVerifiedDetail = 'SHA256 verificado. O instalador preserva instantâneos, definições e exclusões.'
+            UpdateUnsignedVerified = 'A versão {0} foi transferida, mas o MSI não está assinado.'
+            UpdateUnsignedVerifiedDetail = 'O SHA256 corresponde à versão, mas o Windows não consegue verificar quem publicou este ficheiro. A confirmação de instalação explica o risco.'
+            UpdateUnsignedReadyDetail = 'O pacote não assinado não foi instalado. Pode eliminá-lo do seu perfil ou instalá-lo mais tarde após rever o aviso.'
+            UpdateUnsignedConfirmTitle = 'Instalar atualização não assinada?'
+            UpdateUnsignedConfirmText = "ATUALIZAÇÃO NÃO ASSINADA. A versão {0} foi transferida e o seu hash SHA256 corresponde à versão, mas o MSI não está assinado digitalmente. O Windows não consegue verificar quem publicou ou compilou este ficheiro.`r`n`r`nInstale apenas se confiar neste repositório GitHub e na rede de onde o transferiu. Instalar agora?"
             UpdateCheckFail = 'Não foi possível verificar atualizações.'
             UpdateDownloadFail = 'A transferência da atualização falhou.'
             UpdateConfirmTitle = 'Instalar atualização do Session Recovery'
@@ -1779,6 +1809,11 @@ function Get-SRStrings {
             UpdateLatest = 'Версия {0} — последняя.'
             UpdateVerified = 'Версия {0} загружена и проверена.'
             UpdateVerifiedDetail = 'SHA256 подтверждён. Установщик сохранит снимки, настройки и исключения.'
+            UpdateUnsignedVerified = 'Версия {0} загружена, но MSI не подписан.'
+            UpdateUnsignedVerifiedDetail = 'SHA256 совпадает с выпуском, но Windows не может проверить, кто опубликовал этот файл. Подтверждение установки объясняет риск.'
+            UpdateUnsignedReadyDetail = 'Неподписанный пакет не установлен. Вы можете удалить его из своего профиля или установить позже, ознакомившись с предупреждением.'
+            UpdateUnsignedConfirmTitle = 'Установить неподписанное обновление?'
+            UpdateUnsignedConfirmText = "НЕПОДПИСАННОЕ ОБНОВЛЕНИЕ. Версия {0} загружена, и её хеш SHA256 совпадает с выпуском, но MSI не имеет цифровой подписи. Windows не может проверить, кто опубликовал или собрал этот файл.`r`n`r`nУстанавливайте его только если доверяете этому репозиторию GitHub и сети, из которой он загружен. Установить сейчас?"
             UpdateCheckFail = 'Не удалось проверить обновления.'
             UpdateDownloadFail = 'Не удалось загрузить обновление.'
             UpdateConfirmTitle = 'Установить обновление Session Recovery'
@@ -1860,6 +1895,11 @@ function Get-SRStrings {
             UpdateLatest = '版本 {0} 是最新版本。'
             UpdateVerified = '版本 {0} 已下载并验证。'
             UpdateVerifiedDetail = 'SHA256 已验证。安装程序会保留快照、设置和排除项。'
+            UpdateUnsignedVerified = '版本 {0} 已下载，但 MSI 未签名。'
+            UpdateUnsignedVerifiedDetail = 'SHA256 与发布版本匹配，但 Windows 无法验证谁发布了此文件。安装确认会说明风险。'
+            UpdateUnsignedReadyDetail = '未签名的安装包尚未安装。你可以从配置文件中删除它，或在查看警告后稍后安装。'
+            UpdateUnsignedConfirmTitle = '安装未签名的更新？'
+            UpdateUnsignedConfirmText = "未签名的更新。版本 {0} 已下载，其 SHA256 哈希与发布版本匹配，但 MSI 没有数字签名。Windows 无法验证谁发布或构建了此文件。`r`n`r`n仅当你信任此 GitHub 仓库以及下载它时使用的网络时才安装。现在安装吗？"
             UpdateCheckFail = '无法检查更新。'
             UpdateDownloadFail = '更新下载失败。'
             UpdateConfirmTitle = '安装 Session Recovery 更新'
@@ -1941,6 +1981,11 @@ function Get-SRStrings {
             UpdateLatest = '{0} sürümü en son sürüm.'
             UpdateVerified = '{0} sürümü indirildi ve doğrulandı.'
             UpdateVerifiedDetail = 'SHA256 doğrulandı. Yükleyici anlık görüntülerinizi, ayarlarınızı ve hariç tutmalarınızı korur.'
+            UpdateUnsignedVerified = '{0} sürümü indirildi, ancak MSI imzalı değil.'
+            UpdateUnsignedVerifiedDetail = 'SHA256 sürümle eşleşiyor, ancak Windows bu dosyayı kimin yayımladığını doğrulayamaz. Yükleme onayı riski açıklar.'
+            UpdateUnsignedReadyDetail = 'İmzasız paket yüklenmedi. Profilinizden silebilir veya uyarıyı inceledikten sonra daha sonra yükleyebilirsiniz.'
+            UpdateUnsignedConfirmTitle = 'İmzasız güncelleme yüklensin mi?'
+            UpdateUnsignedConfirmText = "İMZASIZ GÜNCELLEME. {0} sürümü indirildi ve SHA256 karması sürümle eşleşiyor, ancak MSI dijital olarak imzalanmadı. Windows bu dosyayı kimin yayımladığını veya derlediğini doğrulayamaz.`r`n`r`nYalnızca bu GitHub deposuna ve dosyayı indirdiğiniz ağa güveniyorsanız yükleyin. Şimdi yüklensin mi?"
             UpdateCheckFail = 'Güncellemeler denetlenemedi.'
             UpdateDownloadFail = 'Güncelleme indirmesi başarısız oldu.'
             UpdateConfirmTitle = 'Session Recovery güncellemesini yükle'

@@ -17,7 +17,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-$script:AppVersion = '2.6.0'
+$script:AppVersion = '2.6.1'
 $script:ScriptDir = $PSScriptRoot
 $script:AppDir = if ($env:SESSIONRECOVERY_HOST_EXE) { Split-Path -Parent $env:SESSIONRECOVERY_HOST_EXE } else { $PSScriptRoot }
 $script:HostExe = $null
@@ -4521,15 +4521,41 @@ function Install-StudioUpdatePackage {
 function Confirm-StudioUpdateInstall {
     if ($null -eq $script:DownloadedUpdate) { return }
     $version = [string]$script:DownloadedUpdate.Version
+    $signed = $false
+    $signedProperty = $script:DownloadedUpdate.PSObject.Properties['Signed']
+    if ($null -ne $signedProperty) {
+        try { $signed = [bool]$signedProperty.Value } catch { $signed = $false }
+    }
+    if ($signed) {
+        $text = ((T 'UpdateConfirmText' "Version {0} is downloaded and its SHA256 hash matches the release.`r`n`r`nInstall now? The Studio will close while the per-user MSI updates the app. Your snapshots, settings and exclusions are kept.") -f $version)
+        $title = (T 'UpdateConfirmTitle' 'Install Session Recovery update')
+        $icon = [System.Windows.Forms.MessageBoxIcon]::Question
+        $defaultButton = [System.Windows.Forms.MessageBoxDefaultButton]::Button1
+    } else {
+        # The hash comes from the same release as the MSI, so it proves only
+        # that the download is intact. Make the missing signature explicit and
+        # default to No instead of silently installing the file.
+        $text = ((T 'UpdateUnsignedConfirmText' "UNSIGNED UPDATE. Version {0} is downloaded and its SHA256 hash matches the release, but the MSI is not digitally signed. Windows cannot verify who published or built this file.`r`n`r`nInstall it only if you trust this GitHub repository and the network you downloaded it from. Install now?") -f $version)
+        $title = (T 'UpdateUnsignedConfirmTitle' 'Install unsigned update?')
+        $icon = [System.Windows.Forms.MessageBoxIcon]::Warning
+        $defaultButton = [System.Windows.Forms.MessageBoxDefaultButton]::Button2
+    }
     $answer = [System.Windows.Forms.MessageBox]::Show(
-        ((T 'UpdateConfirmText' "Version {0} is downloaded and its SHA256 hash matches the release.`r`n`r`nInstall now? The Studio will close while the per-user MSI updates the app. Your snapshots, settings and exclusions are kept.") -f $version),
-        (T 'UpdateConfirmTitle' 'Install Session Recovery update'),
+        $text,
+        $title,
         [System.Windows.Forms.MessageBoxButtons]::YesNo,
-        [System.Windows.Forms.MessageBoxIcon]::Question)
+        $icon,
+        $defaultButton)
     if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) {
         Install-StudioUpdatePackage -MsiPath $script:DownloadedUpdate.MsiPath -Version $version
     } else {
-        Set-StudioUpdateStatus -Text ((T 'UpdateReady' 'Version {0} is ready to install.') -f $version) -Color $script:P.Green -Detail (T 'UpdateReadyDetail' 'Click Install update when you are ready. The downloaded package stays in your profile.')
+        $detailKey = if ($signed) { 'UpdateReadyDetail' } else { 'UpdateUnsignedReadyDetail' }
+        $detailDefault = if ($signed) {
+            'Click Install update when you are ready. The downloaded package stays in your profile.'
+        } else {
+            'The unsigned package was not installed. You can delete it from your profile or install it later after reviewing the warning.'
+        }
+        Set-StudioUpdateStatus -Text ((T 'UpdateReady' 'Version {0} is ready to install.') -f $version) -Color $(if ($signed) { $script:P.Green } else { $script:P.Amber }) -Detail (T $detailKey $detailDefault)
     }
 }
 
@@ -4581,9 +4607,18 @@ function Complete-StudioUpdateWorker {
         return
     }
     $script:DownloadedUpdate = $data
+    $signed = $false
+    $signedProperty = $data.PSObject.Properties['Signed']
+    if ($null -ne $signedProperty) {
+        try { $signed = [bool]$signedProperty.Value } catch { $signed = $false }
+    }
     $script:Ui.UpdateInstall.Text = (T 'UpdateInstallButton' 'Install update')
     $script:Ui.UpdateInstall.Visible = $true
-    Set-StudioUpdateStatus -Text ((T 'UpdateVerified' 'Version {0} is downloaded and verified.') -f $data.Version) -Color $script:P.Green -Detail (T 'UpdateVerifiedDetail' 'SHA256 verified. The installer keeps your snapshots, settings and exclusions.')
+    if ($signed) {
+        Set-StudioUpdateStatus -Text ((T 'UpdateVerified' 'Version {0} is downloaded and verified.') -f $data.Version) -Color $script:P.Green -Detail (T 'UpdateVerifiedDetail' 'SHA256 verified. The installer keeps your snapshots, settings and exclusions.')
+    } else {
+        Set-StudioUpdateStatus -Text ((T 'UpdateUnsignedVerified' 'Version {0} is downloaded, but the MSI is unsigned.') -f $data.Version) -Color $script:P.Amber -Detail (T 'UpdateUnsignedVerifiedDetail' 'SHA256 matches the release, but Windows cannot verify who published this file. The install confirmation explains the risk.')
+    }
     Confirm-StudioUpdateInstall
 }
 

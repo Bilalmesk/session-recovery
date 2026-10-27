@@ -13,7 +13,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string]$Version = '2.6.0',
+    [string]$Version = '2.6.1',
     [switch]$NoRestore
 )
 
@@ -75,8 +75,21 @@ Session Recovery {0}
 Reopen the apps, File Explorer folders and browser tabs that were open before
 a crash, power cut or unexpected restart.
 
-What's new in 2.6
------------------
+What's new in 2.6.1
+-------------------
+- The update dialog now shows UNSIGNED UPDATE and defaults to No when the
+  downloaded MSI has no valid digital signature. SHA256 still detects a
+  corrupted download, but it cannot prove who built the file.
+- Snapshots carry a per-install provenance ID. Imported, hand-dropped and
+  foreign snapshots are confirmed with the exact program list before restore.
+- Restore only launches programs from local fixed drives. Network shares,
+  UNC paths and device paths are rejected.
+- The blocked-program list now covers certutil, bitsadmin, certreq and other
+  download or system tools in addition to script hosts and interpreters.
+- The imported-snapshot confirmation fallback now includes the program list.
+
+Also in 2.6
+-----------
 - Every page and dialog now fits long translations in all nine languages:
   long labels wrap or ellipsize, hint text wraps, badges size to their text,
   and the layout audit checks every page at normal and minimum window sizes.

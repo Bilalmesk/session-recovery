@@ -1043,11 +1043,51 @@ $script:SRRoot = if ($env:SESSIONRECOVERY_HOME) {
 $script:SRSnapshotDir = Join-Path $script:SRRoot 'snapshots'
 $script:SRLogDir = Join-Path $script:SRRoot 'logs'
 $script:SRConfigPath = Join-Path $script:SRRoot 'config.json'
+$script:SRInstallIdPath = Join-Path $script:SRRoot 'installation.id'
+$script:SRInstallationId = $null
 
 function Get-SRRoot { $script:SRRoot }
 function Get-SRSnapshotDirectory { $script:SRSnapshotDir }
 function Get-SRLogDirectory { $script:SRLogDir }
 function Get-SRConfigPath { $script:SRConfigPath }
+
+function Get-SRInstallationId {
+    # Snapshots carry this per-install ID as provenance. A file that was
+    # copied into the snapshot folder by hand, imported from another PC or
+    # created by a previous install has no matching ID and is treated as
+    # untrusted at restore time. The ID is not a secret; it only separates
+    # snapshots this installation created from everything else.
+    if (-not [string]::IsNullOrWhiteSpace($script:SRInstallationId)) {
+        return [string]$script:SRInstallationId
+    }
+    $candidate = ''
+    try {
+        if (Test-Path -LiteralPath $script:SRInstallIdPath -PathType Leaf) {
+            $candidate = ([string](Get-Content -LiteralPath $script:SRInstallIdPath -Raw -ErrorAction Stop)).Trim()
+        }
+    } catch {
+        Write-SRLog -Level WARN -Message ("Could not read the installation ID: {0}" -f $_.Exception.Message)
+    }
+    if ($candidate -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
+        $script:SRInstallationId = $candidate.ToLowerInvariant()
+        return [string]$script:SRInstallationId
+    }
+    if (-not [string]::IsNullOrWhiteSpace($candidate)) {
+        Write-SRLog -Level WARN -Message 'The installation ID file was invalid; a new ID will be created.'
+    }
+    $created = [guid]::NewGuid().ToString('D')
+    try {
+        $parent = Split-Path -Parent $script:SRInstallIdPath
+        if (-not [string]::IsNullOrWhiteSpace($parent) -and -not (Test-Path -LiteralPath $parent)) {
+            New-Item -ItemType Directory -Path $parent -Force | Out-Null
+        }
+        [System.IO.File]::WriteAllText($script:SRInstallIdPath, $created, (New-Object System.Text.UTF8Encoding($false)))
+    } catch {
+        Write-SRLog -Level WARN -Message ("Could not persist the installation ID: {0}" -f $_.Exception.Message)
+    }
+    $script:SRInstallationId = $created
+    return $created
+}
 
 function Get-SRDefaultConfig {
     [pscustomobject][ordered]@{
@@ -1236,12 +1276,45 @@ function Test-SRPatternMatch {
     return $false
 }
 
+function Test-SRLocalFixedPath {
+    # Restore must never launch an executable from a network share or a
+    # removable/remote device. Parse the path before touching the file system
+    # so a UNC path cannot trigger a network connection during validation.
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return [pscustomobject]@{ Ok = $false; Reason = 'The program path is empty.' }
+    }
+    $value = $Path.Trim()
+    if ($value -match '^[\\/]{2}') {
+        return [pscustomobject]@{ Ok = $false; Reason = 'Network and device paths cannot be restored.' }
+    }
+    try {
+        $full = [System.IO.Path]::GetFullPath($value)
+        $root = [System.IO.Path]::GetPathRoot($full)
+    } catch {
+        return [pscustomobject]@{ Ok = $false; Reason = 'The program path is not valid.' }
+    }
+    if ([string]::IsNullOrWhiteSpace($root) -or $root -notmatch '^[A-Za-z]:\\$') {
+        return [pscustomobject]@{ Ok = $false; Reason = 'Only local fixed drives can be restored.' }
+    }
+    try {
+        $drive = New-Object System.IO.DriveInfo($root)
+        if ($drive.DriveType -ne [System.IO.DriveType]::Fixed) {
+            return [pscustomobject]@{ Ok = $false; Reason = ('Only local fixed drives can be restored; {0} is {1}.' -f $root, $drive.DriveType) }
+        }
+    } catch {
+        return [pscustomobject]@{ Ok = $false; Reason = 'The drive could not be verified as a local fixed drive.' }
+    }
+    return [pscustomobject]@{ Ok = $true; Reason = '' }
+}
+
 function Test-SRRestoreExecutable {
     param([string]$Path)
     # Snapshots are user data and imported snapshots can come from another PC,
     # so restore must not trust the saved executable or its arguments. Only
-    # ordinary .exe programs are launched, and script hosts / interpreters
-    # that turn a path or URL argument into code are rejected.
+    # ordinary .exe programs on local fixed drives are launched, and script
+    # hosts / interpreters / living-off-the-land binaries that turn a path or
+    # URL argument into code or a download are rejected.
     if ([string]::IsNullOrWhiteSpace($Path)) {
         return [pscustomobject]@{ Ok = $false; Reason = 'The program path is empty.' }
     }
@@ -1254,15 +1327,24 @@ function Test-SRRestoreExecutable {
     if ($extension -ne '.exe') {
         return [pscustomobject]@{ Ok = $false; Reason = 'Only .exe programs can be restored.' }
     }
+    $localPath = Test-SRLocalFixedPath -Path $Path
+    if (-not $localPath.Ok) {
+        return [pscustomobject]@{ Ok = $false; Reason = $localPath.Reason }
+    }
     $blocked = @(
-        'mshta', 'wscript', 'cscript', 'powershell', 'pwsh', 'cmd',
+        'mshta', 'wscript', 'cscript', 'powershell', 'powershell_ise', 'pwsh', 'cmd',
         'conhost', 'rundll32', 'regsvr32', 'msiexec', 'wmic', 'forfiles',
         'installutil', 'regasm', 'regsvcs', 'csc', 'msbuild', 'hh',
         'pcalua', 'msdt', 'wsl', 'bash', 'mintty', 'wt', 'windowsterminal',
-        'openconsole', 'scriptrunner', 'python', 'pythonw', 'node', 'java', 'javaw'
+        'openconsole', 'scriptrunner', 'python', 'pythonw', 'node', 'java', 'javaw',
+        'certutil', 'certreq', 'bitsadmin', 'makecab', 'expand', 'extrac32',
+        'curl', 'wget', 'ftp', 'tftp', 'telnet', 'ssh', 'scp', 'sftp', 'nc', 'ncat', 'netcat',
+        'reg', 'regedit', 'sc', 'schtasks', 'taskkill', 'tasklist', 'net', 'net1', 'netsh',
+        'attrib', 'icacls', 'takeown', 'cacls', 'bcdedit', 'diskpart', 'format',
+        'mountvol', 'vssadmin', 'wbadmin', 'wevtutil', 'wusa', 'dism', 'psexec', 'procdump'
     )
     if ($blocked -contains $leaf) {
-        return [pscustomobject]@{ Ok = $false; Reason = ("Script host or interpreter blocked: {0}.exe" -f $leaf) }
+        return [pscustomobject]@{ Ok = $false; Reason = ("Script host, interpreter or system tool blocked: {0}.exe" -f $leaf) }
     }
     return [pscustomobject]@{ Ok = $true; Reason = '' }
 }
@@ -1380,13 +1462,15 @@ function Start-SRApplication {
     $exePath = [string]$App.exe
     $appName = [string]$App.name
     if ([string]::IsNullOrWhiteSpace($appName)) { $appName = [System.IO.Path]::GetFileName($exePath) }
-    if (-not $exePath -or -not (Test-Path -LiteralPath $exePath)) {
-        return [pscustomobject]@{ Started = $false; Message = "Missing executable: $exePath"; App = $App }
-    }
 
+    # Validate the path before Test-Path: a UNC program path must never reach
+    # the network just to discover that it is blocked.
     $executableCheck = Test-SRRestoreExecutable -Path $exePath
     if (-not $executableCheck.Ok) {
         return [pscustomobject]@{ Started = $false; Message = ("Blocked unsafe program {0}: {1}" -f $appName, $executableCheck.Reason); App = $App }
+    }
+    if (-not $exePath -or -not (Test-Path -LiteralPath $exePath)) {
+        return [pscustomobject]@{ Started = $false; Message = "Missing executable: $exePath"; App = $App }
     }
 
     # Never replay terminal/shell windows. A saved cmd.exe or PowerShell
@@ -4256,6 +4340,10 @@ function New-SRSnapshot {
 
     $snapshot = [pscustomobject]@{
         schemaVersion = 1
+        provenance    = [pscustomobject]@{
+            format         = 1
+            installationId = (Get-SRInstallationId)
+        }
         capturedAt    = $now.ToString('o')
         capturedAtUtc = $now.ToUniversalTime().ToString('o')
         logonTime     = $logonTime.ToString('o')
@@ -5318,9 +5406,18 @@ function Import-SRSnapshotFile {
     # Mark the file as imported. Restore-Session shows an explicit program
     # confirmation for these snapshots, and headless restores require the
     # -AllowImportedSnapshot switch. The source path is not written down, so
-    # importing never records where the file came from.
+    # importing never records where the file came from. The source file hash is
+    # kept so the imported copy can be tied to the bytes the user selected.
+    $sourceHash = ''
+    try {
+        $sourceHash = (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
+    } catch {
+        throw ("The snapshot hash could not be calculated: {0}" -f $_.Exception.Message)
+    }
     $snapshot | Add-Member -NotePropertyName imported -NotePropertyValue $true -Force
     $snapshot | Add-Member -NotePropertyName importedAt -NotePropertyValue ((Get-Date).ToString('o')) -Force
+    $snapshot | Add-Member -NotePropertyName importedFileHash -NotePropertyValue $sourceHash -Force
+    $snapshot | Add-Member -NotePropertyName importedFileHashAlgorithm -NotePropertyValue 'SHA256' -Force
     try {
         $json = $snapshot | ConvertTo-Json -Depth 100 -Compress
         [System.IO.File]::WriteAllText($targetPath, $json, (New-Object System.Text.UTF8Encoding($false)))
@@ -5333,11 +5430,27 @@ function Import-SRSnapshotFile {
 }
 
 function Test-SRImportedSnapshot {
+    # Returns true for anything restore should treat as untrusted: explicitly
+    # imported snapshots, files with no provenance, and snapshots created by a
+    # different installation. The name is kept for compatibility with existing
+    # scripts and the -AllowImportedSnapshot switch.
     param($Snapshot)
-    if ($null -eq $Snapshot) { return $false }
-    $property = $Snapshot.PSObject.Properties['imported']
-    if ($null -eq $property) { return $false }
-    try { return [bool]$property.Value } catch { return $false }
+    if ($null -eq $Snapshot) { return $true }
+    $importedProperty = $Snapshot.PSObject.Properties['imported']
+    if ($null -ne $importedProperty) {
+        try {
+            if ([bool]$importedProperty.Value) { return $true }
+        } catch { return $true }
+    }
+    $provenanceProperty = $Snapshot.PSObject.Properties['provenance']
+    if ($null -eq $provenanceProperty -or $null -eq $provenanceProperty.Value) { return $true }
+    $installationProperty = $provenanceProperty.Value.PSObject.Properties['installationId']
+    if ($null -eq $installationProperty -or [string]::IsNullOrWhiteSpace([string]$installationProperty.Value)) { return $true }
+    try {
+        return ([string]$installationProperty.Value -ne (Get-SRInstallationId))
+    } catch {
+        return $true
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -5442,6 +5555,26 @@ function Get-SRUpdateInfo {
     }
 }
 
+function Get-SRUpdateSignature {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $result = [pscustomobject]@{
+        Signed = $false
+        Status = 'Unknown'
+        Signer = ''
+    }
+    try {
+        $signature = Get-AuthenticodeSignature -FilePath $Path -ErrorAction Stop
+        $result.Status = [string]$signature.Status
+        if ($signature.Status -eq [System.Management.Automation.SignatureStatus]::Valid -and $null -ne $signature.SignerCertificate) {
+            $result.Signed = $true
+            $result.Signer = [string]$signature.SignerCertificate.Subject
+        }
+    } catch {
+        $result.Status = 'Unavailable'
+    }
+    return $result
+}
+
 function Save-SRUpdate {
     param(
         [Parameter(Mandatory = $true)][string]$UpdateJson,
@@ -5488,21 +5621,19 @@ function Save-SRUpdate {
             Remove-Item -LiteralPath $msiPath -Force -ErrorAction SilentlyContinue
             throw 'The downloaded MSI failed SHA256 verification.'
         }
-        $signed = $false
-        try {
-            $signature = Get-AuthenticodeSignature -FilePath $msiPath -ErrorAction Stop
-            $signed = ($signature.Status -eq [System.Management.Automation.SignatureStatus]::Valid)
-        } catch { }
-        if (-not $signed) {
-            Write-SRLog -Level WARN -Message 'The downloaded update is not digitally signed. SHA256 matched the release file, which detects corruption but cannot prove who built the release.'
+        $signature = Get-SRUpdateSignature -Path $msiPath
+        if (-not $signature.Signed) {
+            Write-SRLog -Level WARN -Message 'The downloaded update is not digitally signed. SHA256 matched the release file, which detects corruption but cannot prove who built the release. The installer will show an unsigned-build warning before it runs.'
         }
         return [pscustomobject]@{
-            Ok         = $true
-            MsiPath    = $msiPath
-            Sha256     = $actualHash
-            Signed     = [bool]$signed
-            Version    = $version
-            ReleaseUrl = [string]$update.ReleaseUrl
+            Ok              = $true
+            MsiPath         = $msiPath
+            Sha256          = $actualHash
+            Signed          = [bool]$signature.Signed
+            SignatureStatus = [string]$signature.Status
+            Signer          = [string]$signature.Signer
+            Version         = $version
+            ReleaseUrl      = [string]$update.ReleaseUrl
         }
     } catch {
         return [pscustomobject]@{ Ok = $false; Error = $_.Exception.Message }

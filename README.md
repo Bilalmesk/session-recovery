@@ -27,11 +27,11 @@ The package installs per-user. Settings and snapshots live in `%LOCALAPPDATA%\Se
 Download `SessionRecovery-<version>.msi` and its `.sha256` file from the [GitHub Releases](https://github.com/Bilalmesk/session-recovery/releases) page, verify the hash, then run the MSI. The wizard can change the install folder and clear the optional desktop shortcut. No UAC prompt is needed.
 
 ```powershell
-Get-FileHash .\SessionRecovery-2.6.0.msi -Algorithm SHA256
-Get-Content .\SessionRecovery-2.6.0.msi.sha256
+Get-FileHash .\SessionRecovery-2.6.1.msi -Algorithm SHA256
+Get-Content .\SessionRecovery-2.6.1.msi.sha256
 ```
 
-The MSI is **not code-signed** unless Trusted Signing or PFX secrets are configured in CI. If SmartScreen appears, verify the published SHA256 first, then choose **More info -> Run anyway**. A matching hash proves the file matches the release asset; only a signature proves who built it.
+The MSI is **not code-signed** unless Trusted Signing or PFX secrets are configured in CI. The in-app updater now shows **UNSIGNED UPDATE** and defaults to **No** before it runs a build without a valid signature. If SmartScreen appears, verify the published SHA256 first, then choose **More info -> Run anyway**. A matching hash proves the file matches the release asset; only a signature proves who built it.
 
 ### PowerShell installer
 
@@ -72,7 +72,7 @@ Get-Content "$env:LOCALAPPDATA\SessionRecovery\logs\session-recovery.log" -Tail 
 
 Use **Start Menu -> Session Recovery -> Restore Session**, or select a snapshot in the Studio and click **Restore selected**. After an unexpected shutdown the prompt appears automatically about 20-30 seconds after sign-in when `promptOnLogon` is `CrashOnly`. Uncheck what you do not want, choose a tab mode, then restore.
 
-Imported snapshots are treated as untrusted input. The app shows the exact program list and launches only `.exe` programs with simple paths or URLs. Script hosts and interpreters such as `mshta`, `wscript`, `powershell` and `cmd` are blocked. Headless restores of an imported snapshot require `-AllowImportedSnapshot`.
+Snapshots carry a per-install provenance ID. Imported snapshots, hand-dropped files and snapshots created by another installation are treated as untrusted input. The app shows the exact program list and launches only `.exe` programs on local fixed drives with simple paths or URLs. Network shares, script hosts, interpreters and download tools such as `mshta`, `wscript`, `powershell`, `cmd`, `certutil` and `bitsadmin` are blocked. Imported files also record the source file's SHA256. Headless restores of an untrusted snapshot require `-AllowImportedSnapshot`.
 
 ```powershell
 $app = "$env:LOCALAPPDATA\SessionRecovery\app"
@@ -203,7 +203,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Invoke-UiAudit.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\Build-MSI.ps1
 
 # Install, verify, render and uninstall the built MSI
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Invoke-InstallerSmoke.ps1 -MsiPath .\dist\SessionRecovery-2.6.0.msi
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Invoke-InstallerSmoke.ps1 -MsiPath .\dist\SessionRecovery-2.6.1.msi
 ```
 
 The build writes `dist\SessionRecovery-<version>.msi`, its `.sha256` file and a short release README. `dist\` is ignored by Git; publish the MSI as a GitHub Release asset.

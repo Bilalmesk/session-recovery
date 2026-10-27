@@ -65,6 +65,15 @@ Describe 'String tables' {
         }
     }
 
+    It 'keeps the program placeholder and unsigned-update keys in every language' {
+        foreach ($language in @('en', 'ar', 'fr', 'es', 'de', 'pt', 'ru', 'zh', 'tr')) {
+            $strings = Get-SRStrings -Language $language
+            $strings['RstImportedConfirmText'] | Should -Match '\{0\}' -Because "$language must show the program list"
+            $strings['UpdateUnsignedConfirmTitle'] | Should -Not -BeNullOrEmpty
+            $strings['UpdateUnsignedConfirmText'] | Should -Match '\{0\}' -Because "$language must name the unsigned version"
+        }
+    }
+
     It 'falls back to English for unknown languages' {
         $strings = Get-SRStrings -Language 'xx'
         $strings.NavDashboard | Should -Be 'Dashboard'
@@ -297,6 +306,17 @@ Describe 'Snapshot storage round-trip' {
         $snapshot = Read-SRSnapshotFile -Path $path
         $snapshot.capturedAt | Should -Not -BeNullOrEmpty
     }
+
+    It 'stamps locally created snapshots with this installation ID' {
+        $config = Get-SRConfig
+        $config.compressSnapshots = $false
+        $config.encryptSnapshots = $false
+        Save-SRConfig -Config $config
+        $path = Save-SRSnapshot -Force
+        $snapshot = Read-SRSnapshotFile -Path $path
+        $snapshot.provenance.installationId | Should -Be (Get-SRInstallationId)
+        Test-SRImportedSnapshot -Snapshot $snapshot | Should -BeFalse
+    }
 }
 
 Describe 'Retention removes thumbnails with snapshots' {
@@ -480,11 +500,19 @@ Describe 'Restore executable filter' {
         (Test-SRRestoreExecutable -Path $cmdPath).Ok | Should -BeFalse
     }
 
-    It 'blocks script hosts and interpreters even when they are real executables' {
-        foreach ($name in @('mshta.exe', 'wscript.exe', 'cscript.exe', 'powershell.exe', 'cmd.exe')) {
+    It 'blocks script hosts, interpreters and system download tools even when they are real executables' {
+        foreach ($name in @('mshta.exe', 'wscript.exe', 'cscript.exe', 'powershell.exe', 'cmd.exe', 'certutil.exe', 'bitsadmin.exe', 'certreq.exe')) {
             $path = Join-Path $env:SystemRoot ('System32\' + $name)
             if (-not (Test-Path -LiteralPath $path)) { continue }
             (Test-SRRestoreExecutable -Path $path).Ok | Should -BeFalse -Because "$name must never be replayed"
+        }
+    }
+
+    It 'rejects programs on network shares and device paths' {
+        foreach ($path in @('\\server\share\evil.exe', '//server/share/evil.exe', '\\?\C:\Windows\System32\notepad.exe', '\\.\C:\Windows\System32\notepad.exe')) {
+            $result = Test-SRRestoreExecutable -Path $path
+            $result.Ok | Should -BeFalse -Because "$path is not a local fixed-drive path"
+            $result.Reason | Should -Match 'Network|device|local fixed'
         }
     }
 
@@ -552,6 +580,32 @@ Describe 'Imported snapshots' {
         $snapshot = Get-Content -LiteralPath $target -Raw | ConvertFrom-Json
         $snapshot.imported | Should -BeTrue
         [bool]$snapshot.PSObject.Properties['importedAt'] | Should -BeTrue
+        $snapshot.importedFileHashAlgorithm | Should -Be 'SHA256'
+        $snapshot.importedFileHash | Should -Be (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+        Test-SRImportedSnapshot -Snapshot $snapshot | Should -BeTrue
+    }
+
+    It 'treats a hand-dropped snapshot without provenance as untrusted' {
+        $snapshot = [pscustomobject]@{
+            capturedAt = '2026-10-20T10:00:00.0000000+02:00'
+            apps       = @()
+            explorer   = @()
+            browsers   = @()
+        }
+        Test-SRImportedSnapshot -Snapshot $snapshot | Should -BeTrue
+    }
+
+    It 'treats a snapshot from another installation as untrusted' {
+        $snapshot = [pscustomobject]@{
+            capturedAt = '2026-10-20T10:00:00.0000000+02:00'
+            provenance = [pscustomobject]@{
+                format         = 1
+                installationId = [guid]::NewGuid().ToString('D')
+            }
+            apps       = @()
+            explorer   = @()
+            browsers   = @()
+        }
         Test-SRImportedSnapshot -Snapshot $snapshot | Should -BeTrue
     }
 
@@ -698,7 +752,24 @@ Describe 'Update supply chain' {
     It 'records whether the downloaded MSI was signed' {
         $text = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\SessionRecovery.psm1') -Raw
         $text | Should -Match 'Get-AuthenticodeSignature'
-        $text | Should -Match 'Signed\s*=\s*\[bool\]\$signed'
+        $text | Should -Match 'Signed\s*=\s*\[bool\]\$signature\.Signed'
+        $text | Should -Match 'SignatureStatus'
+    }
+
+    It 'reports an unsigned file as unsigned' {
+        $path = Join-Path $env:SR_TEST_HOME 'unsigned-update.msi'
+        Set-Content -LiteralPath $path -Value 'not a signed installer'
+        $signature = Get-SRUpdateSignature -Path $path
+        $signature.Signed | Should -BeFalse
+        $signature.Status | Should -Not -BeNullOrEmpty
+    }
+
+    It 'shows unsigned status and defaults to No before installing' {
+        $text = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\Studio-SessionRecovery.ps1') -Raw
+        $text | Should -Match 'UpdateUnsignedConfirmTitle'
+        $text | Should -Match 'UpdateUnsignedConfirmText'
+        $text | Should -Match 'MessageBoxDefaultButton\]::Button2'
+        $text | Should -Match 'UpdateUnsignedVerified'
     }
 }
 
@@ -708,6 +779,19 @@ Describe 'Restore UI security' {
         $text | Should -Match '\[switch\]\$AllowImportedSnapshot'
         $text | Should -Match 'RstImportedHeadless'
         $text | Should -Match 'RstImportedConfirmText'
+    }
+
+    It 'keeps the program list placeholder in the English fallback' {
+        $lines = @(Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\Restore-Session.ps1') |
+            Where-Object { $_ -match "T 'RstImportedConfirmText'" })
+        $lines.Count | Should -Be 1
+        $lines[0] | Should -Match '\{0\}'
+    }
+
+    It 'validates the executable path before touching the file system' {
+        $text = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\SessionRecovery.psm1') -Raw
+        $text | Should -Match 'function Test-SRLocalFixedPath'
+        $text | Should -Match 'DriveType.*Fixed|DriveType\]::Fixed'
     }
 
     It 'quotes the Notepad config path correctly' {
