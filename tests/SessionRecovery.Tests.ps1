@@ -501,8 +501,9 @@ Describe 'Restore executable filter' {
     }
 
     It 'blocks script hosts, interpreters and system download tools even when they are real executables' {
-        foreach ($name in @('mshta.exe', 'wscript.exe', 'cscript.exe', 'powershell.exe', 'cmd.exe', 'certutil.exe', 'bitsadmin.exe', 'certreq.exe')) {
-            $path = Join-Path $env:SystemRoot ('System32\' + $name)
+        foreach ($name in @('mshta.exe', 'wscript.exe', 'cscript.exe', 'powershell.exe', 'cmd.exe', 'certutil.exe', 'bitsadmin.exe', 'certreq.exe', 'explorer.exe')) {
+            $relative = if ($name -eq 'explorer.exe') { $name } else { 'System32\' + $name }
+            $path = Join-Path $env:SystemRoot $relative
             if (-not (Test-Path -LiteralPath $path)) { continue }
             (Test-SRRestoreExecutable -Path $path).Ok | Should -BeFalse -Because "$name must never be replayed"
         }
@@ -533,6 +534,15 @@ Describe 'Restore argument filter' {
         (Test-SRRestoreArgumentList -Arguments @('/c')).Ok | Should -BeFalse
         (Test-SRRestoreArgumentList -Arguments @("bad`targ")).Ok | Should -BeFalse
         (Test-SRRestoreArgumentList -Arguments @('Z:\nowhere\missing.txt')).Ok | Should -BeFalse
+    }
+
+    It 'rejects arguments that point at network shares or device paths' {
+        foreach ($argument in @('\\server\share\setup.cfg', '//server/share/setup.cfg', '\\?\C:\temp\payload.cmd')) {
+            $result = Test-SRRestoreArgumentList -Arguments @($argument)
+            $result.Ok | Should -BeFalse -Because "$argument must never be passed to a restored program"
+            # The forward-slash UNC form is also caught by the switch filter.
+            $result.Reason | Should -Match 'Unsafe argument|Unsafe command-line switch'
+        }
     }
 
     It 'rejects more than eight arguments' {
@@ -623,6 +633,64 @@ Describe 'Imported snapshots' {
 { "capturedAt": "2026-10-20T10:00:00+02:00", "apps": [ { "name": "App", "exe": "C:\\App\\app.exe", "args": [""] } ], "explorer": [], "browsers": [] }
 '@ | Set-Content -LiteralPath $source
         { Import-SRSnapshotFile -Path $source } | Should -Throw
+    }
+}
+
+Describe 'Legacy snapshot adoption' {
+    It 'adopts pre-provenance snapshots once when the installation ID is created' {
+        $snapshotDir = Get-SRSnapshotDirectory
+        # Simulate an upgrade from 2.6.0: a snapshot with no provenance, a
+        # deliberately imported file, and a gzipped snapshot with none.
+        $legacyPath = Join-Path $snapshotDir 'session-20261026-000000-000.json'
+        @'
+{ "capturedAt": "2026-10-26T00:00:00.0000000+02:00", "apps": [], "explorer": [], "browsers": [] }
+'@ | Set-Content -LiteralPath $legacyPath
+        $importedPath = Join-Path $snapshotDir 'session-20261026-000001-000.json'
+        @'
+{ "capturedAt": "2026-10-26T00:00:01.0000000+02:00", "imported": true, "apps": [], "explorer": [], "browsers": [] }
+'@ | Set-Content -LiteralPath $importedPath
+        $gzipPath = Join-Path $snapshotDir 'session-20261026-000002-000.json.gz'
+        $gzipJson = '{ "capturedAt": "2026-10-26T00:00:02.0000000+02:00", "apps": [], "explorer": [], "browsers": [] }'
+        $gzipBytes = [System.Text.Encoding]::UTF8.GetBytes($gzipJson)
+        $gzipStream = New-Object System.IO.MemoryStream
+        $gzipWriter = New-Object System.IO.Compression.GZipStream($gzipStream, [System.IO.Compression.CompressionMode]::Compress)
+        $gzipWriter.Write($gzipBytes, 0, $gzipBytes.Length)
+        $gzipWriter.Dispose()
+        [System.IO.File]::WriteAllBytes($gzipPath, $gzipStream.ToArray())
+        $gzipStream.Dispose()
+
+        # A fresh installation ID must not exist for the adoption to run.
+        $installIdPath = Join-Path $env:SESSIONRECOVERY_HOME 'installation.id'
+        Remove-Item -LiteralPath $installIdPath -Force -ErrorAction SilentlyContinue
+        & (Get-Module SessionRecovery) { $script:SRInstallationId = $null }
+
+        $newId = Get-SRInstallationId
+        $newId | Should -Match '^[0-9a-f-]{36}$'
+
+        $legacy = Read-SRSnapshotFile -Path $legacyPath
+        $legacy.provenance.installationId | Should -Be $newId
+        Test-SRImportedSnapshot -Snapshot $legacy | Should -BeFalse
+
+        # The imported marker survives the adoption.
+        $imported = Read-SRSnapshotFile -Path $importedPath
+        Test-SRImportedSnapshot -Snapshot $imported | Should -BeTrue
+
+        # The gzip format survives the adoption.
+        $adopted = Read-SRSnapshotFile -Path $gzipPath
+        $adopted.provenance.installationId | Should -Be $newId
+        $rewritten = [System.IO.File]::ReadAllBytes($gzipPath)
+        $rewritten[0] | Should -Be 0x1F
+        $rewritten[1] | Should -Be 0x8B
+    }
+
+    It 'does not adopt files dropped after the installation ID exists' {
+        $snapshotDir = Get-SRSnapshotDirectory
+        $droppedPath = Join-Path $snapshotDir 'session-20261027-000000-000.json'
+        @'
+{ "capturedAt": "2026-10-27T00:00:00.0000000+02:00", "apps": [], "explorer": [], "browsers": [] }
+'@ | Set-Content -LiteralPath $droppedPath
+        $dropped = Read-SRSnapshotFile -Path $droppedPath
+        Test-SRImportedSnapshot -Snapshot $dropped | Should -BeTrue
     }
 }
 
@@ -786,6 +854,12 @@ Describe 'Restore UI security' {
             Where-Object { $_ -match "T 'RstImportedConfirmText'" })
         $lines.Count | Should -Be 1
         $lines[0] | Should -Match '\{0\}'
+    }
+
+    It 'lists the saved arguments in the untrusted-snapshot confirmation' {
+        $text = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\Restore-Session.ps1') -Raw
+        $text | Should -Match 'displayArguments'
+        $text | Should -Match 'displayArguments -join'
     }
 
     It 'validates the executable path before touching the file system' {

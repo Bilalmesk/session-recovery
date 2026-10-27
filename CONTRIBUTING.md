@@ -57,5 +57,5 @@ only green PRs.
 - `powershell -File src\Control-SessionRecovery.ps1 -Command status` – CLI API
   answers.
 - `installer\Build-MSI.ps1` – installer builds.
-- `tests\Invoke-InstallerSmoke.ps1 -MsiPath .\dist\SessionRecovery-2.6.1.msi` –
+- `tests\Invoke-InstallerSmoke.ps1 -MsiPath .\dist\SessionRecovery-2.6.2.msi` –
   install, payload, render and uninstall all pass.

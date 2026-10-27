@@ -1076,17 +1076,84 @@ function Get-SRInstallationId {
         Write-SRLog -Level WARN -Message 'The installation ID file was invalid; a new ID will be created.'
     }
     $created = [guid]::NewGuid().ToString('D')
+    $persisted = $false
     try {
         $parent = Split-Path -Parent $script:SRInstallIdPath
         if (-not [string]::IsNullOrWhiteSpace($parent) -and -not (Test-Path -LiteralPath $parent)) {
             New-Item -ItemType Directory -Path $parent -Force | Out-Null
         }
         [System.IO.File]::WriteAllText($script:SRInstallIdPath, $created, (New-Object System.Text.UTF8Encoding($false)))
+        $persisted = $true
     } catch {
         Write-SRLog -Level WARN -Message ("Could not persist the installation ID: {0}" -f $_.Exception.Message)
     }
     $script:SRInstallationId = $created
+    if ($persisted) {
+        # First run after upgrading from a version that did not track
+        # provenance: adopt the snapshots already on disk so a crash restore
+        # right after the update is not greeted by the untrusted-snapshot
+        # prompt for the user's own files. Anything dropped into the folder
+        # later still has no provenance and stays untrusted.
+        try { Update-SRLegacySnapshotProvenance -InstallationId $created } catch {
+            Write-SRLog -Level WARN -Message ("Could not adopt existing snapshots: {0}" -f $_.Exception.Message)
+        }
+    }
     return $created
+}
+
+function Update-SRLegacySnapshotProvenance {
+    # One-time adoption of snapshots written before provenance was tracked
+    # (2.6.1 and earlier): they receive the freshly created installation ID
+    # so an upgrade does not prompt on the user's own snapshots. Deliberately
+    # imported files keep their untrusted marker, and each file is rewritten
+    # in its original plain / gzip / DPAPI format.
+    param([Parameter(Mandatory = $true)][string]$InstallationId)
+    if (-not (Test-Path -LiteralPath $script:SRSnapshotDir -PathType Container)) { return }
+    $adopted = 0
+    foreach ($file in @(Get-SRSnapshotFiles)) {
+        try {
+            $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
+            $encrypted = ($bytes.Length -ge 5 -and $bytes[0] -eq 0x53 -and $bytes[1] -eq 0x52 -and $bytes[2] -eq 0x44 -and $bytes[3] -eq 0x50 -and $bytes[4] -eq 0x31)
+            $inner = if ($encrypted) { Unprotect-SRSnapshotBytes -Bytes $bytes } else { $bytes }
+            $gzipped = ($inner.Length -ge 2 -and $inner[0] -eq 0x1F -and $inner[1] -eq 0x8B)
+            $snapshot = Read-SRSnapshotFile -Path $file.FullName
+            $importedProperty = $snapshot.PSObject.Properties['imported']
+            if ($null -ne $importedProperty -and $null -ne $importedProperty.Value) {
+                try { if ([bool]$importedProperty.Value) { continue } } catch { continue }
+            }
+            $provenanceProperty = $snapshot.PSObject.Properties['provenance']
+            if ($null -ne $provenanceProperty -and $null -ne $provenanceProperty.Value) {
+                $existingId = $provenanceProperty.Value.PSObject.Properties['installationId']
+                if ($null -ne $existingId -and -not [string]::IsNullOrWhiteSpace([string]$existingId.Value)) { continue }
+            }
+            $snapshot | Add-Member -NotePropertyName provenance -NotePropertyValue ([pscustomobject]@{ format = 1; installationId = $InstallationId }) -Force
+            # Same payload pipeline as Save-SRSnapshot: JSON -> gzip -> DPAPI.
+            $json = $snapshot | ConvertTo-Json -Depth 12
+            $payload = [System.Text.Encoding]::UTF8.GetBytes($json)
+            if ($gzipped) {
+                $plainStream = New-Object System.IO.MemoryStream (,$payload)
+                $packed = New-Object System.IO.MemoryStream
+                $gzipWriter = $null
+                try {
+                    $gzipWriter = New-Object System.IO.Compression.GZipStream($packed, [System.IO.Compression.CompressionLevel]::Optimal, $true)
+                    $plainStream.CopyTo($gzipWriter)
+                } finally {
+                    if ($null -ne $gzipWriter) { $gzipWriter.Dispose() }
+                    $plainStream.Dispose()
+                }
+                $payload = $packed.ToArray()
+                $packed.Dispose()
+            }
+            if ($encrypted) { $payload = Protect-SRSnapshotBytes -Bytes $payload }
+            [System.IO.File]::WriteAllBytes($file.FullName, $payload)
+            $adopted++
+        } catch {
+            Write-SRLog -Level DEBUG -Message ("Could not adopt snapshot {0}: {1}" -f $file.Name, $_.Exception.Message)
+        }
+    }
+    if ($adopted -gt 0) {
+        Write-SRLog -Message ("Adopted {0} existing snapshot(s) written before provenance was tracked." -f $adopted)
+    }
 }
 
 function Get-SRDefaultConfig {
@@ -1331,9 +1398,13 @@ function Test-SRRestoreExecutable {
     if (-not $localPath.Ok) {
         return [pscustomobject]@{ Ok = $false; Reason = $localPath.Reason }
     }
+    # Explorer is on the list as well: it opens any path argument with the
+    # registered default handler, which turns one argument into arbitrary
+    # execution. Folder restore does not go through this filter; it opens
+    # folders with Explorer directly from its own checked folder list.
     $blocked = @(
         'mshta', 'wscript', 'cscript', 'powershell', 'powershell_ise', 'pwsh', 'cmd',
-        'conhost', 'rundll32', 'regsvr32', 'msiexec', 'wmic', 'forfiles',
+        'conhost', 'explorer', 'rundll32', 'regsvr32', 'msiexec', 'wmic', 'forfiles',
         'installutil', 'regasm', 'regsvcs', 'csc', 'msbuild', 'hh',
         'pcalua', 'msdt', 'wsl', 'bash', 'mintty', 'wt', 'windowsterminal',
         'openconsole', 'scriptrunner', 'python', 'pythonw', 'node', 'java', 'javaw',
@@ -1373,6 +1444,13 @@ function Test-SRRestoreArgumentList {
         if ($value -match '^(?i)https?://') {
             $safe.Add($value)
             continue
+        }
+        # Path arguments must stay on local fixed drives, and the drive check
+        # runs before Test-Path so a network path never triggers a connection
+        # just to be rejected.
+        $argumentDrive = Test-SRLocalFixedPath -Path $value
+        if (-not $argumentDrive.Ok) {
+            return [pscustomobject]@{ Ok = $false; Reason = ('Unsafe argument: {0} ({1})' -f $value, $argumentDrive.Reason); Arguments = @() }
         }
         if (Test-Path -LiteralPath $value) {
             $safe.Add($value)

@@ -13,7 +13,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string]$Version = '2.6.1',
+    [string]$Version = '2.6.2',
     [switch]$NoRestore
 )
 
@@ -75,8 +75,20 @@ Session Recovery {0}
 Reopen the apps, File Explorer folders and browser tabs that were open before
 a crash, power cut or unexpected restart.
 
-What's new in 2.6.1
+What's new in 2.6.2
 -------------------
+- Restore arguments must also live on local fixed drives. A network-share
+  or device path argument is rejected even when the share is reachable.
+- The untrusted-snapshot confirmation now lists each program's saved
+  arguments, not just its name and path.
+- Windows Explorer is never replayed as a restore program: it opens any
+  path argument with the registered default handler. Folder restore is
+  unaffected and keeps opening folders directly.
+- Upgrading adopts the snapshots already on disk, so a crash restore right
+  after the update is not greeted by the untrusted-snapshot prompt.
+
+Also in 2.6.1
+------------
 - The update dialog now shows UNSIGNED UPDATE and defaults to No when the
   downloaded MSI has no valid digital signature. SHA256 still detects a
   corrupted download, but it cannot prove who built the file.

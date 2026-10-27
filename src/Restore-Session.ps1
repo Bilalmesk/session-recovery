@@ -914,7 +914,7 @@ $brandName.Location = New-Object System.Drawing.Point(80, 18)
 $header.Controls.Add($brandName)
 
 $brandMeta = New-Object System.Windows.Forms.Label
-$brandMeta.Text = 'LOCAL SNAPSHOTS  /  V2.6.1'
+$brandMeta.Text = 'LOCAL SNAPSHOTS  /  V2.6.2'
 $brandMeta.Font = New-Object System.Drawing.Font('Consolas', 7.5)
 $brandMeta.ForeColor = $rsMuted
 $brandMeta.AutoSize = $true
@@ -1298,7 +1298,22 @@ $restoreButton.Add_Click({
     # all fail that check, so show the exact program list before any process
     # starts.
     if (Test-SRImportedSnapshot -Snapshot $entry.Snapshot) {
-        $programLines = @($selectedApps | ForEach-Object { '{0}  —  {1}' -f [string]$_.name, [string]$_.exe })
+        # Arguments are part of what the user is approving: a program with an
+        # unexpected file must be visible in the list, not just its name and
+        # path.
+        $programLines = @($selectedApps | ForEach-Object {
+            $line = '{0}  —  {1}' -f [string]$_.name, [string]$_.exe
+            $argumentProperty = $_.PSObject.Properties['args']
+            if ($null -ne $argumentProperty -and $null -ne $argumentProperty.Value) {
+                $displayArguments = @(@($argumentProperty.Value) |
+                    ForEach-Object { [string]$_ } |
+                    Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                if ($displayArguments.Count -gt 0) {
+                    $line = '{0}  —  {1}' -f $line, ($displayArguments -join ' ')
+                }
+            }
+            $line
+        })
         $programText = if ($programLines.Count -gt 0) {
             $programLines -join "`r`n"
         } else {
