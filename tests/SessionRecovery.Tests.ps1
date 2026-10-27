@@ -578,13 +578,17 @@ Describe 'Imported snapshots' {
 
 Describe 'Shutdown reason localization' {
     It 'formats a structured reason in French' {
+        $strings = Get-SRStrings -Language 'fr'
         $shutdown = [pscustomobject]@{
             ReasonKey = 'ShutdownInitiated'
             ReasonArg = 'explorer.exe'
             Reason    = 'Shutdown initiated by explorer.exe'
         }
-        Format-SRShutdownReason -Shutdown $shutdown -Strings (Get-SRStrings -Language 'fr') |
-            Should -Be 'Arrêt lancé par explorer.exe'
+        $formatted = Format-SRShutdownReason -Shutdown $shutdown -Strings $strings
+        # Compare against the table so this test file stays ASCII-only and
+        # Windows PowerShell 5.1 reads it correctly without a BOM.
+        $formatted | Should -Be ($strings['ShutdownInitiated'] -f 'explorer.exe')
+        $formatted | Should -Not -Be ('Shutdown initiated by {0}' -f 'explorer.exe')
     }
 
     It 'falls back to the English reason when no key exists' {
