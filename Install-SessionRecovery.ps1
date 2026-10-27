@@ -147,7 +147,10 @@ $moduleFiles = @(
     'Diagnostics.ps1',
     'RunHidden.vbs',
     'Studio-SessionRecovery.ps1',
-    'StudioControls.cs'
+    'Strings.ps1',
+    'Control-SessionRecovery.ps1',
+    'StudioControls.cs',
+    'InstallManifest.ps1'
 )
 
 foreach ($file in $moduleFiles) {
@@ -188,6 +191,15 @@ $readmeSource = Join-Path $sourceRoot 'README.md'
 if (Test-Path -LiteralPath $readmeSource) {
     Copy-Item -LiteralPath $readmeSource -Destination (Join-Path $InstallDirectory 'README.md') -Force
 }
+
+# The manifest is the uninstaller's proof of ownership. It contains leaf file
+# names only, never paths, so uninstall cannot be pointed at another folder.
+$manifestHelper = Join-Path $sourceDirectory 'InstallManifest.ps1'
+. $manifestHelper
+$manifestFiles = @($moduleFiles) + @('SessionRecovery.exe', 'Uninstall-SessionRecovery.ps1', 'SessionRecovery.ico')
+if (Test-Path -LiteralPath (Join-Path $InstallDirectory 'README.md')) { $manifestFiles += 'README.md' }
+[void](New-SRInstallManifest -InstallDirectory $InstallDirectory -Files $manifestFiles)
+Write-Step 'Wrote install manifest.'
 
 foreach ($directory in @($dataRoot, (Join-Path $dataRoot 'snapshots'), (Join-Path $dataRoot 'logs'))) {
     if (-not (Test-Path -LiteralPath $directory)) {

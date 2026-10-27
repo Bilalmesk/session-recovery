@@ -1236,6 +1236,74 @@ function Test-SRPatternMatch {
     return $false
 }
 
+function Test-SRRestoreExecutable {
+    param([string]$Path)
+    # Snapshots are user data and imported snapshots can come from another PC,
+    # so restore must not trust the saved executable or its arguments. Only
+    # ordinary .exe programs are launched, and script hosts / interpreters
+    # that turn a path or URL argument into code are rejected.
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return [pscustomobject]@{ Ok = $false; Reason = 'The program path is empty.' }
+    }
+    try {
+        $extension = [System.IO.Path]::GetExtension($Path)
+        $leaf = [System.IO.Path]::GetFileNameWithoutExtension($Path).ToLowerInvariant()
+    } catch {
+        return [pscustomobject]@{ Ok = $false; Reason = 'The program path is not valid.' }
+    }
+    if ($extension -ne '.exe') {
+        return [pscustomobject]@{ Ok = $false; Reason = 'Only .exe programs can be restored.' }
+    }
+    $blocked = @(
+        'mshta', 'wscript', 'cscript', 'powershell', 'pwsh', 'cmd',
+        'conhost', 'rundll32', 'regsvr32', 'msiexec', 'wmic', 'forfiles',
+        'installutil', 'regasm', 'regsvcs', 'csc', 'msbuild', 'hh',
+        'pcalua', 'msdt', 'wsl', 'bash', 'mintty', 'wt', 'windowsterminal',
+        'openconsole', 'scriptrunner', 'python', 'pythonw', 'node', 'java', 'javaw'
+    )
+    if ($blocked -contains $leaf) {
+        return [pscustomobject]@{ Ok = $false; Reason = ("Script host or interpreter blocked: {0}.exe" -f $leaf) }
+    }
+    return [pscustomobject]@{ Ok = $true; Reason = '' }
+}
+
+function Test-SRRestoreArgumentList {
+    param([string[]]$Arguments)
+    # Applies the same rules as capture-time Get-SRSafeArguments, but to the
+    # argument array stored in a snapshot. It runs on every restore, so a
+    # tampered or imported file cannot smuggle command-line switches through.
+    $safe = New-Object System.Collections.Generic.List[string]
+    foreach ($argument in @($Arguments)) {
+        if ($null -eq $argument) { return [pscustomobject]@{ Ok = $false; Reason = 'The program has an empty argument.'; Arguments = @() } }
+        $value = [string]$argument
+        if ([string]::IsNullOrWhiteSpace($value)) {
+            return [pscustomobject]@{ Ok = $false; Reason = 'The program has an empty argument.'; Arguments = @() }
+        }
+        if ($value.Length -gt 2048) {
+            return [pscustomobject]@{ Ok = $false; Reason = 'The program has an argument that is too long.'; Arguments = @() }
+        }
+        if ($value -match '[\x00-\x1F\x7F]') {
+            return [pscustomobject]@{ Ok = $false; Reason = 'The program has an argument with control characters.'; Arguments = @() }
+        }
+        if ($value -match '^-' -or $value -match '^/') {
+            return [pscustomobject]@{ Ok = $false; Reason = ('Unsafe command-line switch: {0}' -f $value); Arguments = @() }
+        }
+        if ($value -match '^(?i)https?://') {
+            $safe.Add($value)
+            continue
+        }
+        if (Test-Path -LiteralPath $value) {
+            $safe.Add($value)
+            continue
+        }
+        return [pscustomobject]@{ Ok = $false; Reason = ('Unsafe argument: {0}' -f $value); Arguments = @() }
+    }
+    if ($safe.Count -gt 8) {
+        return [pscustomobject]@{ Ok = $false; Reason = 'The program has too many arguments.'; Arguments = @() }
+    }
+    return [pscustomobject]@{ Ok = $true; Reason = ''; Arguments = $safe.ToArray() }
+}
+
 function Get-SRSafeArguments {
     param(
         [string]$CommandLine,
@@ -1249,24 +1317,9 @@ function Get-SRSafeArguments {
     }
     if ($parts.Count -le 1) { return @() }
 
-    $safe = New-Object System.Collections.Generic.List[string]
-    for ($i = 1; $i -lt $parts.Count; $i++) {
-        $argument = $parts[$i]
-        if ([string]::IsNullOrWhiteSpace($argument)) { return @() }
-        if ($argument -match '^-') { return @() }
-        if ($argument -match '^/') { return @() }
-        if ($argument -match '^(?i)https?://') {
-            $safe.Add($argument)
-            continue
-        }
-        if (Test-Path -LiteralPath $argument) {
-            $safe.Add($argument)
-            continue
-        }
-        return @()
-    }
-    if ($safe.Count -gt 8) { return @() }
-    return $safe.ToArray()
+    $result = Test-SRRestoreArgumentList -Arguments @($parts[1..($parts.Count - 1)])
+    if (-not $result.Ok) { return @() }
+    return $result.Arguments
 }
 
 function Start-SRDetached {
@@ -1324,25 +1377,40 @@ function Start-SRApplication {
         [switch]$Force,
         $SnapshotMonitors = $null
     )
-    if (-not $App.exe -or -not (Test-Path -LiteralPath $App.exe)) {
-        return [pscustomobject]@{ Started = $false; Message = "Missing executable: $($App.exe)"; App = $App }
+    $exePath = [string]$App.exe
+    $appName = [string]$App.name
+    if ([string]::IsNullOrWhiteSpace($appName)) { $appName = [System.IO.Path]::GetFileName($exePath) }
+    if (-not $exePath -or -not (Test-Path -LiteralPath $exePath)) {
+        return [pscustomobject]@{ Started = $false; Message = "Missing executable: $exePath"; App = $App }
+    }
+
+    $executableCheck = Test-SRRestoreExecutable -Path $exePath
+    if (-not $executableCheck.Ok) {
+        return [pscustomobject]@{ Started = $false; Message = ("Blocked unsafe program {0}: {1}" -f $appName, $executableCheck.Reason); App = $App }
     }
 
     # Never replay terminal/shell windows. A saved cmd.exe or PowerShell
     # window can flash a console during a restore and looks suspicious.
     $consoleHosts = @('cmd', 'powershell', 'pwsh', 'conhost', 'wsl', 'wt', 'windowsterminal', 'openconsole', 'bash', 'mintty')
-    $leaf = [System.IO.Path]::GetFileNameWithoutExtension([string]$App.exe).ToLowerInvariant()
-    $appName = ([string]$App.name).ToLowerInvariant()
-    if ($consoleHosts -contains $leaf -or $consoleHosts -contains $appName) {
-        return [pscustomobject]@{ Started = $false; Message = "Skipped console window: $($App.name)"; App = $App }
+    $leaf = [System.IO.Path]::GetFileNameWithoutExtension($exePath).ToLowerInvariant()
+    $appNameLower = $appName.ToLowerInvariant()
+    if ($consoleHosts -contains $leaf -or $consoleHosts -contains $appNameLower) {
+        return [pscustomobject]@{ Started = $false; Message = "Skipped console window: $appName"; App = $App }
+    }
+
+    $argumentsProperty = $App.PSObject.Properties['args']
+    $savedArguments = if ($null -ne $argumentsProperty -and $null -ne $argumentsProperty.Value) { @($argumentsProperty.Value) } else { @() }
+    $argumentCheck = Test-SRRestoreArgumentList -Arguments $savedArguments
+    if (-not $argumentCheck.Ok) {
+        return [pscustomobject]@{ Started = $false; Message = ("Skipped unsafe arguments for {0}: {1}" -f $appName, $argumentCheck.Reason); App = $App }
     }
 
     if (-not $Force) {
         $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
-            try { $_.Path -and ($_.Path -ieq $App.exe) } catch { $false }
+            try { $_.Path -and ($_.Path -ieq $exePath) } catch { $false }
         })
         if ($running.Count -gt 0) {
-            return [pscustomobject]@{ Started = $false; Message = "Already running: $($App.name)"; App = $App }
+            return [pscustomobject]@{ Started = $false; Message = "Already running: $appName"; App = $App }
         }
     }
 
@@ -1350,13 +1418,13 @@ function Start-SRApplication {
     try {
         # A captured media entry (playing video) replaces the plain command
         # line so the player reopens the same file at the saved position.
-        $launchArguments = @($App.args)
+        $launchArguments = @($argumentCheck.Arguments)
         $mediaProperty = $App.PSObject.Properties['media']
         if ($null -ne $mediaProperty -and $null -ne $mediaProperty.Value) {
-            $mediaArguments = Get-SRMediaLaunchArguments -ExePath $App.exe -Media $mediaProperty.Value
+            $mediaArguments = Get-SRMediaLaunchArguments -ExePath $exePath -Media $mediaProperty.Value
             if ($null -ne $mediaArguments) { $launchArguments = $mediaArguments }
         }
-        $process = Start-SRDetached -FilePath $App.exe -Arguments $launchArguments -WindowStyle $windowStyle
+        $process = Start-SRDetached -FilePath $exePath -Arguments $launchArguments -WindowStyle $windowStyle
         $placeWindows = $true
         try {
             $config = Get-SRConfig
@@ -1391,9 +1459,9 @@ function Start-SRApplication {
                 }
             }
         }
-        return [pscustomobject]@{ Started = $true; Message = "Started: $($App.name)"; App = $App }
+        return [pscustomobject]@{ Started = $true; Message = "Started: $appName"; App = $App }
     } catch {
-        return [pscustomobject]@{ Started = $false; Message = "Failed to start $($App.name): $($_.Exception.Message)"; App = $App }
+        return [pscustomobject]@{ Started = $false; Message = "Failed to start ${appName}: $($_.Exception.Message)"; App = $App }
     }
 }
 
@@ -3884,8 +3952,10 @@ function Get-SRJetBrainsLauncher {
 
 function Get-SRLastShutdownReason {
     # Plain-language reason for the most recent shutdown, and whether it was
-    # a crash. Replaces guesswork in the restore prompt with facts.
-    $result = [pscustomobject]@{ Kind = 'unknown'; Reason = ''; At = $null }
+    # a crash. Replaces guesswork in the restore prompt with facts. ReasonKey
+    # and ReasonArg let the UI translate the reason; Reason stays in English
+    # for diagnostics/CLI output.
+    $result = [pscustomobject]@{ Kind = 'unknown'; Reason = ''; ReasonKey = ''; ReasonArg = ''; At = $null }
     try {
         $since = (Get-Date).AddDays(-7)
         $events = @()
@@ -3899,7 +3969,9 @@ function Get-SRLastShutdownReason {
             $query = @{ LogName = 'System'; Id = $filter['Id']; StartTime = $since }
             if ($filter['ProviderName']) { $query['ProviderName'] = $filter['ProviderName'] }
             foreach ($event in @(Get-WinEvent -FilterHashtable $query -ErrorAction SilentlyContinue)) {
-                $events += [pscustomobject]@{ Id = $filter['Id']; At = $event.TimeCreated; Message = [string]$event.Message }
+                $properties = @()
+                try { $properties = @($event.Properties | ForEach-Object { [string]$_.Value }) } catch { }
+                $events += [pscustomobject]@{ Id = $filter['Id']; At = $event.TimeCreated; Message = [string]$event.Message; Properties = $properties }
             }
         }
         $events = @($events | Sort-Object -Property At -Descending)
@@ -3917,32 +3989,50 @@ function Get-SRLastShutdownReason {
             $stop = ''
             if ($bugcheck[0].Message -match '0x[0-9a-fA-F]{8}') { $stop = $Matches[0] }
             $result.Kind = 'crash'
+            $result.ReasonKey = 'ShutdownBlueScreen'
+            $result.ReasonArg = $stop
             $result.Reason = 'Blue screen (stop code ' + $stop + ')'
             $result.At = $bugcheck[0].At
             return $result
         }
         if ($kernelPower.Count -gt 0 -and $cleanAt -lt $kernelPower[0].At) {
             $result.Kind = 'crash'
+            $result.ReasonKey = 'ShutdownPowerLoss'
             $result.Reason = 'Power loss or forced restart (the system did not shut down cleanly)'
             $result.At = $kernelPower[0].At
             return $result
         }
         if ($unexpected.Count -gt 0 -and $cleanAt -lt $unexpected[0].At) {
             $result.Kind = 'crash'
+            $result.ReasonKey = 'ShutdownUnexpected'
             $result.Reason = 'Unexpected shutdown'
             $result.At = $unexpected[0].At
             return $result
         }
         if ($initiated.Count -gt 0) {
+            # Event 1074 messages are localized, so parse the structured
+            # properties: the first is the process path, the last is the user.
+            # Never return an empty "initiated by" name.
             $by = ''
-            if ($initiated[0].Message -match 'initiated by (\S+)') { $by = $Matches[1] }
+            $properties = @($initiated[0].Properties)
+            if ($properties.Count -gt 0) {
+                $processValue = [string]$properties[0]
+                if ($processValue -match '([^\\/]+\.exe)') { $by = $Matches[1] }
+                elseif ($properties.Count -gt 6 -and -not [string]::IsNullOrWhiteSpace([string]$properties[6])) {
+                    $by = [string]$properties[6]
+                }
+            }
+            if ([string]::IsNullOrWhiteSpace($by)) { $by = 'Windows' }
             $result.Kind = 'clean'
-            $result.Reason = 'Restart initiated by ' + $by
+            $result.ReasonKey = 'ShutdownInitiated'
+            $result.ReasonArg = $by
+            $result.Reason = 'Shutdown initiated by ' + $by
             $result.At = $initiated[0].At
             return $result
         }
         if ($clean.Count -gt 0) {
             $result.Kind = 'clean'
+            $result.ReasonKey = 'ShutdownNormal'
             $result.Reason = 'Normal shutdown'
             $result.At = $clean[0].At
         }
@@ -5164,6 +5254,11 @@ function Import-SRSnapshotFile {
     param([Parameter(Mandatory = $true)][string]$Path)
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Snapshot file not found: $Path" }
 
+    $source = Get-Item -LiteralPath $Path -ErrorAction Stop
+    if ($source.Length -gt 32MB) {
+        throw 'The snapshot file is too large to import (32 MB maximum).'
+    }
+
     # Validate before copying so a random JSON file cannot enter the timeline.
     $snapshot = $null
     try {
@@ -5187,6 +5282,23 @@ function Import-SRSnapshotFile {
             [ref]$capturedAt)) {
         throw 'The snapshot has an invalid capturedAt value.'
     }
+    $appIndex = 0
+    foreach ($app in @($snapshot.apps)) {
+        if ($null -eq $app) { throw ("Application entry {0} is empty." -f $appIndex) }
+        $exeProperty = $app.PSObject.Properties['exe']
+        if ($null -eq $exeProperty -or [string]::IsNullOrWhiteSpace([string]$exeProperty.Value)) {
+            throw ("Application entry {0} has no executable path." -f $appIndex)
+        }
+        $argsProperty = $app.PSObject.Properties['args']
+        if ($null -ne $argsProperty -and $null -ne $argsProperty.Value) {
+            foreach ($argument in @($argsProperty.Value)) {
+                if ($null -eq $argument -or [string]::IsNullOrWhiteSpace([string]$argument)) {
+                    throw ("Application entry {0} has an empty argument." -f $appIndex)
+                }
+            }
+        }
+        $appIndex++
+    }
 
     if (-not (Test-Path -LiteralPath $script:SRSnapshotDir)) {
         New-Item -ItemType Directory -Path $script:SRSnapshotDir -Force | Out-Null
@@ -5202,9 +5314,30 @@ function Import-SRSnapshotFile {
         }
     }
     $targetPath = Join-Path $script:SRSnapshotDir $targetName
-    Copy-Item -LiteralPath $Path -Destination $targetPath -Force -ErrorAction Stop
+
+    # Mark the file as imported. Restore-Session shows an explicit program
+    # confirmation for these snapshots, and headless restores require the
+    # -AllowImportedSnapshot switch. The source path is not written down, so
+    # importing never records where the file came from.
+    $snapshot | Add-Member -NotePropertyName imported -NotePropertyValue $true -Force
+    $snapshot | Add-Member -NotePropertyName importedAt -NotePropertyValue ((Get-Date).ToString('o')) -Force
+    try {
+        $json = $snapshot | ConvertTo-Json -Depth 100 -Compress
+        [System.IO.File]::WriteAllText($targetPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+    } catch {
+        Remove-Item -LiteralPath $targetPath -Force -ErrorAction SilentlyContinue
+        throw ("The snapshot could not be imported: {0}" -f $_.Exception.Message)
+    }
     Write-SRLog -Message "Snapshot imported from $Path as $targetName"
     return $targetPath
+}
+
+function Test-SRImportedSnapshot {
+    param($Snapshot)
+    if ($null -eq $Snapshot) { return $false }
+    $property = $Snapshot.PSObject.Properties['imported']
+    if ($null -eq $property) { return $false }
+    try { return [bool]$property.Value } catch { return $false }
 }
 
 # ---------------------------------------------------------------------------
@@ -5222,13 +5355,6 @@ function ConvertTo-SRVersion {
         try { return [version]$matches[1] } catch { return $null }
     }
     return $null
-}
-
-function ConvertTo-SRProcessArgument {
-    param([string]$Value)
-    if ($null -eq $Value) { return '""' }
-    if ($Value -notmatch '[\s"]') { return $Value }
-    return '"' + ($Value -replace '"', '\"') + '"'
 }
 
 function Hide-SRConsoleWindow {
@@ -5262,55 +5388,6 @@ namespace SessionRecovery
     } catch { }
 }
 
-function Invoke-SRHiddenProcess {
-    param(
-        [Parameter(Mandatory = $true)][string]$FilePath,
-        [string[]]$Arguments = @(),
-        [int]$TimeoutSeconds = 90
-    )
-    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-    $startInfo.FileName = $FilePath
-    $startInfo.UseShellExecute = $false
-    $startInfo.CreateNoWindow = $true
-    $startInfo.RedirectStandardOutput = $true
-    $startInfo.RedirectStandardError = $true
-    $startInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
-    $startInfo.Arguments = (@($Arguments | ForEach-Object { ConvertTo-SRProcessArgument ([string]$_) }) -join ' ')
-    $process = [System.Diagnostics.Process]::Start($startInfo)
-    try {
-        $output = $process.StandardOutput.ReadToEnd()
-        $errorOutput = $process.StandardError.ReadToEnd()
-        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
-            try { $process.Kill() } catch { }
-            throw ("{0} did not finish within {1} seconds." -f ([System.IO.Path]::GetFileName($FilePath)), $TimeoutSeconds)
-        }
-        return [pscustomobject]@{
-            ExitCode = $process.ExitCode
-            Output   = $output
-            Error    = $errorOutput
-        }
-    } finally {
-        $process.Dispose()
-    }
-}
-
-function Get-SRGitHubToken {
-    foreach ($name in @('SESSIONRECOVERY_UPDATE_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN')) {
-        $value = [Environment]::GetEnvironmentVariable($name)
-        if (-not [string]::IsNullOrWhiteSpace($value)) { return $value.Trim() }
-    }
-    $gh = Get-Command gh -ErrorAction SilentlyContinue
-    if ($null -ne $gh) {
-        try {
-            $result = Invoke-SRHiddenProcess -FilePath $gh.Source -Arguments @('auth', 'token') -TimeoutSeconds 20
-            if ($result.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($result.Output)) {
-                return $result.Output.Trim()
-            }
-        } catch { }
-    }
-    return $null
-}
-
 function Get-SRUpdateInfo {
     param([string]$CurrentVersion = '0.0.0')
     $current = ConvertTo-SRVersion -Value $CurrentVersion
@@ -5319,34 +5396,20 @@ function Get-SRUpdateInfo {
     }
 
     $release = $null
-    $usedGh = $false
-    $gh = Get-Command gh -ErrorAction SilentlyContinue
-    if ($null -ne $gh) {
-        try {
-            $result = Invoke-SRHiddenProcess -FilePath $gh.Source -Arguments @('api', ("repos/{0}/releases/latest" -f $script:SRUpdateRepository)) -TimeoutSeconds 45
-            if ($result.ExitCode -eq 0) {
-                $release = $result.Output | ConvertFrom-Json
-                $usedGh = $true
-            }
-        } catch { }
-    }
-
-    if ($null -eq $release) {
-        try {
-            $token = Get-SRGitHubToken
-            $headers = @{
-                'User-Agent' = $script:SRUpdateUserAgent
-                'Accept'     = 'application/vnd.github+json'
-            }
-            if (-not [string]::IsNullOrWhiteSpace($token)) { $headers.Authorization = 'Bearer ' + $token }
-            $uri = 'https://api.github.com/repos/{0}/releases/latest' -f $script:SRUpdateRepository
-            $release = Invoke-RestMethod -Uri $uri -Headers $headers -TimeoutSec 45 -ErrorAction Stop
-        } catch {
-            return [pscustomobject]@{
-                Ok    = $false
-                Error = ('Could not check GitHub Releases: ' + $_.Exception.Message)
-                Hint  = 'The repository is private. Sign in with GitHub CLI (gh auth login) or set SESSIONRECOVERY_UPDATE_TOKEN.'
-            }
+    try {
+        # The repository is public: the updater deliberately uses the
+        # unauthenticated GitHub API and never reads or forwards local tokens.
+        $headers = @{
+            'User-Agent' = $script:SRUpdateUserAgent
+            'Accept'     = 'application/vnd.github+json'
+        }
+        $uri = 'https://api.github.com/repos/{0}/releases/latest' -f $script:SRUpdateRepository
+        $release = Invoke-RestMethod -Uri $uri -Headers $headers -TimeoutSec 45 -ErrorAction Stop
+    } catch {
+        return [pscustomobject]@{
+            Ok    = $false
+            Error = ('Could not check GitHub Releases: ' + $_.Exception.Message)
+            Hint  = 'Check your internet connection and try again. The release repository is public; no GitHub sign-in is needed.'
         }
     }
 
@@ -5369,12 +5432,10 @@ function Get-SRUpdateInfo {
             ReleaseUrl     = [string]$release.html_url
             PublishedAt    = [string]$release.published_at
             MsiName        = if ($msi.Count -gt 0) { [string]$msi[0].name } else { '' }
-            MsiApiUrl      = if ($msi.Count -gt 0) { [string]$msi[0].url } else { '' }
             MsiDownloadUrl = if ($msi.Count -gt 0) { [string]$msi[0].browser_download_url } else { '' }
             ShaName        = if ($sha.Count -gt 0) { [string]$sha[0].name } else { '' }
-            ShaApiUrl      = if ($sha.Count -gt 0) { [string]$sha[0].url } else { '' }
             ShaDownloadUrl = if ($sha.Count -gt 0) { [string]$sha[0].browser_download_url } else { '' }
-            Source         = if ($usedGh) { 'gh' } else { 'api' }
+            Source         = 'api'
         }
     } catch {
         return [pscustomobject]@{ Ok = $false; Error = $_.Exception.Message }
@@ -5401,15 +5462,16 @@ function Save-SRUpdate {
         $msiPath = Join-Path $Destination ([string]$update.MsiName)
         $shaPath = Join-Path $Destination ([string]$update.ShaName)
 
-        $token = Get-SRGitHubToken
+        # Public release: download the browser asset URLs without any GitHub
+        # token. A token would add nothing here and used to be forwarded by
+        # Windows PowerShell on redirects.
         $headers = @{
             'User-Agent' = $script:SRUpdateUserAgent
             'Accept'     = 'application/octet-stream'
         }
-        if (-not [string]::IsNullOrWhiteSpace($token)) { $headers.Authorization = 'Bearer ' + $token }
 
-        $msiUrl = if (-not [string]::IsNullOrWhiteSpace($token) -and -not [string]::IsNullOrWhiteSpace([string]$update.MsiApiUrl)) { [string]$update.MsiApiUrl } else { [string]$update.MsiDownloadUrl }
-        $shaUrl = if (-not [string]::IsNullOrWhiteSpace($token) -and -not [string]::IsNullOrWhiteSpace([string]$update.ShaApiUrl)) { [string]$update.ShaApiUrl } else { [string]$update.ShaDownloadUrl }
+        $msiUrl = [string]$update.MsiDownloadUrl
+        $shaUrl = [string]$update.ShaDownloadUrl
         foreach ($url in @($msiUrl, $shaUrl)) {
             if ($url -notmatch '^https://(api\.github\.com|github\.com)/') { throw 'The update download URL is not a trusted GitHub URL.' }
         }
@@ -5426,10 +5488,19 @@ function Save-SRUpdate {
             Remove-Item -LiteralPath $msiPath -Force -ErrorAction SilentlyContinue
             throw 'The downloaded MSI failed SHA256 verification.'
         }
+        $signed = $false
+        try {
+            $signature = Get-AuthenticodeSignature -FilePath $msiPath -ErrorAction Stop
+            $signed = ($signature.Status -eq [System.Management.Automation.SignatureStatus]::Valid)
+        } catch { }
+        if (-not $signed) {
+            Write-SRLog -Level WARN -Message 'The downloaded update is not digitally signed. SHA256 matched the release file, which detects corruption but cannot prove who built the release.'
+        }
         return [pscustomobject]@{
             Ok         = $true
             MsiPath    = $msiPath
             Sha256     = $actualHash
+            Signed     = [bool]$signed
             Version    = $version
             ReleaseUrl = [string]$update.ReleaseUrl
         }
@@ -5728,6 +5799,8 @@ function Get-SRDiagnostics {
         ScheduleMode             = $scheduleMode
         ShutdownKind             = [string]$shutdown.Kind
         ShutdownReason           = [string]$shutdown.Reason
+        ShutdownReasonKey        = [string]$shutdown.ReasonKey
+        ShutdownReasonArg        = [string]$shutdown.ReasonArg
         ShutdownAt               = if ($shutdown.At) { ([datetime]$shutdown.At).ToString('o') } else { $null }
         WatcherPids              = @($watcherPids)
         TrayPids                 = @($trayPids)

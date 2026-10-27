@@ -25,6 +25,26 @@ function Test-SRRtlLanguage {
     return (@('ar', 'he', 'fa', 'ur') -contains ([string]$Language).ToLowerInvariant())
 }
 
+function Format-SRShutdownReason {
+    param(
+        $Shutdown,
+        $Strings
+    )
+    if ($null -eq $Shutdown) { return '' }
+    $key = ''
+    $arg = ''
+    try { $key = [string]$Shutdown.ReasonKey } catch { }
+    try { $arg = [string]$Shutdown.ReasonArg } catch { }
+    if (-not [string]::IsNullOrWhiteSpace($key) -and $null -ne $Strings -and $Strings.ContainsKey($key)) {
+        $template = [string]$Strings[$key]
+        if (-not [string]::IsNullOrWhiteSpace($template)) {
+            if ($template -match '\{0\}') { return ($template -f $arg) }
+            return $template
+        }
+    }
+    try { return [string]$Shutdown.Reason } catch { return '' }
+}
+
 function Get-SRStrings {
     param([string]$Language = 'en')
     $english = @{
@@ -271,6 +291,15 @@ function Get-SRStrings {
         RstOffice = 'OFFICE RECOVERY FILES'
         RstOfficeHint = 'Office left these AutoRecover files behind after the last session. Open them to recover unsaved work.'
         RstShutdownReason = 'Windows stopped unexpectedly: {0}'
+        ShutdownBlueScreen = 'Blue screen (stop code {0})'
+        ShutdownPowerLoss = 'Power loss or forced restart (the system did not shut down cleanly)'
+        ShutdownUnexpected = 'Unexpected shutdown'
+        ShutdownInitiated = 'Shutdown initiated by {0}'
+        ShutdownNormal = 'Normal shutdown'
+        RstImportedConfirmTitle = 'Imported snapshot'
+        RstImportedConfirmText = "This snapshot was imported from another PC. These programs will start:`r`n`r`n{0}`r`n`r`nOnly .exe programs with safe arguments are launched. Continue?"
+        RstImportedNoApps = 'No applications are selected.'
+        RstImportedHeadless = 'This imported snapshot needs interactive confirmation. Run the restore without -NoUI to review its programs, or pass -AllowImportedSnapshot to confirm.'
         # Wave 2: dynamic dashboard cards, sidebar status, snapshot details,
         # settings cards and the About page. Everything the refresh paths set
         # at runtime needs a key here so no language falls back to English.
@@ -322,7 +351,7 @@ function Get-SRStrings {
         SetAppearanceDesc = 'Choose how the Studio looks and speaks.'
         SmartCaptureDesc = 'Skip snapshots nobody needs, and capture from anywhere.'
         SetStorageDesc = 'Everything Session Recovery saves stays in your local profile.'
-        SetUpdatesDesc = 'Check the private GitHub release channel for a newer build.'
+        SetUpdatesDesc = 'Check the public GitHub releases page for a newer build.'
         CheckBgTaskDisabled = 'The Windows task is disabled. Enable it or start the background app.'
         CheckBgStartHint = 'Start the background app from Settings.'
         DiagLoadConfig   = 'Reading local configuration...'
@@ -515,6 +544,15 @@ function Get-SRStrings {
         RstOffice = 'ملفات استرداد Office'
         RstOfficeHint = 'ترك Office هذه الملفات بعد الجلسة الأخيرة. افتحها لاستعادة العمل غير المحفوظ.'
         RstShutdownReason = 'توقف Windows بشكل غير متوقع: {0}'
+        ShutdownBlueScreen = 'شاشة زرقاء (رمز التوقف {0})'
+        ShutdownPowerLoss = 'انقطاع التيار أو إعادة تشغيل قسرية (لم يتم إيقاف النظام بشكل سليم)'
+        ShutdownUnexpected = 'إيقاف غير متوقع'
+        ShutdownInitiated = 'بدأ الإيقاف بواسطة {0}'
+        ShutdownNormal = 'إيقاف عادي'
+        RstImportedConfirmTitle = 'لقطة مستوردة'
+        RstImportedConfirmText = "استُوردت هذه اللقطة من جهاز كمبيوتر آخر. ستبدأ هذه البرامج:`r`n`r`n{0}`r`n`r`nلا تُشغَّل إلا برامج .exe ذات الوسائط الآمنة. هل تريد المتابعة؟"
+        RstImportedNoApps = 'لم تُحدَّد أي تطبيقات.'
+        RstImportedHeadless = 'تحتاج هذه اللقطة المستوردة إلى تأكيد تفاعلي. شغّل الاستعادة بدون -NoUI لمراجعة برامجها، أو مرّر -AllowImportedSnapshot للتأكيد.'
         StatSnapshots = 'اللقطات'; StatAppsCaptured = 'التطبيقات الملتقطة'; StatBrowserTabs = 'تبويبات المتصفح'; StatLocalStorage = 'التخزين المحلي'
         StatDetailMoments = 'لحظات محفوظة'; StatDetailLatest = 'في أحدث لقطة'; StatDetailRetaining = 'يحتفظ بـ {0}'; StatDetailCaptured = 'الُتقط {0}'; StatDetailNoSnapshot = 'لا توجد لقطة بعد'; StatDetailBrowsers = '{0} متصفح مكتشف'; StatDetailNoBrowsers = 'لا توجد تبويبات متصفح ملتقطة'; StatDetailFolders = '{0} مجلد في الأحدث'
         DetailMetaAppsTabs = '{0}  •  {1}  •  {2} تطبيقات  •  {3} مجلدات{4}'
@@ -542,7 +580,7 @@ function Get-SRStrings {
         SetAppearanceDesc = 'اختر شكل الاستوديو ولغته.'
         SmartCaptureDesc = 'تخطَّ اللقطات التي لا يحتاجها أحد، والتقط من أي مكان.'
         SetStorageDesc = 'كل ما يحفظه Session Recovery يبقى في ملفك الشخصي المحلي.'
-        SetUpdatesDesc = 'افحص قناة إصدارات GitHub الخاصة للحصول على نسخة أحدث.'
+        SetUpdatesDesc = 'افحص إصدارات GitHub العامة للحصول على نسخة أحدث.'
         CheckBgTaskDisabled = 'مهمة ويندوز معطّلة. فعّلها أو ابدأ تطبيق الخلفية.'
         CheckBgStartHint = 'ابدأ تطبيق الخلفية من الإعدادات.'
         DiagLoadConfig = 'جارٍ قراءة الإعدادات المحلية...'
@@ -607,6 +645,15 @@ function Get-SRStrings {
         RstOffice = 'FICHIERS DE RÉCUPÉRATION OFFICE'
         RstOfficeHint = 'Office a laissé ces fichiers AutoRecover après la dernière session. Ouvrez-les pour retrouver votre travail.'
         RstShutdownReason = 'Windows s''est arrêté de façon inattendue : {0}'
+        ShutdownBlueScreen = 'Écran bleu (code d''arrêt {0})'
+        ShutdownPowerLoss = 'Coupure de courant ou redémarrage forcé (le système ne s''est pas arrêté proprement)'
+        ShutdownUnexpected = 'Arrêt inattendu'
+        ShutdownInitiated = 'Arrêt lancé par {0}'
+        ShutdownNormal = 'Arrêt normal'
+        RstImportedConfirmTitle = 'Instantané importé'
+        RstImportedConfirmText = "Cet instantané provient d'un autre PC. Ces programmes vont démarrer :`r`n`r`n{0}`r`n`r`nSeuls les programmes .exe avec des arguments sûrs sont lancés. Continuer ?"
+        RstImportedNoApps = 'Aucune application sélectionnée.'
+        RstImportedHeadless = 'Cet instantané importé nécessite une confirmation interactive. Lancez la restauration sans -NoUI pour vérifier ses programmes, ou passez -AllowImportedSnapshot pour confirmer.'
         StatSnapshots = 'INSTANTANÉS'; StatAppsCaptured = 'APPLICATIONS'; StatBrowserTabs = 'ONGLETS NAVIGATEUR'; StatLocalStorage = 'STOCKAGE LOCAL'
         StatDetailMoments = 'Moments enregistrés'; StatDetailLatest = 'Dans le dernier instantané'; StatDetailRetaining = 'Conservation de {0}'; StatDetailCaptured = 'Capturé {0}'; StatDetailNoSnapshot = 'Aucun instantané'; StatDetailBrowsers = '{0} navigateur(s) capturé(s)'; StatDetailNoBrowsers = 'Aucun onglet de navigateur capturé'; StatDetailFolders = '{0} dossier(s) dans le dernier'
         DetailMetaAppsTabs = '{0}  •  {1}  •  {2} app.  •  {3} dossier(s){4}'
@@ -634,7 +681,7 @@ function Get-SRStrings {
         SetAppearanceDesc = 'Choisissez l''apparence et la langue du Studio.'
         SmartCaptureDesc = 'Ignorez les instantanés inutiles, et capturez depuis n''importe où.'
         SetStorageDesc = 'Tout ce que Session Recovery enregistre reste dans votre profil local.'
-        SetUpdatesDesc = 'Consultez le canal de versions GitHub privé pour une version plus récente.'
+        SetUpdatesDesc = 'Consultez les versions publiques de GitHub pour une version plus récente.'
         CheckBgTaskDisabled = 'La tâche Windows est désactivée. Activez-la ou démarrez l''application en arrière-plan.'
         CheckBgStartHint = 'Démarrez l''application en arrière-plan depuis les Paramètres.'
         DiagLoadConfig = 'Lecture de la configuration locale...'
@@ -699,6 +746,15 @@ function Get-SRStrings {
         RstOffice = 'ARCHIVOS DE RECUPERACIÓN DE OFFICE'
         RstOfficeHint = 'Office dejó estos archivos AutoRecover tras la última sesión. Ábrelos para recuperar el trabajo no guardado.'
         RstShutdownReason = 'Windows se detuvo inesperadamente: {0}'
+        ShutdownBlueScreen = 'Pantalla azul (código de parada {0})'
+        ShutdownPowerLoss = 'Corte de corriente o reinicio forzado (el sistema no se apagó correctamente)'
+        ShutdownUnexpected = 'Apagado inesperado'
+        ShutdownInitiated = 'Apagado iniciado por {0}'
+        ShutdownNormal = 'Apagado normal'
+        RstImportedConfirmTitle = 'Instantánea importada'
+        RstImportedConfirmText = "Esta instantánea se importó desde otro PC. Se iniciarán estos programas:`r`n`r`n{0}`r`n`r`nSolo se ejecutan programas .exe con argumentos seguros. ¿Continuar?"
+        RstImportedNoApps = 'No hay aplicaciones seleccionadas.'
+        RstImportedHeadless = 'Esta instantánea importada requiere confirmación interactiva. Ejecuta la restauración sin -NoUI para revisar sus programas, o pasa -AllowImportedSnapshot para confirmar.'
         StatSnapshots = 'INSTANTÁNEAS'; StatAppsCaptured = 'APLICACIONES'; StatBrowserTabs = 'PESTAÑAS DEL NAVEGADOR'; StatLocalStorage = 'ESPACIO LOCAL'
         StatDetailMoments = 'Momentos guardados'; StatDetailLatest = 'En la última instantánea'; StatDetailRetaining = 'Conservando hasta {0}'; StatDetailCaptured = 'Capturada {0}'; StatDetailNoSnapshot = 'Aún no hay instantánea'; StatDetailBrowsers = '{0} navegador(es) capturado(s)'; StatDetailNoBrowsers = 'Sin pestañas de navegador capturadas'; StatDetailFolders = '{0} carpeta(s) en la última'
         DetailMetaAppsTabs = '{0}  •  {1}  •  {2} aplicaciones  •  {3} carpetas{4}'
@@ -726,7 +782,7 @@ function Get-SRStrings {
         SetAppearanceDesc = 'Elige el aspecto y el idioma del Studio.'
         SmartCaptureDesc = 'Omite instantáneas que nadie necesita y captura desde cualquier lugar.'
         SetStorageDesc = 'Todo lo que Session Recovery guarda se queda en tu perfil local.'
-        SetUpdatesDesc = 'Consulta el canal privado de versiones de GitHub para una compilación más reciente.'
+        SetUpdatesDesc = 'Consulta las versiones públicas de GitHub para una compilación más reciente.'
         CheckBgTaskDisabled = 'La tarea de Windows está deshabilitada. Actívala o inicia la aplicación en segundo plano.'
         CheckBgStartHint = 'Inicia la aplicación en segundo plano desde Configuración.'
         DiagLoadConfig = 'Leyendo la configuración local...'
@@ -791,6 +847,15 @@ function Get-SRStrings {
         RstOffice = 'OFFICE-WIEDERHERSTELLUNGSDATEIEN'
         RstOfficeHint = 'Office hat diese AutoRecover-Dateien hinterlassen. Öffne sie, um ungespeicherte Arbeit zurückzuholen.'
         RstShutdownReason = 'Windows wurde unerwartet beendet: {0}'
+        ShutdownBlueScreen = 'Bluescreen (Stoppcode {0})'
+        ShutdownPowerLoss = 'Stromausfall oder erzwungener Neustart (das System wurde nicht sauber heruntergefahren)'
+        ShutdownUnexpected = 'Unerwartetes Herunterfahren'
+        ShutdownInitiated = 'Herunterfahren ausgelöst von {0}'
+        ShutdownNormal = 'Normales Herunterfahren'
+        RstImportedConfirmTitle = 'Importierter Schnappschuss'
+        RstImportedConfirmText = "Dieser Schnappschuss wurde von einem anderen PC importiert. Diese Programme werden gestartet:`r`n`r`n{0}`r`n`r`nEs werden nur .exe-Programme mit sicheren Argumenten gestartet. Fortfahren?"
+        RstImportedNoApps = 'Es sind keine Anwendungen ausgewählt.'
+        RstImportedHeadless = 'Dieser importierte Schnappschuss erfordert eine interaktive Bestätigung. Starten Sie die Wiederherstellung ohne -NoUI, um die Programme zu prüfen, oder übergeben Sie -AllowImportedSnapshot zur Bestätigung.'
         StatSnapshots = 'SCHNAPPSCHÜSSE'; StatAppsCaptured = 'APPS ERFASST'; StatBrowserTabs = 'BROWSER-TABS'; StatLocalStorage = 'LOKALER SPEICHER'
         StatDetailMoments = 'Gespeicherte Momente'; StatDetailLatest = 'Im neuesten Schnappschuss'; StatDetailRetaining = 'Bis zu {0} behalten'; StatDetailCaptured = 'Erfasst {0}'; StatDetailNoSnapshot = 'Noch kein Schnappschuss'; StatDetailBrowsers = '{0} Browser erfasst'; StatDetailNoBrowsers = 'Keine Browser-Tabs erfasst'; StatDetailFolders = '{0} Ordner im neuesten'
         DetailMetaAppsTabs = '{0}  •  {1}  •  {2} Apps  •  {3} Ordner{4}'
@@ -818,7 +883,7 @@ function Get-SRStrings {
         SetAppearanceDesc = 'Wählen Sie Aussehen und Sprache des Studios.'
         SmartCaptureDesc = 'Unnötige Schnappschüsse überspringen und von überall aufnehmen.'
         SetStorageDesc = 'Alles, was Session Recovery speichert, bleibt in Ihrem lokalen Profil.'
-        SetUpdatesDesc = 'Prüfen Sie den privaten GitHub-Release-Kanal auf eine neuere Version.'
+        SetUpdatesDesc = 'Prüfen Sie die öffentlichen GitHub-Releases auf eine neuere Version.'
         CheckBgTaskDisabled = 'Die Windows-Aufgabe ist deaktiviert. Aktivieren Sie sie oder starten Sie die Hintergrund-App.'
         CheckBgStartHint = 'Starten Sie die Hintergrund-App über die Einstellungen.'
         DiagLoadConfig = 'Lokale Konfiguration wird gelesen...'
@@ -883,6 +948,15 @@ function Get-SRStrings {
         RstOffice = 'FICHEIROS DE RECUPERAÇÃO DO OFFICE'
         RstOfficeHint = 'O Office deixou estes ficheiros AutoRecover após a última sessão. Abra-os para recuperar trabalho não guardado.'
         RstShutdownReason = 'O Windows parou inesperadamente: {0}'
+        ShutdownBlueScreen = 'Ecrã azul (código de paragem {0})'
+        ShutdownPowerLoss = 'Falha de energia ou reinício forçado (o sistema não encerrou corretamente)'
+        ShutdownUnexpected = 'Encerramento inesperado'
+        ShutdownInitiated = 'Encerramento iniciado por {0}'
+        ShutdownNormal = 'Encerramento normal'
+        RstImportedConfirmTitle = 'Instantâneo importado'
+        RstImportedConfirmText = "Este instantâneo foi importado de outro PC. Estes programas serão iniciados:`r`n`r`n{0}`r`n`r`nApenas programas .exe com argumentos seguros são iniciados. Continuar?"
+        RstImportedNoApps = 'Nenhuma aplicação selecionada.'
+        RstImportedHeadless = 'Este instantâneo importado requer confirmação interativa. Execute a restauração sem -NoUI para rever os programas, ou passe -AllowImportedSnapshot para confirmar.'
         StatSnapshots = 'INSTANTÂNEOS'; StatAppsCaptured = 'APPS CAPTURADOS'; StatBrowserTabs = 'ABAS DO NAVEGADOR'; StatLocalStorage = 'ESPAÇO LOCAL'
         StatDetailMoments = 'Momentos salvos'; StatDetailLatest = 'No instantâneo mais recente'; StatDetailRetaining = 'Mantendo até {0}'; StatDetailCaptured = 'Capturado {0}'; StatDetailNoSnapshot = 'Ainda sem instantâneo'; StatDetailBrowsers = '{0} navegador(es) capturado(s)'; StatDetailNoBrowsers = 'Sem abas de navegador capturadas'; StatDetailFolders = '{0} pasta(s) no mais recente'
         DetailMetaAppsTabs = '{0}  •  {1}  •  {2} apps  •  {3} pastas{4}'
@@ -910,7 +984,7 @@ function Get-SRStrings {
         SetAppearanceDesc = 'Escolha a aparência e o idioma do Studio.'
         SmartCaptureDesc = 'Pule instantâneos de que ninguém precisa e capture de qualquer lugar.'
         SetStorageDesc = 'Tudo o que o Session Recovery salva fica no seu perfil local.'
-        SetUpdatesDesc = 'Consulte o canal privado de versões do GitHub por uma versão mais recente.'
+        SetUpdatesDesc = 'Consulte as versões públicas do GitHub para uma versão mais recente.'
         CheckBgTaskDisabled = 'A tarefa do Windows está desabilitada. Habilite-a ou inicie o app em segundo plano.'
         CheckBgStartHint = 'Inicie o app em segundo plano nas Configurações.'
         DiagLoadConfig = 'Lendo a configuração local...'
@@ -975,6 +1049,15 @@ function Get-SRStrings {
         RstOffice = 'ФАЙЛЫ ВОССТАНОВЛЕНИЯ OFFICE'
         RstOfficeHint = 'Office оставил эти файлы автосохранения после прошлого сеанса. Откройте их, чтобы вернуть несохранённую работу.'
         RstShutdownReason = 'Windows завершился неожиданно: {0}'
+        ShutdownBlueScreen = 'Синий экран (код остановки {0})'
+        ShutdownPowerLoss = 'Сбой питания или принудительная перезагрузка (система завершилась некорректно)'
+        ShutdownUnexpected = 'Неожиданное завершение работы'
+        ShutdownInitiated = 'Завершение инициировано: {0}'
+        ShutdownNormal = 'Обычное завершение работы'
+        RstImportedConfirmTitle = 'Импортированный снимок'
+        RstImportedConfirmText = "Этот снимок импортирован с другого ПК. Будут запущены эти программы:`r`n`r`n{0}`r`n`r`nЗапускаются только программы .exe с безопасными аргументами. Продолжить?"
+        RstImportedNoApps = 'Приложения не выбраны.'
+        RstImportedHeadless = 'Для этого импортированного снимка требуется интерактивное подтверждение. Запустите восстановление без -NoUI, чтобы проверить программы, или укажите -AllowImportedSnapshot для подтверждения.'
         StatSnapshots = 'СНИМКИ'; StatAppsCaptured = 'ПРИЛОЖЕНИЯ'; StatBrowserTabs = 'ВКЛАДКИ БРАУЗЕРА'; StatLocalStorage = 'ХРАНИЛИЩЕ'
         StatDetailMoments = 'Сохранённые моменты'; StatDetailLatest = 'В последнем снимке'; StatDetailRetaining = 'Хранится до {0}'; StatDetailCaptured = 'Снят {0}'; StatDetailNoSnapshot = 'Снимка пока нет'; StatDetailBrowsers = 'Захвачено браузеров: {0}'; StatDetailNoBrowsers = 'Вкладки браузера не захвачены'; StatDetailFolders = 'Папок в последнем: {0}'
         DetailMetaAppsTabs = '{0}  •  {1}  •  {2} прил.  •  {3} папок{4}'
@@ -1002,7 +1085,7 @@ function Get-SRStrings {
         SetAppearanceDesc = 'Выберите внешний вид и язык Студии.'
         SmartCaptureDesc = 'Пропускайте ненужные снимки и делайте снимки откуда угодно.'
         SetStorageDesc = 'Всё, что сохраняет Session Recovery, остаётся в вашем локальном профиле.'
-        SetUpdatesDesc = 'Проверьте закрытый канал выпусков GitHub на предмет более новой сборки.'
+        SetUpdatesDesc = 'Проверьте публичные выпуски GitHub на наличие новой сборки.'
         CheckBgTaskDisabled = 'Задача Windows отключена. Включите её или запустите фоновое приложение.'
         CheckBgStartHint = 'Запустите фоновое приложение из Параметров.'
         DiagLoadConfig = 'Чтение локальной конфигурации...'
@@ -1067,6 +1150,15 @@ function Get-SRStrings {
         RstOffice = 'Office 恢复文件'
         RstOfficeHint = 'Office 在上次会话后留下了这些自动恢复文件，打开它们可以找回未保存的工作。'
         RstShutdownReason = 'Windows 意外停止：{0}'
+        ShutdownBlueScreen = '蓝屏（停止代码 {0}）'
+        ShutdownPowerLoss = '断电或强制重启（系统未正常关闭）'
+        ShutdownUnexpected = '意外关机'
+        ShutdownInitiated = '关机由 {0} 发起'
+        ShutdownNormal = '正常关机'
+        RstImportedConfirmTitle = '导入的快照'
+        RstImportedConfirmText = "此快照是从另一台电脑导入的。将启动以下程序：`r`n`r`n{0}`r`n`r`n仅启动带有安全参数的 .exe 程序。是否继续？"
+        RstImportedNoApps = '未选择任何应用程序。'
+        RstImportedHeadless = '此导入的快照需要交互确认。请在不带 -NoUI 的情况下运行还原以查看其程序，或传递 -AllowImportedSnapshot 以确认。'
         StatSnapshots = '快照数'; StatAppsCaptured = '已捕获应用'; StatBrowserTabs = '浏览器标签页'; StatLocalStorage = '本地存储'
         StatDetailMoments = '已保存的时刻'; StatDetailLatest = '在最新快照中'; StatDetailRetaining = '最多保留 {0} 个'; StatDetailCaptured = '捕获于 {0}'; StatDetailNoSnapshot = '还没有快照'; StatDetailBrowsers = '已捕获 {0} 个浏览器'; StatDetailNoBrowsers = '未捕获浏览器标签页'; StatDetailFolders = '最新快照中有 {0} 个文件夹'
         DetailMetaAppsTabs = '{0}  •  {1}  •  {2} 个应用  •  {3} 个文件夹{4}'
@@ -1094,7 +1186,7 @@ function Get-SRStrings {
         SetAppearanceDesc = '选择 Studio 的外观和语言。'
         SmartCaptureDesc = '跳过没人需要的快照，并可在任何地方捕获。'
         SetStorageDesc = 'Session Recovery 保存的一切都留在你的本地配置文件中。'
-        SetUpdatesDesc = '查看私有的 GitHub 发布频道以获取更新的版本。'
+        SetUpdatesDesc = '查看 GitHub 的公开版本页面以获取更新的版本。'
         CheckBgTaskDisabled = 'Windows 任务已禁用。请启用它或启动后台应用。'
         CheckBgStartHint = '从设置中启动后台应用。'
         DiagLoadConfig = '正在读取本地配置...'
@@ -1159,6 +1251,15 @@ function Get-SRStrings {
         RstOffice = 'OFFICE KURTARMA DOSYALARI'
         RstOfficeHint = 'Office, son oturumun ardından bu AutoRecover dosyalarını bıraktı. Kaydedilmemiş çalışmayı geri almak için açın.'
         RstShutdownReason = 'Windows beklenmedik şekilde durdu: {0}'
+        ShutdownBlueScreen = 'Mavi ekran (durma kodu {0})'
+        ShutdownPowerLoss = 'Güç kaybı veya zorla yeniden başlatma (sistem düzgün kapanmadı)'
+        ShutdownUnexpected = 'Beklenmeyen kapanma'
+        ShutdownInitiated = 'Kapanmayı başlatan: {0}'
+        ShutdownNormal = 'Normal kapanma'
+        RstImportedConfirmTitle = 'İçe aktarılan anlık görüntü'
+        RstImportedConfirmText = "Bu anlık görüntü başka bir bilgisayardan içe aktarıldı. Şu programlar başlatılacak:`r`n`r`n{0}`r`n`r`nYalnızca güvenli bağımsız değişkenlere sahip .exe programları başlatılır. Devam edilsin mi?"
+        RstImportedNoApps = 'Hiçbir uygulama seçilmedi.'
+        RstImportedHeadless = 'Bu içe aktarılan anlık görüntü etkileşimli onay gerektiriyor. Programlarını gözden geçirmek için geri yüklemeyi -NoUI olmadan çalıştırın veya onaylamak için -AllowImportedSnapshot geçirin.'
         StatSnapshots = 'ANLIK GÖRÜNTÜLER'; StatAppsCaptured = 'YAKALANAN UYGULAMALAR'; StatBrowserTabs = 'TARAYICI SEKMELERİ'; StatLocalStorage = 'YEREL DEPOLAMA'
         StatDetailMoments = 'Kaydedilen anlar'; StatDetailLatest = 'En son anlık görüntüde'; StatDetailRetaining = '{0} adete kadar saklanır'; StatDetailCaptured = 'Yakalandı: {0}'; StatDetailNoSnapshot = 'Henüz anlık görüntü yok'; StatDetailBrowsers = '{0} tarayıcı yakalandı'; StatDetailNoBrowsers = 'Yakalanan tarayıcı sekmeleri yok'; StatDetailFolders = 'En yenide {0} klasör'
         DetailMetaAppsTabs = '{0}  •  {1}  •  {2} uygulama  •  {3} klasör{4}'
@@ -1186,7 +1287,7 @@ function Get-SRStrings {
         SetAppearanceDesc = 'Stüdyonun görünümünü ve dilini seçin.'
         SmartCaptureDesc = 'Kimsenin ihtiyaç duymadığı anlık görüntüleri atla ve her yerden yakala.'
         SetStorageDesc = 'Session Recovery''nin kaydettiği her şey yerel profilinizde kalır.'
-        SetUpdatesDesc = 'Daha yeni bir sürüm için özel GitHub sürüm kanalını kontrol edin.'
+        SetUpdatesDesc = 'Daha yeni bir sürüm için genel GitHub sürümlerini kontrol edin.'
         CheckBgTaskDisabled = 'Windows görevi devre dışı. Etkinleştirin veya arka plan uygulamasını başlatın.'
         CheckBgStartHint = 'Arka plan uygulamasını Ayarlar''dan başlatın.'
         DiagLoadConfig = 'Yerel yapılandırma okunuyor...'

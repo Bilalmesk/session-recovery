@@ -10,6 +10,7 @@
       -DryRun          Print what would be restored and exit.
       -Force           Start apps even when they are already running.
       -SnapshotPath    Use a specific snapshot JSON file.
+      -AllowImportedSnapshot  Confirm headless restore of an imported snapshot.
       -TabMode         Smart (default), Captured, Native or None.
       -MaxAgeHours     Override the configured maximum snapshot age.
       -ListSnapshots   Print saved snapshots and exit.
@@ -33,6 +34,7 @@ param(
     [switch]$Force,
     [switch]$DryRun,
     [string]$SnapshotPath,
+    [switch]$AllowImportedSnapshot,
     [ValidateSet('Smart', 'Captured', 'Native', 'None')][string]$TabMode,
     [int]$MaxAgeHours = 0,
     [int]$StartupDelaySeconds = 0,
@@ -536,6 +538,7 @@ if ($hasFilters) {
 if ($DryRun) {
     $stats = Get-RSPlanStats -Plan $planAll
     Write-Output ('Snapshot: {0}' -f $entry.Path)
+    if (Test-SRImportedSnapshot -Snapshot $entry.Snapshot) { Write-Output 'Imported: yes' }
     Write-Output ('Captured: {0} ({1})' -f $entry.CapturedAt.ToString('g'), (Format-RSAge -CapturedAt $entry.CapturedAt))
     Write-Output ('Contents: {0} app(s), {1} folder(s), {2} browser(s), {3} tab(s)' -f $stats.Apps, $stats.Folders, $stats.Browsers, $stats.Tabs)
     Write-Output ('Tab mode: {0}' -f $TabMode)
@@ -572,6 +575,23 @@ if ($NoUI -or -not [Environment]::UserInteractive) {
         Write-SRLog -Level WARN -Message $emptyMessage
         Write-Output $emptyMessage
         exit 0
+    }
+    if ((Test-SRImportedSnapshot -Snapshot $entry.Snapshot) -and -not $AllowImportedSnapshot) {
+        $message = (T 'RstImportedHeadless' 'This imported snapshot needs interactive confirmation. Run the restore without -NoUI to review its programs, or pass -AllowImportedSnapshot to confirm.')
+        Write-SRLog -Level WARN -Message $message
+        Write-Error $message
+        exit 1
+    }
+    if (Test-SRImportedSnapshot -Snapshot $entry.Snapshot) {
+        # The caller explicitly confirmed. Log every program and whether the
+        # restore-time validator will accept it, so an unattended launch of an
+        # imported file stays auditable.
+        foreach ($app in @($planAll.apps)) {
+            $check = Test-SRRestoreExecutable -Path ([string]$app.exe)
+            $level = if ($check.Ok) { 'INFO' } else { 'WARN' }
+            $detail = if ($check.Ok) { 'allowed' } else { [string]$check.Reason }
+            Write-SRLog -Level $level -Message ('Imported snapshot program {0}: {1}' -f [string]$app.exe, $detail)
+        }
     }
     Write-SRLog -Message ('Non-interactive restore started from {0} (tab mode {1}).' -f $entry.Path, $TabMode)
     try {
@@ -929,7 +949,8 @@ try {
     # A plain-language crash reason replaces guesswork in the header.
     $shutdownInfo = Get-SRLastShutdownReason
     if ([string]$shutdownInfo.Kind -eq 'crash' -and -not [string]::IsNullOrWhiteSpace([string]$shutdownInfo.Reason)) {
-        $subtitleLabel.Text = ((T 'RstShutdownReason' 'Windows stopped unexpectedly: {0}') -f [string]$shutdownInfo.Reason)
+        $reasonText = Format-SRShutdownReason -Shutdown $shutdownInfo -Strings $script:RestoreStrings
+        $subtitleLabel.Text = ((T 'RstShutdownReason' 'Windows stopped unexpectedly: {0}') -f $reasonText)
         $subtitleLabel.ForeColor = [System.Drawing.Color]::FromArgb(176, 48, 66)
     }
 } catch { }
@@ -1270,6 +1291,28 @@ $restoreButton.Add_Click({
         $selectedBrowsers.Count -eq 0 -and $mode -eq 'None') {
         [void][System.Windows.Forms.MessageBox]::Show('Nothing is selected.', 'Session Recovery', 'OK', 'Information')
         return
+    }
+
+    # Imported snapshots are already marked by Import-SRSnapshotFile, but the
+    # file could also be dropped into the data folder by hand. Treat the
+    # marker as untrusted input and show the exact program list before any
+    # process starts.
+    if (Test-SRImportedSnapshot -Snapshot $entry.Snapshot) {
+        $programLines = @($selectedApps | ForEach-Object { '{0}  —  {1}' -f [string]$_.name, [string]$_.exe })
+        $programText = if ($programLines.Count -gt 0) {
+            $programLines -join "`r`n"
+        } else {
+            (T 'RstImportedNoApps' 'No applications are selected.')
+        }
+        $confirmText = ((T 'RstImportedConfirmText' 'This snapshot was imported from another PC. These programs will start:') -f $programText)
+        $confirmTitle = (T 'RstImportedConfirmTitle' 'Imported snapshot')
+        $answer = [System.Windows.Forms.MessageBox]::Show(
+            $confirmText,
+            $confirmTitle,
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Warning,
+            [System.Windows.Forms.MessageBoxDefaultButton]::Button2)
+        if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
     }
 
     $plan = [pscustomobject]@{

@@ -120,6 +120,12 @@ foreach ($name in @('Session Recovery.lnk', 'Restore Session.lnk')) {
 # Program files and, optionally, saved data
 # ---------------------------------------------------------------------------
 
+# The installer writes install-manifest.json next to these helpers. Without
+# that manifest, no program file is touched: -InstallDirectory must never be
+# able to turn uninstall into a recursive delete of an unrelated folder.
+$manifestHelper = Join-Path $PSScriptRoot 'InstallManifest.ps1'
+if (Test-Path -LiteralPath $manifestHelper) { . $manifestHelper }
+
 function Remove-SRDirectory {
     param([Parameter(Mandatory = $true)][string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) { return $true }
@@ -131,28 +137,32 @@ function Remove-SRDirectory {
     }
 }
 
-$leftovers = New-Object System.Collections.Generic.List[string]
-if (-not (Remove-SRDirectory -Path $InstallDirectory)) { $leftovers.Add($InstallDirectory) }
-if ($RemoveData -and (Test-Path -LiteralPath $dataRoot)) {
-    if (-not (Remove-SRDirectory -Path $dataRoot)) { $leftovers.Add($dataRoot) }
-}
-
-if ($leftovers.Count -gt 0) {
-    # The running script can keep its folder locked. Delete it from a short
-    # lived cmd.exe that runs after this process exits.
-    $command = 'timeout /t 2 /nobreak >nul'
-    foreach ($leftover in $leftovers) {
-        $command += (' & rmdir /s /q "{0}"' -f $leftover)
+$programResult = $null
+if (Get-Command Remove-SRInstallOwnedFiles -ErrorAction SilentlyContinue) {
+    $programResult = Remove-SRInstallOwnedFiles -InstallDirectory $InstallDirectory
+} else {
+    $programResult = [pscustomobject]@{
+        Ok        = $false
+        Removed   = @()
+        Leftovers = @()
+        Error     = 'InstallManifest.ps1 is missing, so program files were not removed.'
     }
-    Write-Host '  Scheduling removal of remaining files...'
-    Start-Process -FilePath $env:ComSpec -ArgumentList '/c', $command -WindowStyle Hidden | Out-Null
-} else {
+}
+if ($programResult.Ok) {
     Write-Host '  Removed program files.'
+} else {
+    Write-Host ("  Program files were not fully removed: {0}" -f $programResult.Error) -ForegroundColor Yellow
+    Write-Host ("  Folder left in place: {0}" -f $InstallDirectory)
+    Write-Host '  Remove that folder manually after closing any running Session Recovery window.'
 }
 
-if ($RemoveData) {
-    Write-Host '  Removed saved snapshots, logs and configuration.'
-} else {
+if ($RemoveData -and (Test-Path -LiteralPath $dataRoot)) {
+    if (Remove-SRDirectory -Path $dataRoot) {
+        Write-Host '  Removed saved snapshots, logs and configuration.'
+    } else {
+        Write-Host ("  Some saved data could not be removed: {0}" -f $dataRoot) -ForegroundColor Yellow
+    }
+} elseif (-not $RemoveData) {
     Write-Host ("  Saved snapshots were kept in {0}" -f $dataRoot)
 }
 

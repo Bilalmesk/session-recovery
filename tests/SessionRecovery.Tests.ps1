@@ -18,6 +18,12 @@ BeforeAll {
     $modulePath = Join-Path $PSScriptRoot '..\src\SessionRecovery.psm1'
     Import-Module $modulePath -Force -ErrorAction Stop
     . (Join-Path $PSScriptRoot '..\src\Strings.ps1')
+    . (Join-Path $PSScriptRoot '..\src\InstallManifest.ps1')
+    # Pester 5 and 6 run It blocks outside this scope, so publish the pure
+    # manifest helpers globally just like the imported module's commands.
+    foreach ($name in @('Test-SRManifestFileName', 'New-SRInstallManifest', 'Get-SRInstallManifest', 'Remove-SRInstallOwnedFiles')) {
+        Set-Item -Path ("Function:\global:{0}" -f $name) -Value (Get-Item ("Function:\{0}" -f $name)).ScriptBlock
+    }
 }
 
 AfterAll {
@@ -451,5 +457,259 @@ Describe 'Office AutoRecover discovery' {
             $env:APPDATA = $oldRoaming
             $env:LOCALAPPDATA = $oldLocal
         }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Restore hardening
+# ---------------------------------------------------------------------------
+
+Describe 'Restore executable filter' {
+    It 'accepts ordinary .exe programs' {
+        $exe = Join-Path $env:SystemRoot 'System32\notepad.exe'
+        (Test-SRRestoreExecutable -Path $exe).Ok | Should -BeTrue
+    }
+
+    It 'rejects non-exe files' {
+        $scriptPath = Join-Path $env:SR_TEST_HOME 'evil.ps1'
+        Set-Content -LiteralPath $scriptPath -Value 'Write-Host pwned'
+        (Test-SRRestoreExecutable -Path $scriptPath).Ok | Should -BeFalse
+
+        $cmdPath = Join-Path $env:SR_TEST_HOME 'evil.cmd'
+        Set-Content -LiteralPath $cmdPath -Value '@echo off'
+        (Test-SRRestoreExecutable -Path $cmdPath).Ok | Should -BeFalse
+    }
+
+    It 'blocks script hosts and interpreters even when they are real executables' {
+        foreach ($name in @('mshta.exe', 'wscript.exe', 'cscript.exe', 'powershell.exe', 'cmd.exe')) {
+            $path = Join-Path $env:SystemRoot ('System32\' + $name)
+            if (-not (Test-Path -LiteralPath $path)) { continue }
+            (Test-SRRestoreExecutable -Path $path).Ok | Should -BeFalse -Because "$name must never be replayed"
+        }
+    }
+
+    It 'rejects empty paths' {
+        (Test-SRRestoreExecutable -Path '').Ok | Should -BeFalse
+    }
+}
+
+Describe 'Restore argument filter' {
+    It 'accepts URLs and existing paths' {
+        $result = Test-SRRestoreArgumentList -Arguments @('https://example.com/a?b=c', $env:SystemRoot)
+        $result.Ok | Should -BeTrue
+        @($result.Arguments).Count | Should -Be 2
+    }
+
+    It 'rejects switches, control characters and missing paths' {
+        (Test-SRRestoreArgumentList -Arguments @('-c')).Ok | Should -BeFalse
+        (Test-SRRestoreArgumentList -Arguments @('/c')).Ok | Should -BeFalse
+        (Test-SRRestoreArgumentList -Arguments @("bad`targ")).Ok | Should -BeFalse
+        (Test-SRRestoreArgumentList -Arguments @('Z:\nowhere\missing.txt')).Ok | Should -BeFalse
+    }
+
+    It 'rejects more than eight arguments' {
+        $arguments = @(1..9 | ForEach-Object { 'https://example.com/{0}' -f $_ })
+        (Test-SRRestoreArgumentList -Arguments $arguments).Ok | Should -BeFalse
+    }
+
+    It 'applies the same filter to captured command lines' {
+        @(Get-SRSafeArguments -CommandLine '"C:\App\app.exe" https://example.com').Count | Should -Be 1
+        @(Get-SRSafeArguments -CommandLine '"C:\App\app.exe" -Run:evil').Count | Should -Be 0
+    }
+}
+
+Describe 'Start-SRApplication hardening' {
+    It 'refuses to run a non-exe program' {
+        $cmdPath = Join-Path $env:SR_TEST_HOME 'evil-launch.cmd'
+        Set-Content -LiteralPath $cmdPath -Value '@echo pwned > pwned.txt'
+        $result = Start-SRApplication -App ([pscustomobject]@{ name = 'evil'; exe = $cmdPath })
+        $result.Started | Should -BeFalse
+        $result.Message | Should -Match 'Only .exe'
+        Test-Path -LiteralPath (Join-Path $env:SR_TEST_HOME 'pwned.txt') | Should -BeFalse
+    }
+
+    It 'revalidates saved arguments before launching' {
+        $exePath = Join-Path $env:SR_TEST_HOME 'safe.exe'
+        Set-Content -LiteralPath $exePath -Value 'not a real executable'
+        $result = Start-SRApplication -App ([pscustomobject]@{ name = 'safe'; exe = $exePath; args = @('-Run:evil') })
+        $result.Started | Should -BeFalse
+        $result.Message | Should -Match 'Unsafe|switch'
+    }
+}
+
+Describe 'Imported snapshots' {
+    It 'marks an imported file and exposes the marker' {
+        $source = Join-Path $env:SR_TEST_HOME 'session-imported-marker.json'
+        @'
+{
+  "capturedAt": "2026-10-20T10:00:00.0000000+02:00",
+  "apps": [],
+  "explorer": [],
+  "browsers": []
+}
+'@ | Set-Content -LiteralPath $source
+        $target = Import-SRSnapshotFile -Path $source
+        $snapshot = Get-Content -LiteralPath $target -Raw | ConvertFrom-Json
+        $snapshot.imported | Should -BeTrue
+        [bool]$snapshot.PSObject.Properties['importedAt'] | Should -BeTrue
+        Test-SRImportedSnapshot -Snapshot $snapshot | Should -BeTrue
+    }
+
+    It 'rejects application entries without an executable' {
+        $source = Join-Path $env:SR_TEST_HOME 'session-bad-app.json'
+        @'
+{ "capturedAt": "2026-10-20T10:00:00+02:00", "apps": [ { "name": "Missing" } ], "explorer": [], "browsers": [] }
+'@ | Set-Content -LiteralPath $source
+        { Import-SRSnapshotFile -Path $source } | Should -Throw
+    }
+
+    It 'rejects empty application arguments' {
+        $source = Join-Path $env:SR_TEST_HOME 'session-bad-args.json'
+        @'
+{ "capturedAt": "2026-10-20T10:00:00+02:00", "apps": [ { "name": "App", "exe": "C:\\App\\app.exe", "args": [""] } ], "explorer": [], "browsers": [] }
+'@ | Set-Content -LiteralPath $source
+        { Import-SRSnapshotFile -Path $source } | Should -Throw
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Localized shutdown reasons
+# ---------------------------------------------------------------------------
+
+Describe 'Shutdown reason localization' {
+    It 'formats a structured reason in French' {
+        $shutdown = [pscustomobject]@{
+            ReasonKey = 'ShutdownInitiated'
+            ReasonArg = 'explorer.exe'
+            Reason    = 'Shutdown initiated by explorer.exe'
+        }
+        Format-SRShutdownReason -Shutdown $shutdown -Strings (Get-SRStrings -Language 'fr') |
+            Should -Be 'Arrêt lancé par explorer.exe'
+    }
+
+    It 'falls back to the English reason when no key exists' {
+        $shutdown = [pscustomobject]@{ ReasonKey = ''; ReasonArg = ''; Reason = 'Fallback reason' }
+        Format-SRShutdownReason -Shutdown $shutdown -Strings (Get-SRStrings -Language 'fr') |
+            Should -Be 'Fallback reason'
+    }
+
+    It 'is used by the restore prompt and Studio diagnostics' {
+        $restoreText = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\Restore-Session.ps1') -Raw
+        $studioText = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\Studio-SessionRecovery.ps1') -Raw
+        $restoreText | Should -Match 'Format-SRShutdownReason'
+        $studioText | Should -Match 'Format-SRShutdownReason'
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Install manifest and uninstaller safety
+# ---------------------------------------------------------------------------
+
+Describe 'Install manifest and uninstaller safety' {
+    It 'writes and reads leaf file names' {
+        $dir = Join-Path $env:SR_TEST_HOME 'manifest-roundtrip'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $manifestPath = New-SRInstallManifest -InstallDirectory $dir -Files @('one.ps1', 'two.exe', 'one.ps1')
+        Test-Path -LiteralPath $manifestPath | Should -BeTrue
+        $manifest = Get-SRInstallManifest -InstallDirectory $dir
+        $manifest | Should -Not -BeNullOrEmpty
+        (@($manifest.Files) -join ',') | Should -Be 'one.ps1,two.exe'
+    }
+
+    It 'removes only installer-owned files' {
+        $parent = Join-Path $env:SR_TEST_HOME 'manifest-removal'
+        $dir = Join-Path $parent 'app'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $dir 'owned.ps1') -Value 'owned'
+        Set-Content -LiteralPath (Join-Path $dir 'owned.exe') -Value 'owned'
+        Set-Content -LiteralPath (Join-Path $dir 'user-notes.txt') -Value 'keep me'
+        [void](New-SRInstallManifest -InstallDirectory $dir -Files @('owned.ps1', 'owned.exe'))
+        $result = Remove-SRInstallOwnedFiles -InstallDirectory $dir
+        $result.Ok | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $dir 'owned.ps1') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $dir 'owned.exe') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $dir 'user-notes.txt') | Should -BeTrue
+        Test-Path -LiteralPath $dir | Should -BeTrue
+    }
+
+    It 'refuses to delete anything without a manifest' {
+        $dir = Join-Path $env:SR_TEST_HOME 'manifest-missing'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $dir 'keep.txt') -Value 'keep'
+        $result = Remove-SRInstallOwnedFiles -InstallDirectory $dir
+        $result.Ok | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $dir 'keep.txt') | Should -BeTrue
+    }
+
+    It 'rejects path traversal in a tampered manifest' {
+        $parent = Join-Path $env:SR_TEST_HOME 'manifest-tampered'
+        $dir = Join-Path $parent 'app'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $outside = Join-Path $parent 'outside.txt'
+        Set-Content -LiteralPath $outside -Value 'keep'
+        @'
+{ "product": "Session Recovery", "format": 1, "files": [ "..\\outside.txt" ] }
+'@ | Set-Content -LiteralPath (Join-Path $dir 'install-manifest.json')
+        Get-SRInstallManifest -InstallDirectory $dir | Should -BeNullOrEmpty
+        $result = Remove-SRInstallOwnedFiles -InstallDirectory $dir
+        $result.Ok | Should -BeFalse
+        Test-Path -LiteralPath $outside | Should -BeTrue
+    }
+
+    It 'rejects rooted paths in a tampered manifest' {
+        $dir = Join-Path $env:SR_TEST_HOME 'manifest-rooted'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $outside = Join-Path $env:SystemRoot 'win.ini'
+        $json = [pscustomobject]@{ product = 'Session Recovery'; format = 1; files = @($outside) } | ConvertTo-Json
+        Set-Content -LiteralPath (Join-Path $dir 'install-manifest.json') -Value $json
+        Get-SRInstallManifest -InstallDirectory $dir | Should -BeNullOrEmpty
+    }
+
+    It 'has no cmd rmdir fallback anymore' {
+        $text = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\Uninstall-SessionRecovery.ps1') -Raw
+        $text | Should -Not -Match 'rmdir'
+        $text | Should -Not -Match 'ComSpec'
+        $text | Should -Match 'Remove-SRInstallOwnedFiles'
+    }
+
+    It 'has the installer write the manifest' {
+        $text = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\Install-SessionRecovery.ps1') -Raw
+        $text | Should -Match 'New-SRInstallManifest'
+        $text | Should -Match 'InstallManifest\.ps1'
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Update supply chain and restore UI checks
+# ---------------------------------------------------------------------------
+
+Describe 'Update supply chain' {
+    It 'does not read or send GitHub tokens' {
+        $text = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\SessionRecovery.psm1') -Raw
+        $text | Should -Not -Match 'Get-SRGitHubToken'
+        $text | Should -Not -Match 'Invoke-SRHiddenProcess'
+        $text | Should -Not -Match 'Authorization'
+    }
+
+    It 'records whether the downloaded MSI was signed' {
+        $text = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\SessionRecovery.psm1') -Raw
+        $text | Should -Match 'Get-AuthenticodeSignature'
+        $text | Should -Match 'Signed\s*=\s*\[bool\]\$signed'
+    }
+}
+
+Describe 'Restore UI security' {
+    It 'offers an explicit headless confirmation for imported snapshots' {
+        $text = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\Restore-Session.ps1') -Raw
+        $text | Should -Match '\[switch\]\$AllowImportedSnapshot'
+        $text | Should -Match 'RstImportedHeadless'
+        $text | Should -Match 'RstImportedConfirmText'
+    }
+
+    It 'quotes the Notepad config path correctly' {
+        $lines = @(Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\Studio-SessionRecovery.ps1') | Where-Object { $_ -like '*notepad.exe*' })
+        $lines.Count | Should -Be 1
+        $lines[0].Contains('"{0}"') | Should -BeTrue
+        $lines[0].Contains('\"') | Should -BeFalse
     }
 }

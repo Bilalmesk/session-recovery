@@ -1483,6 +1483,31 @@ function Open-StudioPath {
 
 $script:TrayStateCache = $null
 $script:TrayStateCacheAt = [datetime]::MinValue
+
+function Format-StudioPath {
+    # Keep long profile paths readable in the Settings card. The buttons still
+    # open the real path; the label shows a stable, short form so the layout
+    # audit does not depend on how deep the checkout or isolated home is.
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return '' }
+    $display = $Path
+    foreach ($pair in @(
+        @{ Root = [Environment]::GetFolderPath('LocalApplicationData'); Token = '%LOCALAPPDATA%' },
+        @{ Root = [Environment]::GetFolderPath('UserProfile'); Token = '%USERPROFILE%' }
+    )) {
+        $root = [string]$pair.Root
+        if (-not [string]::IsNullOrWhiteSpace($root) -and
+            $display.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $display = $pair.Token + $display.Substring($root.Length)
+            break
+        }
+    }
+    if ($display.Length -gt 90) {
+        $display = $display.Substring(0, 42) + [char]0x2026 + $display.Substring($display.Length - 45)
+    }
+    return $display
+}
+
 # Map the English background-status mode to the current language. The state
 # object itself keeps English values so diagnostics JSON stays stable.
 function Get-StudioModeText {
@@ -3617,7 +3642,7 @@ $script:Ui.ConfigPath = $configPath
 $openConfig = New-StudioButton -Text 'Open config' -X 20 -Y 312 -Width 170 -Height 32 -Glyph ''
 $openConfig.Add_Click({
     $path = Get-SRConfigPath
-    if (Test-Path -LiteralPath $path) { Start-Process -FilePath 'notepad.exe' -ArgumentList ('\"{0}\"' -f $path) | Out-Null }
+    if (Test-Path -LiteralPath $path) { Start-Process -FilePath 'notepad.exe' -ArgumentList ('"{0}"' -f $path) | Out-Null }
 })
 $storageCard.Controls.Add($openConfig)
 $openLogs = New-StudioButton -Text 'Open logs' -X 206 -Y 312 -Width 170 -Height 32 -Glyph ([string][char]0xE838)
@@ -3717,8 +3742,8 @@ function Load-StudioSettings {
     $toggleNotifications.Checked = [bool]$script:Config.showNotifications
     $toggleStartup.Checked = Test-Path -LiteralPath (Get-StudioStartupShortcutPath)
     $toggleDesktop.Checked = Test-Path -LiteralPath (Get-StudioDesktopShortcutPath)
-    $script:Ui.DataPath.Text = Get-SRRoot
-    $script:Ui.ConfigPath.Text = Get-SRConfigPath
+    $script:Ui.DataPath.Text = Format-StudioPath (Get-SRRoot)
+    $script:Ui.ConfigPath.Text = Format-StudioPath (Get-SRConfigPath)
     $script:SettingsLoaded = $true
     Set-StudioStatus '' $script:P.Muted
 }
@@ -4103,9 +4128,17 @@ function Render-StudioDiagnostics {
         } else {
             Add-StudioDiagnosticRow -Ok $false -Text (T 'CheckStorageNone' 'Snapshot folder is missing') -Detail ([string]$diag.SnapshotDirectory)
         }
-        if (-not [string]::IsNullOrWhiteSpace([string]$diag.ShutdownReason)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$diag.ShutdownReason) -or -not [string]::IsNullOrWhiteSpace([string]$diag.ShutdownReasonKey)) {
             $ok = ([string]$diag.ShutdownKind -ne 'crash')
-            Add-StudioDiagnosticRow -Ok $ok -Text ((T 'DiagShutdown' 'Last shutdown') + ': ' + [string]$diag.ShutdownReason) -Detail (Format-StudioAge -CapturedAt ([datetime]$diag.ShutdownAt))
+            $shutdownInfo = [pscustomobject]@{
+                Reason    = [string]$diag.ShutdownReason
+                ReasonKey = [string]$diag.ShutdownReasonKey
+                ReasonArg = [string]$diag.ShutdownReasonArg
+            }
+            $reasonText = Format-SRShutdownReason -Shutdown $shutdownInfo -Strings $script:L
+            if (-not [string]::IsNullOrWhiteSpace($reasonText)) {
+                Add-StudioDiagnosticRow -Ok $ok -Text ((T 'DiagShutdown' 'Last shutdown') + ': ' + $reasonText) -Detail (Format-StudioAge -CapturedAt ([datetime]$diag.ShutdownAt))
+            }
         }
 
         $browsers = @($diag.Browsers)
@@ -4355,7 +4388,7 @@ $aboutFlow.Controls.Add($aboutNew)
 $aboutNewText = New-StudioLabel -Text (T 'AboutWhatsNewText' "• Text no longer runs into other controls: labels ellipsize and badges resize in all nine languages.`r`n• Snapshots can be sealed with DPAPI encryption; gzip files now respect retention.`r`n• Virtual desktops are remembered per window and restored when possible.`r`n• Windows from unplugged monitors are mapped onto the current layout, not clamped.`r`n• PuTTY sessions and Remote Desktop targets reconnect directly on restore.`r`n• mpv reports exact playback positions through its IPC pipe.`r`n• Launch ordering rules, a restore preview, snapshot compare and a control pipe.`r`n• Pester tests and GitHub Actions CI build and verify every change.") -X 20 -Y 64 -Width 740 -Height 170 -Font $script:FontBody -Color $script:P.Muted
 $aboutNew.Controls.Add($aboutNewText)
 
-$aboutUpdates = New-StudioSettingsCard -Title (T 'SetUpdates' 'Application updates') -Description (T 'SetUpdatesDesc' 'Check the private GitHub release channel for a newer build.') -Height 240
+$aboutUpdates = New-StudioSettingsCard -Title (T 'SetUpdates' 'Application updates') -Description (T 'SetUpdatesDesc' 'Check the public GitHub releases page for a newer build.') -Height 240
 $aboutFlow.Controls.Add($aboutUpdates)
 $updateStatus = New-StudioLabel -Text ((T 'AboutVersionLine' 'You are running version {0}. Check for a newer build without leaving the Studio.') -f $script:AppVersion) -X 20 -Y 64 -Width 740 -Height 58 -Font $script:FontBody -Color $script:P.Muted
 $aboutUpdates.Controls.Add($updateStatus)
