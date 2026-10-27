@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -92,9 +93,15 @@ jobs:
       - name: Sign the MSI (when signing secrets exist)
         shell: powershell
         run: |
-          & .\installer\Sign-Release.ps1 -Path (Join-Path $env:GITHUB_WORKSPACE 'dist\SessionRecovery-*.msi') -ErrorAction SilentlyContinue
-          # Missing secrets are not a CI failure; unsigned builds are expected
-          # from forks.
+          & .\installer\Sign-Release.ps1 -Path (Join-Path $env:GITHUB_WORKSPACE 'dist\SessionRecovery-*.msi')
+          $signExit = $LASTEXITCODE
+          if ($signExit -eq 2) {
+            # Missing secrets are not a CI failure; unsigned builds are
+            # expected from forks and from repositories without credentials.
+            Write-Host 'Signing skipped: no signing configuration found.'
+            exit 0
+          }
+          if ($signExit -ne 0) { exit $signExit }
 
       - name: Compute SHA256
         shell: powershell
