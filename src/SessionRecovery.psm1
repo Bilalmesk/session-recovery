@@ -1194,7 +1194,41 @@ function Get-SRDefaultConfig {
         excludeFolders          = @()
         excludeUrls             = @()
         pinnedSnapshots         = @()
+        snapshotNotes           = @{}
     }
+}
+
+function ConvertTo-SRNoteTable {
+    # Notes live in config.json keyed by snapshot file name. JSON turns the
+    # hashtable into an object, so normalize both shapes before callers use it.
+    param($Value)
+    $table = @{}
+    if ($null -eq $Value) { return $table }
+    if ($Value -is [System.Collections.IDictionary]) {
+        foreach ($key in @($Value.Keys)) {
+            $name = [string]$key
+            if ([string]::IsNullOrWhiteSpace($name)) { continue }
+            if ($name.Length -gt 260 -or $name -ne [System.IO.Path]::GetFileName($name)) { continue }
+            $text = [string]$Value[$key]
+            if ($null -eq $text) { $text = '' }
+            $text = [regex]::Replace($text, '[\x00-\x08\x0B\x0C\x0E-\x1F]', '').Trim()
+            if ($text.Length -gt 500) { $text = $text.Substring(0, 500) }
+            if (-not [string]::IsNullOrWhiteSpace($text)) { $table[$name] = $text }
+        }
+        return $table
+    }
+    try {
+        foreach ($property in @($Value.PSObject.Properties)) {
+            $name = [string]$property.Name
+            if ([string]::IsNullOrWhiteSpace($name)) { continue }
+            if ($name.Length -gt 260 -or $name -ne [System.IO.Path]::GetFileName($name)) { continue }
+            $text = [string]$property.Value
+            $text = [regex]::Replace($text, '[\x00-\x08\x0B\x0C\x0E-\x1F]', '').Trim()
+            if ($text.Length -gt 500) { $text = $text.Substring(0, 500) }
+            if (-not [string]::IsNullOrWhiteSpace($text)) { $table[$name] = $text }
+        }
+    } catch { }
+    return $table
 }
 
 function Get-SRConfig {
@@ -1208,6 +1242,12 @@ function Get-SRConfig {
             if ($null -ne $savedProperty) { $value = $savedProperty.Value }
             if ($null -eq $value) { $value = $property.Value }
             $defaults.($property.Name) = $value
+        }
+        $savedNotes = $saved.PSObject.Properties['snapshotNotes']
+        if ($null -ne $savedNotes) {
+            $defaults.snapshotNotes = ConvertTo-SRNoteTable -Value $savedNotes.Value
+        } else {
+            $defaults.snapshotNotes = @{}
         }
     } catch {
         Write-SRLog -Level WARN -Message "Could not read config: $($_.Exception.Message)"
@@ -3898,6 +3938,9 @@ function Read-SRSnapshotFile {
     } else {
         $text = [System.Text.Encoding]::UTF8.GetString($bytes)
     }
+    # Hand-edited or externally restored snapshots may carry a UTF-8 BOM.
+    # ConvertFrom-Json rejects it, so drop a single leading BOM.
+    if ($text.Length -gt 0 -and $text[0] -eq [char]0xFEFF) { $text = $text.Substring(1) }
     return ($text | ConvertFrom-Json)
 }
 
@@ -5402,6 +5445,40 @@ function Set-SRSnapshotPinned {
     return $config
 }
 
+function Get-SRSnapshotNote {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $name = Split-Path -Leaf $Path
+    if ([string]::IsNullOrWhiteSpace($name)) { return '' }
+    $config = Get-SRConfig
+    $notes = ConvertTo-SRNoteTable -Value $config.snapshotNotes
+    if ($notes.ContainsKey($name)) { return [string]$notes[$name] }
+    return ''
+}
+
+function Set-SRSnapshotNote {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [AllowEmptyString()][string]$Note = ''
+    )
+    $name = Split-Path -Leaf $Path
+    if ([string]::IsNullOrWhiteSpace($name) -or $name -ne [System.IO.Path]::GetFileName($name)) {
+        throw 'The snapshot path is not valid.'
+    }
+    $config = Get-SRConfig
+    $notes = ConvertTo-SRNoteTable -Value $config.snapshotNotes
+    $clean = [regex]::Replace([string]$Note, '[\x00-\x08\x0B\x0C\x0E-\x1F]', '').Trim()
+    if ($clean.Length -gt 500) { $clean = $clean.Substring(0, 500).Trim() }
+    if ([string]::IsNullOrWhiteSpace($clean)) {
+        if ($notes.ContainsKey($name)) { $notes.Remove($name) }
+        $clean = ''
+    } else {
+        $notes[$name] = $clean
+    }
+    $config.snapshotNotes = $notes
+    Save-SRConfig -Config $config
+    return $clean
+}
+
 function Export-SRSnapshotFile {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -5528,6 +5605,624 @@ function Test-SRImportedSnapshot {
         return ([string]$installationProperty.Value -ne (Get-SRInstallationId))
     } catch {
         return $true
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Privacy scan
+# ---------------------------------------------------------------------------
+
+function Get-SRPrivacyFindings {
+    <#
+        Local-only privacy scan. Matches visible application/process names and
+        browser tab URLs (never screenshots or page text) against a small set of
+        sensitive categories, then proposes wildcard exclusion rules. Supplying
+        -Apps or -Tabs skips live capture and is used by the tests.
+    #>
+    param(
+        [object[]]$Apps = $null,
+        [object[]]$Tabs = $null,
+        [string[]]$ExcludeApps = $null,
+        [string[]]$ExcludeUrls = $null
+    )
+
+    $explicitInput = $PSBoundParameters.ContainsKey('Apps') -or $PSBoundParameters.ContainsKey('Tabs')
+    if (-not $PSBoundParameters.ContainsKey('ExcludeApps')) {
+        if ($explicitInput) { $ExcludeApps = @() } else { $ExcludeApps = @((Get-SRConfig).excludeApps) }
+    }
+    if (-not $PSBoundParameters.ContainsKey('ExcludeUrls')) {
+        if ($explicitInput) { $ExcludeUrls = @() } else { $ExcludeUrls = @((Get-SRConfig).excludeUrls) }
+    }
+
+    $scanApps = @($Apps)
+    $scanTabs = @($Tabs)
+    if (-not $explicitInput) {
+        $config = Get-SRConfig
+        $windows = @([SessionRecovery.WindowEnumerator]::GetVisibleWindows())
+        $processMap = Get-SRProcessMap
+        $scanApps = @(Get-SRApplications -Windows $windows -ProcessMap $processMap)
+        $scanTabs = @()
+        if ($null -eq $config.PSObject.Properties['captureBrowserTabs'] -or [bool]$config.captureBrowserTabs) {
+            foreach ($browser in @(Get-SRBrowsers -Windows $windows -ProcessMap $processMap -Config $config)) {
+                foreach ($profile in @($browser.profiles)) {
+                    foreach ($tab in @($profile.tabs)) {
+                        $scanTabs += [pscustomobject]@{
+                            title = [string]$tab.title
+                            url   = [string]$tab.url
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    $catalog = @(
+        [pscustomobject]@{
+            Category  = 'PasswordManager'
+            ReasonKey = 'PrivacyReasonPasswordManager'
+            Keywords  = @('1password', 'bitwarden', 'keepass', 'lastpass', 'dashlane', 'nordpass', 'protonpass', 'proton pass', 'enpass', 'keeper', 'roboform', 'password safe')
+        },
+        [pscustomobject]@{
+            Category  = 'Finance'
+            ReasonKey = 'PrivacyReasonFinance'
+            Keywords  = @('bank', 'banking', 'hsbc', 'barclays', 'chase', 'wellsfargo', 'wells fargo', 'revolut', 'monzo', 'paypal', 'stripe', 'wise', 'natwest', 'lloyds', 'santander', 'fidelity', 'schwab', 'coinbase', 'binance', 'kraken', 'tax')
+        },
+        [pscustomobject]@{
+            Category  = 'Messaging'
+            ReasonKey = 'PrivacyReasonMessaging'
+            Keywords  = @('whatsapp', 'telegram', 'signal', 'discord', 'slack', 'teams', 'messenger', 'skype', 'zoom', 'phone link', 'your phone')
+        },
+        [pscustomobject]@{
+            Category  = 'Email'
+            ReasonKey = 'PrivacyReasonEmail'
+            Keywords  = @('outlook', 'thunderbird', 'mailbird', 'protonmail', 'gmail')
+        },
+        [pscustomobject]@{
+            Category  = 'Health'
+            ReasonKey = 'PrivacyReasonHealth'
+            Keywords  = @('hospital', 'clinic', 'medical', 'health', 'pharmacy', 'patient')
+        },
+        [pscustomobject]@{
+            Category  = 'Social'
+            ReasonKey = 'PrivacyReasonSocial'
+            Keywords  = @('facebook', 'instagram', 'twitter', 'tiktok', 'snapchat', 'reddit', 'linkedin', 'mastodon', 'bluesky')
+        }
+    )
+
+    $findByKeyword = {
+        param([string]$Text)
+        if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+        foreach ($entry in $catalog) {
+            foreach ($keyword in @($entry.Keywords)) {
+                if ($Text.Contains($keyword)) { return $entry }
+            }
+        }
+        return $null
+    }
+
+    $findings = New-Object System.Collections.Generic.List[object]
+    $seenPatterns = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+
+    foreach ($app in $scanApps) {
+        if ($null -eq $app) { continue }
+        $nameProperty = $app.PSObject.Properties['name']
+        $exeProperty = $app.PSObject.Properties['exe']
+        $name = if ($null -ne $nameProperty) { [string]$nameProperty.Value } else { '' }
+        $exe = if ($null -ne $exeProperty) { [string]$exeProperty.Value } else { '' }
+        if ([string]::IsNullOrWhiteSpace($name) -and [string]::IsNullOrWhiteSpace($exe)) { continue }
+        if (Test-SRPatternMatch -Patterns $ExcludeApps -Values @($name, $exe)) { continue }
+
+        $leaf = ''
+        if (-not [string]::IsNullOrWhiteSpace($exe)) { $leaf = Split-Path -Leaf $exe }
+        $match = & $findByKeyword (($name + ' ' + $leaf).ToLowerInvariant())
+        if ($null -eq $match) { continue }
+
+        $label = $name
+        if ([string]::IsNullOrWhiteSpace($label)) { $label = $leaf }
+        if ([string]::IsNullOrWhiteSpace($label)) { continue }
+        $pattern = '*' + $label.ToLowerInvariant() + '*'
+        if (-not $seenPatterns.Add($pattern)) { continue }
+
+        $findings.Add([pscustomobject]@{
+            Kind        = 'app'
+            Pattern     = $pattern
+            Label       = $label
+            Detail      = $exe
+            Category    = [string]$match.Category
+            ReasonKey   = [string]$match.ReasonKey
+            Reason      = [string]$match.Category
+            MatchCount  = 1
+        })
+    }
+
+    foreach ($tab in $scanTabs) {
+        if ($null -eq $tab) { continue }
+        $urlProperty = $tab.PSObject.Properties['url']
+        $titleProperty = $tab.PSObject.Properties['title']
+        $url = if ($null -ne $urlProperty) { [string]$urlProperty.Value } else { '' }
+        $title = if ($null -ne $titleProperty) { [string]$titleProperty.Value } else { '' }
+        if ([string]::IsNullOrWhiteSpace($url)) { continue }
+        if (Test-SRPatternMatch -Patterns $ExcludeUrls -Values @($url)) { continue }
+
+        $uri = $null
+        if (-not [System.Uri]::TryCreate($url, [System.UriKind]::Absolute, [ref]$uri)) { continue }
+        if ($uri.Scheme -ne 'http' -and $uri.Scheme -ne 'https') { continue }
+        $hostName = ([string]$uri.Host).ToLowerInvariant().Trim()
+        if ([string]::IsNullOrWhiteSpace($hostName)) { continue }
+
+        $match = & $findByKeyword (($hostName + ' ' + $title + ' ' + $url).ToLowerInvariant())
+        if ($null -eq $match) { continue }
+        $pattern = '*' + $hostName + '*'
+
+        $existing = $findings | Where-Object { $_.Kind -eq 'url' -and $_.Pattern -eq $pattern } | Select-Object -First 1
+        if ($null -ne $existing) {
+            $existing.MatchCount = [int]$existing.MatchCount + 1
+            continue
+        }
+        if (-not $seenPatterns.Add($pattern)) { continue }
+
+        $findings.Add([pscustomobject]@{
+            Kind        = 'url'
+            Pattern     = $pattern
+            Label       = $hostName
+            Detail      = $title
+            Category    = [string]$match.Category
+            ReasonKey   = [string]$match.ReasonKey
+            Reason      = [string]$match.Category
+            MatchCount  = 1
+        })
+    }
+
+    return [pscustomobject]@{
+        ScannedAt   = (Get-Date).ToString('o')
+        AppsScanned = @($scanApps).Count
+        TabsScanned = @($scanTabs).Count
+        Findings    = @($findings | Sort-Object -Property Kind, Category, Label)
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Recovery Kit (portable snapshot, note and exclusion bundle)
+# ---------------------------------------------------------------------------
+
+function Copy-SRZipEntryToFile {
+    param(
+        [Parameter(Mandatory = $true)]$Entry,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [int]$MaxBytes = 32MB
+    )
+    $inputStream = $null
+    $outputStream = $null
+    try {
+        $inputStream = $Entry.Open()
+        $outputStream = [System.IO.File]::Open($Path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        $buffer = New-Object byte[] 81920
+        $written = 0
+        while (($read = $inputStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $written += $read
+            if ($written -gt $MaxBytes) { throw 'A kit entry is larger than the allowed size.' }
+            $outputStream.Write($buffer, 0, $read)
+        }
+        $outputStream.Flush()
+        return $written
+    } finally {
+        if ($null -ne $inputStream) { $inputStream.Dispose() }
+        if ($null -ne $outputStream) { $outputStream.Dispose() }
+    }
+}
+
+function Read-SRZipTextEntry {
+    param([Parameter(Mandatory = $true)]$Entry, [int]$MaxBytes = 1MB)
+    if ([int64]$Entry.Length -gt $MaxBytes) { throw 'A kit manifest is larger than the allowed size.' }
+    $stream = $null
+    $reader = $null
+    try {
+        $stream = $Entry.Open()
+        $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8)
+        return $reader.ReadToEnd()
+    } finally {
+        if ($null -ne $reader) { $reader.Dispose() }
+        elseif ($null -ne $stream) { $stream.Dispose() }
+    }
+}
+
+function Export-SRRecoveryKit {
+    param(
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [string]$AppVersion = ''
+    )
+    $destinationFolder = Split-Path -Parent $Destination
+    if (-not [string]::IsNullOrWhiteSpace($destinationFolder) -and -not (Test-Path -LiteralPath $destinationFolder)) {
+        New-Item -ItemType Directory -Path $destinationFolder -Force | Out-Null
+    }
+
+    $entries = @(Get-SRSnapshots)
+    $config = Get-SRConfig
+    $notes = ConvertTo-SRNoteTable -Value $config.snapshotNotes
+    $staging = Join-Path ([System.IO.Path]::GetTempPath()) ('sr-kit-' + [guid]::NewGuid().ToString('N'))
+    $snapshotStaging = Join-Path $staging 'snapshots'
+    New-Item -ItemType Directory -Path $snapshotStaging -Force | Out-Null
+    try {
+        $manifestSnapshots = New-Object System.Collections.Generic.List[object]
+        $manifestNotes = @{}
+        $snapshotCount = 0
+        $encryptedCount = 0
+        foreach ($entry in $entries) {
+            if ($snapshotCount -ge 200) { break }
+            $leaf = Split-Path -Leaf $entry.Path
+            if ([string]::IsNullOrWhiteSpace($leaf) -or $leaf -ne [System.IO.Path]::GetFileName($leaf)) { continue }
+            if ($leaf -notmatch '^session-[0-9A-Za-z][0-9A-Za-z._-]*\.json(\.gz)?$') { continue }
+            if (-not (Test-Path -LiteralPath $entry.Path -PathType Leaf)) { continue }
+            $size = (Get-Item -LiteralPath $entry.Path).Length
+            $encrypted = $false
+            try {
+                $header = New-Object byte[] 5
+                $headerStream = [System.IO.File]::OpenRead($entry.Path)
+                try { $read = $headerStream.Read($header, 0, 5) } finally { $headerStream.Dispose() }
+                if ($read -eq 5 -and [System.Text.Encoding]::ASCII.GetString($header) -eq 'SRDP1') { $encrypted = $true }
+            } catch { }
+            if ($encrypted) { $encryptedCount++ }
+            Copy-Item -LiteralPath $entry.Path -Destination (Join-Path $snapshotStaging $leaf) -Force -ErrorAction Stop
+            $manifestSnapshots.Add([pscustomobject]@{
+                name       = $leaf
+                capturedAt = [string]$entry.Snapshot.capturedAt
+                bytes      = [int64]$size
+                encrypted  = [bool]$encrypted
+            })
+            if ($notes.ContainsKey($leaf)) { $manifestNotes[$leaf] = [string]$notes[$leaf] }
+            $snapshotCount++
+        }
+
+        $manifest = [pscustomobject]@{
+            kind       = 'SessionRecoveryRecoveryKit'
+            format     = 1
+            product    = 'Session Recovery'
+            appVersion = $AppVersion
+            createdAt  = (Get-Date).ToString('o')
+            snapshots  = @($manifestSnapshots.ToArray())
+            notes      = $manifestNotes
+            exclusions = [pscustomobject]@{
+                apps    = @($config.excludeApps)
+                folders = @($config.excludeFolders)
+                urls    = @($config.excludeUrls)
+            }
+        }
+        $manifestPath = Join-Path $staging 'manifest.json'
+        $manifestJson = $manifest | ConvertTo-Json -Depth 8
+        [System.IO.File]::WriteAllText($manifestPath, $manifestJson, (New-Object System.Text.UTF8Encoding($false)))
+
+        $readme = @(
+            'Session Recovery kit',
+            '====================',
+            '',
+            'This file contains local session snapshots, snapshot notes and exclusion rules.',
+            'Snapshot files can contain application names, window titles, folder paths and',
+            'browser tab titles and URLs. Treat the kit like a private document.',
+            '',
+            'Import it from Studio > Recovery Kit. Imported snapshots are marked as',
+            'untrusted and ask for confirmation before they restore programs.',
+            '',
+            'DPAPI-encrypted snapshots can only be read by the Windows account that',
+            'created them. The importer skips encrypted entries instead of decrypting them.'
+        ) -join "`r`n"
+        [System.IO.File]::WriteAllText((Join-Path $staging 'README.txt'), $readme, (New-Object System.Text.UTF8Encoding($false)))
+
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Force -ErrorAction Stop }
+        [System.IO.Compression.ZipFile]::CreateFromDirectory($staging, $Destination, [System.IO.Compression.CompressionLevel]::Optimal, $false)
+        $bytes = (Get-Item -LiteralPath $Destination).Length
+        Write-SRLog -Message ("Recovery kit exported: {0} ({1} snapshots, {2} notes)" -f $Destination, $snapshotCount, $manifestNotes.Count)
+        return [pscustomobject]@{
+            Path              = $Destination
+            SnapshotCount     = [int]$snapshotCount
+            NoteCount         = [int]$manifestNotes.Count
+            ExclusionCount    = (@($config.excludeApps).Count + @($config.excludeFolders).Count + @($config.excludeUrls).Count)
+            EncryptedCount    = [int]$encryptedCount
+            Bytes             = [int64]$bytes
+        }
+    } finally {
+        try { Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+    }
+}
+
+function Import-SRRecoveryKit {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Recovery kit not found: $Path" }
+    $source = Get-Item -LiteralPath $Path -ErrorAction Stop
+    if ($source.Length -gt 512MB) { throw 'The recovery kit is too large to import (512 MB maximum).' }
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = $null
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('sr-kit-import-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+    try {
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
+        if ($zip.Entries.Count -gt 512) { throw 'The recovery kit contains too many entries.' }
+        $totalBytes = [int64]0
+        $entryMap = @{}
+        foreach ($entry in @($zip.Entries)) {
+            # Windows ZIP writers may store backslashes. Normalize before any
+            # lookup, traversal check or duplicate detection.
+            $name = ([string]$entry.FullName).Replace('\', '/')
+            if ($name -match '(^|/)\.\.(/|$)' -or $name.StartsWith('/') -or $name -match '^[A-Za-z]:') {
+                throw 'The recovery kit contains an unsafe path.'
+            }
+            $totalBytes += [int64]$entry.Length
+            if ($totalBytes -gt 512MB) { throw 'The recovery kit expands to more than 512 MB.' }
+            if (-not $entryMap.ContainsKey($name)) { $entryMap[$name] = $entry }
+        }
+
+        if (-not $entryMap.ContainsKey('manifest.json')) { throw 'The file is not a Session Recovery kit (manifest.json is missing).' }
+        $manifestJson = Read-SRZipTextEntry -Entry $entryMap['manifest.json'] -MaxBytes 1MB
+        $manifest = $null
+        try { $manifest = $manifestJson | ConvertFrom-Json } catch { throw "The kit manifest is not valid JSON: $($_.Exception.Message)" }
+        if ($null -eq $manifest) { throw 'The kit manifest is empty.' }
+        $kindProperty = $manifest.PSObject.Properties['kind']
+        if ($null -eq $kindProperty -or [string]$kindProperty.Value -ne 'SessionRecoveryRecoveryKit') {
+            throw 'The file is not a Session Recovery kit.'
+        }
+        $formatProperty = $manifest.PSObject.Properties['format']
+        if ($null -eq $formatProperty -or [int]$formatProperty.Value -ne 1) {
+            throw 'This recovery kit format is not supported.'
+        }
+        $snapshotProperty = $manifest.PSObject.Properties['snapshots']
+        if ($null -eq $snapshotProperty -or $null -eq $snapshotProperty.Value) { throw 'The kit manifest has no snapshot list.' }
+        $manifestSnapshots = @($snapshotProperty.Value)
+        if ($manifestSnapshots.Count -gt 200) { throw 'The recovery kit lists too many snapshots.' }
+
+        $knownNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+        foreach ($item in $manifestSnapshots) {
+            if ($null -eq $item) { continue }
+            $nameProperty = $item.PSObject.Properties['name']
+            $name = if ($null -ne $nameProperty) { [string]$nameProperty.Value } else { '' }
+            if ([string]::IsNullOrWhiteSpace($name) -or $name -ne [System.IO.Path]::GetFileName($name)) {
+                throw 'The kit manifest contains an invalid snapshot name.'
+            }
+            if ($name -notmatch '^session-[0-9A-Za-z][0-9A-Za-z._-]*\.json(\.gz)?$') {
+                throw 'The kit manifest contains an unexpected snapshot name.'
+            }
+            [void]$knownNames.Add($name)
+        }
+
+        $config = Get-SRConfig
+        $existingApps = @($config.excludeApps | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+        $existingFolders = @($config.excludeFolders | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+        $existingUrls = @($config.excludeUrls | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+
+        $exclusionAdded = 0
+        $exclusionsProperty = $manifest.PSObject.Properties['exclusions']
+        if ($null -ne $exclusionsProperty -and $null -ne $exclusionsProperty.Value) {
+            $categoryMap = @(
+                @{ Property = 'excludeApps'; Existing = $existingApps; Values = $null },
+                @{ Property = 'excludeFolders'; Existing = $existingFolders; Values = $null },
+                @{ Property = 'excludeUrls'; Existing = $existingUrls; Values = $null }
+            )
+            $mapping = @{ apps = 0; folders = 1; urls = 2 }
+            foreach ($key in @($mapping.Keys)) {
+                $category = $categoryMap[$mapping[$key]]
+                $property = $exclusionsProperty.Value.PSObject.Properties[$key]
+                if ($null -eq $property -or $null -eq $property.Value) { continue }
+                $values = @($property.Value | Select-Object -First 200)
+                $current = @($category.Existing)
+                foreach ($value in $values) {
+                    $text = [string]$value
+                    if ([string]::IsNullOrWhiteSpace($text)) { continue }
+                    if ($text.Length -gt 512) { continue }
+                    if ([regex]::IsMatch($text, '[\x00-\x1F]')) { continue }
+                    if ($current -notcontains $text) {
+                        $current += $text
+                        $exclusionAdded++
+                    }
+                }
+                $categoryMap[$mapping[$key]].Existing = @($current)
+            }
+            $config.excludeApps = @($categoryMap[0].Existing)
+            $config.excludeFolders = @($categoryMap[1].Existing)
+            $config.excludeUrls = @($categoryMap[2].Existing)
+        }
+
+        $notes = ConvertTo-SRNoteTable -Value $config.snapshotNotes
+        $manifestNotes = $null
+        $notesProperty = $manifest.PSObject.Properties['notes']
+        if ($null -ne $notesProperty) { $manifestNotes = ConvertTo-SRNoteTable -Value $notesProperty.Value }
+        if ($null -eq $manifestNotes) { $manifestNotes = @{} }
+
+        $imported = 0
+        $skipped = 0
+        $encryptedSkipped = 0
+        $notesAdded = 0
+        $errors = New-Object System.Collections.Generic.List[string]
+        $importedMap = @{}
+        $snapshotTemp = Join-Path $tempRoot 'snapshots'
+        New-Item -ItemType Directory -Path $snapshotTemp -Force | Out-Null
+
+        foreach ($name in @($knownNames)) {
+            $entryName = 'snapshots/' + $name
+            if (-not $entryMap.ContainsKey($entryName)) { $skipped++; continue }
+            $entry = $entryMap[$entryName]
+            if ([int64]$entry.Length -gt 32MB) { $skipped++; $errors.Add(('{0}: entry is too large.' -f $name)); continue }
+            $tempFile = Join-Path $snapshotTemp $name
+            try {
+                [void](Copy-SRZipEntryToFile -Entry $entry -Path $tempFile -MaxBytes 32MB)
+                $bytes = [System.IO.File]::ReadAllBytes($tempFile)
+                if ($bytes.Length -ge 5 -and [System.Text.Encoding]::ASCII.GetString($bytes, 0, 5) -eq 'SRDP1') {
+                    $encryptedSkipped++
+                    $skipped++
+                    continue
+                }
+                $importSource = $tempFile
+                if ($name -like '*.gz') {
+                    # Kits are portable: decompress gzip snapshots before the
+                    # normal import validation so another PC can read them.
+                    $plainPath = Join-Path $snapshotTemp (($name -replace '\.gz$', '') + '.import')
+                    $inputStream = New-Object System.IO.MemoryStream (,$bytes)
+                    $outputStream = $null
+                    $gzip = $null
+                    try {
+                        $outputStream = [System.IO.File]::Open($plainPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+                        $gzip = New-Object System.IO.Compression.GZipStream($inputStream, [System.IO.Compression.CompressionMode]::Decompress)
+                        $buffer = New-Object byte[] 81920
+                        $written = 0
+                        while (($read = $gzip.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                            $written += $read
+                            if ($written -gt 32MB) { throw 'The decompressed snapshot is too large.' }
+                            $outputStream.Write($buffer, 0, $read)
+                        }
+                    } finally {
+                        if ($null -ne $gzip) { $gzip.Dispose() }
+                        if ($null -ne $outputStream) { $outputStream.Dispose() }
+                        $inputStream.Dispose()
+                    }
+                    $importSource = $plainPath
+                }
+                $target = Import-SRSnapshotFile -Path $importSource
+                $targetName = Split-Path -Leaf $target
+                $importedMap[$name] = $targetName
+                if ($manifestNotes.ContainsKey($name)) {
+                    $note = [string]$manifestNotes[$name]
+                    if (-not [string]::IsNullOrWhiteSpace($note) -and $note.Length -le 500) {
+                        if (-not $notes.ContainsKey($targetName)) {
+                            $notes[$targetName] = $note
+                            $notesAdded++
+                        }
+                    }
+                }
+                $imported++
+            } catch {
+                $skipped++
+                $errors.Add(('{0}: {1}' -f $name, $_.Exception.Message))
+            } finally {
+                try { if (Test-Path -LiteralPath $tempFile) { Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue } } catch { }
+            }
+        }
+
+        $config.snapshotNotes = $notes
+        Save-SRConfig -Config $config
+        Write-SRLog -Message ("Recovery kit imported: {0} snapshot(s), {1} exclusion(s), {2} note(s), {3} skipped." -f $imported, $exclusionAdded, $notesAdded, $skipped)
+        return [pscustomobject]@{
+            Imported          = [int]$imported
+            Skipped           = [int]$skipped
+            EncryptedSkipped  = [int]$encryptedSkipped
+            ExclusionsAdded   = [int]$exclusionAdded
+            NotesAdded        = [int]$notesAdded
+            Errors            = @($errors.ToArray())
+        }
+    } finally {
+        if ($null -ne $zip) { $zip.Dispose() }
+        try { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Recovery insights
+# ---------------------------------------------------------------------------
+
+function Get-SRRecoveryInsights {
+    param(
+        [object[]]$Entries = $null,
+        $Config = $null
+    )
+    if ($null -eq $Entries) { $Entries = @(Get-SRSnapshots) }
+    if ($null -eq $Config) { $Config = Get-SRConfig }
+
+    $appCounts = @{}
+    $siteCounts = @{}
+    $storageBytes = [int64]0
+    $tabCaptures = 0
+    $appCaptures = 0
+    $oldest = $null
+    $newest = $null
+    $importedCount = 0
+
+    foreach ($entry in @($Entries)) {
+        if ($null -eq $entry) { continue }
+        if ($null -eq $oldest -or $entry.CapturedAt -lt $oldest) { $oldest = $entry.CapturedAt }
+        if ($null -eq $newest -or $entry.CapturedAt -gt $newest) { $newest = $entry.CapturedAt }
+        try { $storageBytes += (Get-Item -LiteralPath $entry.Path).Length } catch { }
+        $snapshot = $entry.Snapshot
+        if ($null -eq $snapshot) { continue }
+        $importedProperty = $snapshot.PSObject.Properties['imported']
+        if ($null -ne $importedProperty) {
+            try { if ([bool]$importedProperty.Value) { $importedCount++ } } catch { }
+        }
+        foreach ($app in @($snapshot.apps)) {
+            if ($null -eq $app) { continue }
+            $name = ''
+            $displayProperty = $app.PSObject.Properties['displayName']
+            if ($null -ne $displayProperty) { $name = [string]$displayProperty.Value }
+            if ([string]::IsNullOrWhiteSpace($name)) {
+                $nameProperty = $app.PSObject.Properties['name']
+                if ($null -ne $nameProperty) { $name = [string]$nameProperty.Value }
+            }
+            if ([string]::IsNullOrWhiteSpace($name)) {
+                $exeProperty = $app.PSObject.Properties['exe']
+                if ($null -ne $exeProperty) { $name = Split-Path -Leaf ([string]$exeProperty.Value) }
+            }
+            if ([string]::IsNullOrWhiteSpace($name)) { continue }
+            $appCaptures++
+            $key = $name.ToLowerInvariant()
+            if ($appCounts.ContainsKey($key)) { $appCounts[$key]++ } else { $appCounts[$key] = 1 }
+        }
+        foreach ($browser in @($snapshot.browsers)) {
+            if ($null -eq $browser) { continue }
+            foreach ($profile in @($browser.profiles)) {
+                if ($null -eq $profile) { continue }
+                foreach ($tab in @($profile.tabs)) {
+                    if ($null -eq $tab) { continue }
+                    $tabCaptures++
+                    $urlProperty = $tab.PSObject.Properties['url']
+                    $url = if ($null -ne $urlProperty) { [string]$urlProperty.Value } else { '' }
+                    if ([string]::IsNullOrWhiteSpace($url)) { continue }
+                    $uri = $null
+                    if (-not [System.Uri]::TryCreate($url, [System.UriKind]::Absolute, [ref]$uri)) { continue }
+                    if ($uri.Scheme -ne 'http' -and $uri.Scheme -ne 'https') { continue }
+                    $hostName = ([string]$uri.Host).ToLowerInvariant().Trim()
+                    if ([string]::IsNullOrWhiteSpace($hostName)) { continue }
+                    if ($siteCounts.ContainsKey($hostName)) { $siteCounts[$hostName]++ } else { $siteCounts[$hostName] = 1 }
+                }
+            }
+        }
+    }
+
+    $topApps = @($appCounts.GetEnumerator() |
+        Sort-Object -Property @{ Expression = { [int]$_.Value } }, @{ Expression = { [string]$_.Key } } -Descending |
+        Select-Object -First 5 | ForEach-Object {
+            [pscustomobject]@{ Name = [string]$_.Key; Count = [int]$_.Value }
+        })
+    $topSites = @($siteCounts.GetEnumerator() |
+        Sort-Object -Property @{ Expression = { [int]$_.Value } }, @{ Expression = { [string]$_.Key } } -Descending |
+        Select-Object -First 5 | ForEach-Object {
+            [pscustomobject]@{ Name = [string]$_.Key; Count = [int]$_.Value }
+        })
+
+    $pinned = @($Config.pinnedSnapshots | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count
+    $noteTable = ConvertTo-SRNoteTable -Value $Config.snapshotNotes
+    $noteCount = 0
+    foreach ($entry in @($Entries)) {
+        if ($null -ne $entry -and $noteTable.ContainsKey((Split-Path -Leaf $entry.Path))) { $noteCount++ }
+    }
+
+    $spanDays = 0
+    if ($null -ne $oldest -and $null -ne $newest) { $spanDays = [Math]::Max(0, [Math]::Round(($newest - $oldest).TotalDays, 1)) }
+    $averageBytes = 0
+    if (@($Entries).Count -gt 0) { $averageBytes = [int64]($storageBytes / @($Entries).Count) }
+
+    return [pscustomobject]@{
+        SnapshotCount  = @($Entries).Count
+        OldestAt       = if ($null -ne $oldest) { ([datetime]$oldest).ToString('o') } else { $null }
+        NewestAt       = if ($null -ne $newest) { ([datetime]$newest).ToString('o') } else { $null }
+        SpanDays       = [double]$spanDays
+        StorageBytes   = [int64]$storageBytes
+        AverageBytes   = [int64]$averageBytes
+        AppCaptures    = [int]$appCaptures
+        UniqueApps     = [int]$appCounts.Count
+        TabCaptures    = [int]$tabCaptures
+        UniqueSites    = [int]$siteCounts.Count
+        PinnedCount    = [int]$pinned
+        NoteCount      = [int]$noteCount
+        ImportedCount  = [int]$importedCount
+        TopApps        = @($topApps)
+        TopSites       = @($topSites)
     }
 }
 

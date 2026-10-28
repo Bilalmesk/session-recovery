@@ -42,7 +42,7 @@ if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
 New-Item -ItemType Directory -Path $OutputRoot -Force | Out-Null
 $OutputRoot = (Resolve-Path -LiteralPath $OutputRoot).Path
 
-$pages = @('Dashboard', 'Snapshots', 'Exclusions', 'Settings', 'Diagnostics', 'About')
+$pages = @('Dashboard', 'Snapshots', 'Exclusions', 'RecoveryKit', 'Settings', 'Diagnostics', 'About')
 $scrollModes = if ($Scroll -eq 'both') { @('top', 'bottom') } else { @($Scroll) }
 $failures = New-Object System.Collections.Generic.List[string]
 $runs = 0

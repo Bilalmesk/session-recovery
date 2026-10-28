@@ -51,11 +51,11 @@ only green PRs.
 
 ## Local verification checklist
 
-- `Invoke-Pester -Path tests` – 36+ tests green.
+- `Invoke-Pester -Path tests` – 90+ tests green.
 - `powershell -File tests\Invoke-UiAudit.ps1` – all languages clean.
 - `powershell -File src\Restore-Session.ps1 -DryRun` – restore plan prints.
 - `powershell -File src\Control-SessionRecovery.ps1 -Command status` – CLI API
   answers.
 - `installer\Build-MSI.ps1` – installer builds.
-- `tests\Invoke-InstallerSmoke.ps1 -MsiPath .\dist\SessionRecovery-2.6.2.msi` –
+- `tests\Invoke-InstallerSmoke.ps1 -MsiPath .\dist\SessionRecovery-2.7.0.msi` –
   install, payload, render and uninstall all pass.

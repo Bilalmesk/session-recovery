@@ -74,6 +74,18 @@ Describe 'String tables' {
         }
     }
 
+    It 'exposes the 2.7 notes, privacy, kit and insights keys in every language' {
+        foreach ($language in @('en', 'ar', 'fr', 'es', 'de', 'pt', 'ru', 'zh', 'tr')) {
+            $strings = Get-SRStrings -Language $language
+            foreach ($key in @('NavRecoveryKit', 'NoteDialogTitle', 'PrivacyScanTitle', 'KitExportTitle', 'KitImportTitle', 'DiagInsights', 'InsightsSummary')) {
+                $strings[$key] | Should -Not -BeNullOrEmpty -Because "$language should translate '$key'"
+            }
+            $strings['InsightsSummary'] | Should -Match '\{7\}' -Because "$language must show storage size"
+            $strings['KitImportedStatus'] | Should -Match '\{4\}' -Because "$language must show encrypted skips"
+            $strings['PrivacyScanFound'] | Should -Match '\{0\}' -Because "$language must show the suggestion count"
+        }
+    }
+
     It 'falls back to English for unknown languages' {
         $strings = Get-SRStrings -Language 'xx'
         $strings.NavDashboard | Should -Be 'Dashboard'
@@ -873,5 +885,329 @@ Describe 'Restore UI security' {
         $lines.Count | Should -Be 1
         $lines[0].Contains('"{0}"') | Should -BeTrue
         $lines[0].Contains('\"') | Should -BeFalse
+    }
+}
+
+# ---------------------------------------------------------------------------
+# 2.7 recovery features
+# ---------------------------------------------------------------------------
+
+Describe '2.7 recovery features' {
+    BeforeAll {
+        Add-Type -AssemblyName System.IO.Compression -ErrorAction SilentlyContinue
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+
+        function New-TestSnapshotFile {
+            param(
+                [Parameter(Mandatory = $true)][string]$Name,
+                [Parameter(Mandatory = $true)][datetime]$CapturedAt,
+                [object[]]$Apps = @(),
+                [object[]]$Browsers = @()
+            )
+            $dir = Get-SRSnapshotDirectory
+            if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+            $snapshot = [ordered]@{
+                capturedAt = $CapturedAt.ToString('o')
+                apps       = @($Apps)
+                explorer   = @()
+                browsers   = @($Browsers)
+            }
+            $path = Join-Path $dir $Name
+            $json = $snapshot | ConvertTo-Json -Depth 10
+            [System.IO.File]::WriteAllText($path, $json, (New-Object System.Text.UTF8Encoding($false)))
+            return $path
+        }
+
+        function New-TestZip {
+            param(
+                [Parameter(Mandatory = $true)][string]$Path,
+                [Parameter(Mandatory = $true)][System.Collections.IDictionary]$Entries
+            )
+            $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Create, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+            $archive = New-Object System.IO.Compression.ZipArchive($stream, [System.IO.Compression.ZipArchiveMode]::Create)
+            try {
+                foreach ($name in @($Entries.Keys)) {
+                    $entry = $archive.CreateEntry([string]$name)
+                    $bytes = [System.Text.Encoding]::UTF8.GetBytes([string]$Entries[$name])
+                    $entryStream = $entry.Open()
+                    try { $entryStream.Write($bytes, 0, $bytes.Length) } finally { $entryStream.Dispose() }
+                }
+            } finally {
+                $archive.Dispose()
+                $stream.Dispose()
+            }
+            return $Path
+        }
+
+        function Reset-TestRecoveryState {
+            $config = Get-SRConfig
+            $config.excludeApps = @()
+            $config.excludeFolders = @()
+            $config.excludeUrls = @()
+            $config.snapshotNotes = @{}
+            $config.pinnedSnapshots = @()
+            $config.encryptSnapshots = $false
+            $config.compressSnapshots = $false
+            Save-SRConfig -Config $config
+            $dir = Get-SRSnapshotDirectory
+            if (Test-Path -LiteralPath $dir) {
+                @(Get-ChildItem -LiteralPath $dir -Filter 'session-*' -File -ErrorAction SilentlyContinue) | Remove-Item -Force -ErrorAction SilentlyContinue
+            } else {
+                New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            }
+        }
+    }
+
+    BeforeEach { Reset-TestRecoveryState }
+
+    AfterAll {
+        try { Reset-TestRecoveryState } catch { }
+    }
+
+    Context 'Snapshot notes' {
+        It 'stores, trims, caps and removes a snapshot note' {
+            $path = Join-Path (Get-SRSnapshotDirectory) 'session-note-test.json'
+            $saved = Set-SRSnapshotNote -Path $path -Note ('  ' + ('x' * 600) + '  ')
+            $saved.Length | Should -Be 500
+            (Get-SRSnapshotNote -Path $path).Length | Should -Be 500
+
+            Set-SRSnapshotNote -Path $path -Note '  A short note  ' | Should -Be 'A short note'
+            Get-SRSnapshotNote -Path $path | Should -Be 'A short note'
+
+            Set-SRSnapshotNote -Path $path -Note '   ' | Should -Be ''
+            Get-SRSnapshotNote -Path $path | Should -Be ''
+            $notes = ConvertTo-SRNoteTable -Value (Get-SRConfig).snapshotNotes
+            $notes.ContainsKey('session-note-test.json') | Should -BeFalse
+        }
+
+        It 'keys notes by file name even when given a full path' {
+            $path = Join-Path (Join-Path $env:SR_TEST_HOME 'somewhere') 'session-note-leaf.json'
+            Set-SRSnapshotNote -Path $path -Note 'leaf' | Out-Null
+            $notes = ConvertTo-SRNoteTable -Value (Get-SRConfig).snapshotNotes
+            $notes.ContainsKey('session-note-leaf.json') | Should -BeTrue
+            $notes.ContainsKey($path) | Should -BeFalse
+        }
+
+        It 'ignores note keys that are not plain file names' {
+            $table = ConvertTo-SRNoteTable -Value ([ordered]@{
+                '../evil.json'          = 'bad'
+                '..\evil.json'          = 'bad'
+                'C:\Windows\evil.json'  = 'bad'
+                'session-good.json'     = ' ok '
+            })
+            $table.Count | Should -Be 1
+            $table.ContainsKey('session-good.json') | Should -BeTrue
+            $table['session-good.json'] | Should -Be 'ok'
+        }
+    }
+
+    Context 'Privacy scan' {
+        It 'finds password managers and finance sites from names and URLs' {
+            $report = Get-SRPrivacyFindings `
+                -Apps @([pscustomobject]@{ name = '1Password'; exe = 'C:\Program Files\1Password\1Password.exe' }) `
+                -Tabs @([pscustomobject]@{ title = 'Chase Online'; url = 'https://secure.chase.com/login' })
+            $report.AppsScanned | Should -Be 1
+            $report.TabsScanned | Should -Be 1
+            $findings = @($report.Findings)
+            $findings.Count | Should -Be 2
+
+            $appFinding = $findings | Where-Object { $_.Pattern -eq '*1password*' } | Select-Object -First 1
+            $appFinding.Kind | Should -Be 'app'
+            $appFinding.ReasonKey | Should -Be 'PrivacyReasonPasswordManager'
+
+            $urlFinding = $findings | Where-Object { $_.Pattern -eq '*secure.chase.com*' } | Select-Object -First 1
+            $urlFinding.Kind | Should -Be 'url'
+            $urlFinding.ReasonKey | Should -Be 'PrivacyReasonFinance'
+        }
+
+        It 'honors app and URL exclusions' {
+            $report = Get-SRPrivacyFindings `
+                -Apps @([pscustomobject]@{ name = '1Password'; exe = 'C:\Program Files\1Password\1Password.exe' }) `
+                -Tabs @([pscustomobject]@{ title = 'Chase Online'; url = 'https://secure.chase.com/login' }) `
+                -ExcludeApps '*1password*' `
+                -ExcludeUrls '*chase.com*'
+            @($report.Findings).Count | Should -Be 0
+        }
+
+        It 'ignores non-web tabs' {
+            $report = Get-SRPrivacyFindings -Apps @() -Tabs @([pscustomobject]@{ title = 'Inbox'; url = 'mailto:someone@example.com' })
+            @($report.Findings).Count | Should -Be 0
+        }
+    }
+
+    Context 'Recovery kit' {
+        It 'exports snapshots, notes and exclusions into a portable zip' {
+            $first = New-TestSnapshotFile -Name 'session-20261001-090000-000.json' -CapturedAt ([datetime]::ParseExact('2026-10-01T09:00:00', 'yyyy-MM-ddTHH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)) `
+                -Apps @([pscustomobject]@{ name = 'Alpha'; exe = 'C:\Apps\Alpha.exe' })
+            [void](New-TestSnapshotFile -Name 'session-20261002-090000-000.json' -CapturedAt ([datetime]::ParseExact('2026-10-02T09:00:00', 'yyyy-MM-ddTHH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)))
+            Set-SRSnapshotNote -Path $first -Note 'Demo note' | Out-Null
+
+            $config = Get-SRConfig
+            $config.excludeApps = @('*1password*')
+            $config.excludeFolders = @('C:\Private')
+            $config.excludeUrls = @('*bank*')
+            Save-SRConfig -Config $config
+
+            $kit = Join-Path $env:SR_TEST_HOME ('kit-' + [guid]::NewGuid().ToString('N') + '.srkit')
+            $result = Export-SRRecoveryKit -Destination $kit -AppVersion '2.7.0'
+            $result.SnapshotCount | Should -Be 2
+            $result.NoteCount | Should -Be 1
+            $result.ExclusionCount | Should -Be 3
+            $result.EncryptedCount | Should -Be 0
+            $result.Bytes | Should -BeGreaterThan 0
+
+            $archive = [System.IO.Compression.ZipFile]::OpenRead($kit)
+            try {
+                $names = @($archive.Entries | ForEach-Object { ([string]$_.FullName).Replace('\', '/') })
+            } finally {
+                $archive.Dispose()
+            }
+            $names | Should -Contain 'manifest.json'
+            $names | Should -Contain 'README.txt'
+            $names | Should -Contain 'snapshots/session-20261001-090000-000.json'
+            $names | Should -Contain 'snapshots/session-20261002-090000-000.json'
+        }
+
+        It 'round-trips a kit into a clean profile' {
+            $first = New-TestSnapshotFile -Name 'session-20261003-090000-000.json' -CapturedAt ([datetime]::ParseExact('2026-10-03T09:00:00', 'yyyy-MM-ddTHH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)) `
+                -Apps @([pscustomobject]@{ name = 'Beta'; exe = 'C:\Apps\Beta.exe' })
+            Set-SRSnapshotNote -Path $first -Note 'Carry me' | Out-Null
+            $config = Get-SRConfig
+            $config.excludeApps = @('*1password*')
+            $config.excludeFolders = @('C:\Private')
+            $config.excludeUrls = @('*bank*')
+            Save-SRConfig -Config $config
+
+            $kit = Join-Path $env:SR_TEST_HOME ('kit-' + [guid]::NewGuid().ToString('N') + '.srkit')
+            [void](Export-SRRecoveryKit -Destination $kit -AppVersion '2.7.0')
+
+            $dir = Get-SRSnapshotDirectory
+            @(Get-ChildItem -LiteralPath $dir -Filter 'session-*' -File) | Remove-Item -Force
+            $config = Get-SRConfig
+            $config.excludeApps = @()
+            $config.excludeFolders = @()
+            $config.excludeUrls = @()
+            $config.snapshotNotes = @{}
+            Save-SRConfig -Config $config
+
+            $imported = Import-SRRecoveryKit -Path $kit
+            $imported.Imported | Should -Be 1
+            $imported.ExclusionsAdded | Should -Be 3
+            $imported.NotesAdded | Should -Be 1
+            $imported.EncryptedSkipped | Should -Be 0
+
+            $config = Get-SRConfig
+            @($config.excludeApps) | Should -Contain '*1password*'
+            @($config.excludeFolders) | Should -Contain 'C:\Private'
+            @($config.excludeUrls) | Should -Contain '*bank*'
+            Get-SRSnapshotNote -Path (Join-Path $dir 'session-20261003-090000-000.json') | Should -Be 'Carry me'
+            @(Get-ChildItem -LiteralPath $dir -Filter 'session-*' -File).Count | Should -Be 1
+        }
+
+        It 'rejects a kit whose entry paths escape the archive' {
+            $manifest = [pscustomobject]@{
+                kind      = 'SessionRecoveryRecoveryKit'
+                format    = 1
+                snapshots = @()
+            } | ConvertTo-Json -Depth 6
+            $kit = New-TestZip -Path (Join-Path $env:SR_TEST_HOME ('kit-' + [guid]::NewGuid().ToString('N') + '.srkit')) -Entries ([ordered]@{
+                'manifest.json' = $manifest
+                '../evil.json'  = '{}'
+            })
+            { Import-SRRecoveryKit -Path $kit } | Should -Throw '*unsafe path*'
+        }
+
+        It 'skips encrypted snapshots instead of copying them' {
+            $name = 'session-20261001-090000-000.json'
+            $manifest = [pscustomobject]@{
+                kind       = 'SessionRecoveryRecoveryKit'
+                format     = 1
+                snapshots  = @([pscustomobject]@{ name = $name })
+                notes      = @{}
+                exclusions = [pscustomobject]@{ apps = @(); folders = @(); urls = @() }
+            } | ConvertTo-Json -Depth 6
+            $kit = New-TestZip -Path (Join-Path $env:SR_TEST_HOME ('kit-' + [guid]::NewGuid().ToString('N') + '.srkit')) -Entries ([ordered]@{
+                'manifest.json'          = $manifest
+                ('snapshots/' + $name)   = 'SRDP1-not-decryptable'
+            })
+
+            $result = Import-SRRecoveryKit -Path $kit
+            $result.Imported | Should -Be 0
+            $result.EncryptedSkipped | Should -Be 1
+            $result.Skipped | Should -Be 1
+            @(Get-ChildItem -LiteralPath (Get-SRSnapshotDirectory) -Filter 'session-*' -File).Count | Should -Be 0
+        }
+    }
+
+    Context 'Recovery insights' {
+        It 'counts captures, sites, pins, notes and imports locally' {
+            $config = Get-SRConfig
+            $config.pinnedSnapshots = @('session-a.json', 'session-b.json', '')
+            $config.snapshotNotes = [ordered]@{ 'session-a.json' = 'first'; 'session-b.json' = 'second' }
+            $entries = @(
+                [pscustomobject]@{
+                    Path       = Join-Path $env:SR_TEST_HOME 'session-a.json'
+                    CapturedAt = [datetime]::ParseExact('2026-10-01T09:00:00', 'yyyy-MM-ddTHH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)
+                    Snapshot   = [pscustomobject]@{
+                        apps     = @([pscustomobject]@{ name = 'Alpha' }, [pscustomobject]@{ name = 'Alpha' })
+                        browsers = @([pscustomobject]@{
+                            profiles = @([pscustomobject]@{
+                                tabs = @(
+                                    [pscustomobject]@{ url = 'https://example.com/a' },
+                                    [pscustomobject]@{ url = 'https://news.example.com/b' }
+                                )
+                            })
+                        })
+                    }
+                }
+                [pscustomobject]@{
+                    Path       = Join-Path $env:SR_TEST_HOME 'session-b.json'
+                    CapturedAt = [datetime]::ParseExact('2026-10-03T09:00:00', 'yyyy-MM-ddTHH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)
+                    Snapshot   = [pscustomobject]@{
+                        imported = $true
+                        apps     = @([pscustomobject]@{ displayName = 'Beta' })
+                        browsers = @([pscustomobject]@{
+                            profiles = @([pscustomobject]@{
+                                tabs = @([pscustomobject]@{ url = 'https://example.com/c' })
+                            })
+                        })
+                    }
+                }
+            )
+
+            $insights = Get-SRRecoveryInsights -Entries $entries -Config $config
+            $insights.SnapshotCount | Should -Be 2
+            $insights.SpanDays | Should -Be 2
+            $insights.AppCaptures | Should -Be 3
+            $insights.UniqueApps | Should -Be 2
+            $insights.TabCaptures | Should -Be 3
+            $insights.UniqueSites | Should -Be 2
+            $insights.PinnedCount | Should -Be 2
+            $insights.NoteCount | Should -Be 2
+            $insights.ImportedCount | Should -Be 1
+            $insights.TopApps[0].Name | Should -Be 'alpha'
+            $insights.TopApps[0].Count | Should -Be 2
+            $insights.TopSites[0].Name | Should -Be 'example.com'
+            $insights.TopSites[0].Count | Should -Be 2
+        }
+
+        It 'returns an empty shape when there are no snapshots' {
+            $insights = Get-SRRecoveryInsights -Entries @() -Config (Get-SRConfig)
+            $insights.SnapshotCount | Should -Be 0
+            $insights.UniqueApps | Should -Be 0
+            $insights.UniqueSites | Should -Be 0
+            $insights.TopApps.Count | Should -Be 0
+            $insights.TopSites.Count | Should -Be 0
+        }
+    }
+
+    Context 'Snapshot file reading' {
+        It 'reads a snapshot saved with a UTF-8 BOM' {
+            $path = Join-Path $env:SR_TEST_HOME 'bom-snapshot.json'
+            $json = '{"capturedAt":"2026-10-01T09:00:00+00:00","apps":[],"explorer":[],"browsers":[]}'
+            [System.IO.File]::WriteAllText($path, $json, (New-Object System.Text.UTF8Encoding($true)))
+            $snapshot = Read-SRSnapshotFile -Path $path
+            $snapshot.capturedAt | Should -Be '2026-10-01T09:00:00+00:00'
+        }
     }
 }

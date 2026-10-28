@@ -27,8 +27,8 @@ The package installs per-user. Settings and snapshots live in `%LOCALAPPDATA%\Se
 Download `SessionRecovery-<version>.msi` and its `.sha256` file from the [GitHub Releases](https://github.com/Bilalmesk/session-recovery/releases) page, verify the hash, then run the MSI. The wizard can change the install folder and clear the optional desktop shortcut. No UAC prompt is needed.
 
 ```powershell
-Get-FileHash .\SessionRecovery-2.6.2.msi -Algorithm SHA256
-Get-Content .\SessionRecovery-2.6.2.msi.sha256
+Get-FileHash .\SessionRecovery-2.7.0.msi -Algorithm SHA256
+Get-Content .\SessionRecovery-2.7.0.msi.sha256
 ```
 
 The MSI is **not code-signed** unless Trusted Signing or PFX secrets are configured in CI. The in-app updater now shows **UNSIGNED UPDATE** and defaults to **No** before it runs a build without a valid signature. If SmartScreen appears, verify the published SHA256 first, then choose **More info -> Run anyway**. A matching hash proves the file matches the release asset; only a signature proves who built it.
@@ -57,7 +57,7 @@ Get-Content "$env:LOCALAPPDATA\SessionRecovery\logs\session-recovery.log" -Tail 
 
 ## What it does
 
-- **Session Recovery Studio** with Dashboard, Snapshots, Exclusions, Settings, Diagnostics and About; 14 themes and 9 languages.
+- **Session Recovery Studio** with Dashboard, Snapshots, Exclusions, Recovery Kit, Settings, Diagnostics and About; 14 themes and 9 languages.
 - Automatic snapshots every 3 minutes, plus lock, sleep/resume and low-battery events. Unchanged states are skipped.
 - Restores apps to their captured position, size and maximized state. Windows from missing monitors are mapped onto the current layout.
 - Restores Explorer folders and browser tabs: Chromium session files first, UI Automation/history fallback, Firefox `recovery.jsonlz4`.
@@ -65,8 +65,16 @@ Get-Content "$env:LOCALAPPDATA\SessionRecovery\logs\session-recovery.log" -Tail 
 - Media playback restore for VLC, MPC-HC/BE, mpv and PotPlayer. Positions are exact for mpv IPC and estimated otherwise.
 - Crash-aware prompt with a localized shutdown reason from Event IDs 41, 1001, 6008, 1074 and 6006, plus Office AutoRecover files.
 - Timeline search, per-snapshot change diff, pin, export/import, named workspaces and a restore preview.
+- Searchable snapshot notes, a local privacy scan for sensitive apps and sites, portable Recovery Kits and local recovery insights.
 - Opt-in window thumbnails, DPAPI encryption, gzip compression and URL query redaction.
 - Named-pipe/CLI control API for automation.
+
+### Notes, privacy scan and Recovery Kits
+
+- **Snapshot notes** hold up to 500 characters of searchable text per snapshot. They are stored in `config.json` keyed by snapshot file name, included in Recovery Kits, and removed when their snapshot is deleted. Notes are plain text even when snapshots are encrypted.
+- **Privacy scan** on the Exclusions page inspects visible application/process names and browser tab URLs and titles for categories such as password managers, banking, messaging, email, health and social media. It proposes wildcard exclusions that you can add one at a time or all at once. It never reads screenshots, window pixels or page content.
+- **Recovery Kit** on its own Studio page bundles every snapshot, snapshot note and exclusion rule into one portable `.srkit` file. Import merges notes and rules without overwriting existing settings, marks imported snapshots as untrusted, and skips DPAPI-encrypted snapshots because only the Windows account that created them can read them. A kit never contains settings, logs, screenshots or page content. The `.srkit` is a ZIP archive and is plaintext unless the snapshots inside are encrypted, so treat it like a private document.
+- **Recovery insights** on Diagnostics summarize locally what the snapshot store contains: counts, time span, unique apps and sites, pins, notes, imports and storage use.
 
 ### Restoring
 
@@ -116,6 +124,8 @@ Settings are in `%LOCALAPPDATA%\SessionRecovery\config.json`. The Studio Setting
 | `redactUrls` | `true` | Strip URL query strings and fragments. |
 | `eventSnapshots` | `true` | Capture on lock, sleep/resume and low battery. |
 | `excludeApps` / `excludeFolders` / `excludeUrls` | `[]` | Wildcard exclusions for new snapshots. |
+| `pinnedSnapshots` | `[]` | Snapshot file names kept by retention. |
+| `snapshotNotes` | `{}` | Searchable notes keyed by snapshot file name. |
 
 Exclusions only affect new snapshots; existing files still contain what was captured before. Add patterns such as `KeePass*`, `D:\Private*` or `*bank*` on the Studio Exclusions page.
 
@@ -129,13 +139,15 @@ Everything stays on the PC. Snapshots, logs and settings live under `%LOCALAPPDA
 | `snapshots\thumbs` | Window thumbnails, only when enabled. |
 | `workspaces` | Named workspaces. |
 | `logs\session-recovery.log` | Snapshot, restore and error messages. |
-| `config.json` | Settings. |
+| `config.json` | Settings and snapshot notes. |
 | `app` | Program files. |
 
-> **Plaintext warning:** snapshots are plain JSON by default. They contain executable paths, window titles, Explorer folder paths and browser URLs; media snapshots also contain the playing file and position; thumbnails contain a small image of each captured window. Anyone who can read your profile or a backup/synced copy can read them. Turn on `encryptSnapshots` for DPAPI protection. Encrypted files restore only for the same Windows user on the same PC, so keep an unencrypted export only if you need cross-PC recovery and can protect it yourself.
+> **Plaintext warning:** snapshots are plain JSON by default. They contain executable paths, window titles, Explorer folder paths and browser URLs; media snapshots also contain the playing file and position; thumbnails contain a small image of each captured window. Snapshot notes are plain text in `config.json`, and a Recovery Kit bundles snapshots, notes and exclusions into a plain ZIP unless the snapshots inside are encrypted. Anyone who can read your profile, a kit or a backup/synced copy can read them. Turn on `encryptSnapshots` for DPAPI protection. Encrypted files restore only for the same Windows user on the same PC, so keep an unencrypted export only if you need cross-PC recovery and can protect it yourself.
 
 - `redactUrls` removes query strings and fragments before URLs are written.
 - Exclusions apply before a snapshot is written; they never rewrite old snapshots.
+- The privacy scan reads only visible app/process names and browser tab URLs/titles. It never captures screenshots or page content, and it suggests exclusions without changing anything until you confirm.
+- Recovery Kit import validates archive paths, caps entry sizes, skips DPAPI-encrypted snapshots and never overwrites existing settings or exclusion rules.
 - The app makes no network requests unless you check for or download an update.
 - Diagnostics are local. Reports contain paths, URLs and log lines, so review them before sharing.
 
@@ -203,7 +215,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Invoke-UiAudit.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\Build-MSI.ps1
 
 # Install, verify, render and uninstall the built MSI
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Invoke-InstallerSmoke.ps1 -MsiPath .\dist\SessionRecovery-2.6.2.msi
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Invoke-InstallerSmoke.ps1 -MsiPath .\dist\SessionRecovery-2.7.0.msi
 ```
 
 The build writes `dist\SessionRecovery-<version>.msi`, its `.sha256` file and a short release README. `dist\` is ignored by Git; publish the MSI as a GitHub Release asset.

@@ -9,7 +9,7 @@
     CI after the build job has produced the MSI artifact.
 
     Example:
-      .\tests\Invoke-InstallerSmoke.ps1 -MsiPath .\dist\SessionRecovery-2.6.2.msi
+      .\tests\Invoke-InstallerSmoke.ps1 -MsiPath .\dist\SessionRecovery-2.7.0.msi
 #>
 [CmdletBinding()]
 param(

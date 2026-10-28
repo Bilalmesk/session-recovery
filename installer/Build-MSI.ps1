@@ -13,7 +13,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string]$Version = '2.6.2',
+    [string]$Version = '2.7.0',
     [switch]$NoRestore
 )
 
@@ -75,8 +75,22 @@ Session Recovery {0}
 Reopen the apps, File Explorer folders and browser tabs that were open before
 a crash, power cut or unexpected restart.
 
-What's new in 2.6.2
+What's new in 2.7.0
 -------------------
+- Snapshot notes: add a searchable note to any snapshot. Notes live in
+  config.json, are included in Recovery Kits, and disappear with the snapshot.
+- Privacy scan on the Exclusions page checks visible app names and browser tab
+  URLs for sensitive categories, then adds suggested exclusions in one click.
+  Screenshots and page content are never inspected.
+- Recovery Kit: export snapshots, notes and exclusion rules into one .srkit
+  file and merge them into another PC. Imported snapshots stay untrusted and
+  DPAPI-encrypted entries are skipped instead of decrypted.
+- Recovery insights on Diagnostics summarize local snapshot count, unique
+  apps and sites, pins, notes, imports and storage use.
+- Recovery Kit is the eighth Studio page, with keyboard shortcut Ctrl+D7.
+
+Also in 2.6.2
+-------------
 - Restore arguments must also live on local fixed drives. A network-share
   or device path argument is rejected even when the share is reachable.
 - The untrusted-snapshot confirmation now lists each program's saved

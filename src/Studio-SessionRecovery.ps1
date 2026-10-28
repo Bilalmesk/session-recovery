@@ -9,7 +9,7 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('Dashboard', 'Snapshots', 'Exclusions', 'Settings', 'Diagnostics', 'About')]
+    [ValidateSet('Dashboard', 'Snapshots', 'Exclusions', 'RecoveryKit', 'Settings', 'Diagnostics', 'About')]
     [string]$Page = 'Dashboard',
     [string]$RenderDir = ''
 )
@@ -17,7 +17,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-$script:AppVersion = '2.6.2'
+$script:AppVersion = '2.7.0'
 $script:ScriptDir = $PSScriptRoot
 $script:AppDir = if ($env:SESSIONRECOVERY_HOST_EXE) { Split-Path -Parent $env:SESSIONRECOVERY_HOST_EXE } else { $PSScriptRoot }
 $script:HostExe = $null
@@ -42,6 +42,11 @@ $script:ToastTimer = $null
 $script:SnapshotsDirty = $true
 $script:DashboardDirty = $true
 $script:ExclusionsDirty = $true
+$script:SnapshotNotes = @{}
+$script:PrivacyFindings = @()
+$script:PrivacyMap = @{}
+$script:PrivacyScanLoading = $false
+$script:KitBusy = $false
 $script:DiagnosticsDirty = $true
 $script:DiagnosticsLoading = $false
 $script:DiagLoadingTimer = $null
@@ -1440,6 +1445,7 @@ function Update-StudioWorkers {
         switch ($item.Name) {
             'Diagnostics' { Complete-StudioDiagnosticsWorker -Result $item.Result }
             'Update' { Complete-StudioUpdateWorker -Result $item.Result }
+            'PrivacyScan' { Complete-StudioPrivacyScanWorker -Result $item.Result }
         }
     }
 }
@@ -1858,6 +1864,7 @@ function Refresh-StudioData {
         'Dashboard' { if ($script:PageLoaded.ContainsKey('Dashboard')) { Refresh-StudioDashboard } }
         'Snapshots' { if ($script:PageLoaded.ContainsKey('Snapshots')) { Refresh-StudioSnapshotRows } }
         'Exclusions' { if ($script:PageLoaded.ContainsKey('Exclusions')) { Refresh-StudioExclusions } }
+        'RecoveryKit' { if ($script:PageLoaded.ContainsKey('RecoveryKit')) { Update-StudioKitSummary } }
         'Diagnostics' { if ($script:PageLoaded.ContainsKey('Diagnostics')) { Start-StudioDiagnosticsRefresh -Force } }
     }
 }
@@ -1924,6 +1931,7 @@ $navDefs = @(
     @{ Key = 'Dashboard'; Label = 'Dashboard'; Glyph = [char]0xE80F },
     @{ Key = 'Snapshots'; Label = 'Snapshots'; Glyph = [char]0xE81C },
     @{ Key = 'Exclusions'; Label = 'Exclusions'; Glyph = [char]0xE8B7 },
+    @{ Key = 'RecoveryKit'; Label = 'Recovery Kit'; Glyph = [char]0xE7B8 },
     @{ Key = 'Settings'; Label = 'Settings'; Glyph = [char]0xE713 },
     @{ Key = 'Diagnostics'; Label = 'Diagnostics'; Glyph = [char]0xE9D9 },
     @{ Key = 'About'; Label = 'About'; Glyph = [char]0xE946 }
@@ -1934,7 +1942,9 @@ foreach ($nav in $navDefs) {
     $navButton.Text = $nav.Label
     $navButton.Glyph = [string]$nav.Glyph
     $navButton.Tag = $nav.Key
-    $navButton.Location = New-Object System.Drawing.Point(14, (86 + ($navIndex * 46)))
+    # Eight entries must still clear the bottom restore button at the minimum
+    # window height (client 661 px). 78 + 7*40 ends at 398 px.
+    $navButton.Location = New-Object System.Drawing.Point(14, (78 + ($navIndex * 40)))
     $navButton.Size = New-Object System.Drawing.Size(208, 40)
     $navButton.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
     $navButton.AccentColor = $script:P.Accent
@@ -2518,6 +2528,13 @@ $detailPin.Add_Click({ Toggle-StudioSnapshotPin })
 $detailCard.Controls.Add($detailPin)
 $script:Ui.DetailPin = $detailPin
 
+$detailNote = New-StudioButton -Text (T 'BtnNote' 'Note') -X 0 -Y 13 -Width 92 -Height 28 -Glyph ''
+$detailNote.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
+$detailNote.Enabled = $false
+$detailNote.Add_Click({ Show-StudioSnapshotNoteDialog })
+$detailCard.Controls.Add($detailNote)
+$script:Ui.DetailNote = $detailNote
+
 $detailTitle = New-StudioLabel -Text (T 'SelectSnapshot' 'Select a snapshot') -X 18 -Y 48 -Width 340 -Height 28 -Font $script:FontSemiboldLarge -Color $script:P.Text
 $detailTitle.AutoEllipsis = $true
 $detailCard.Controls.Add($detailTitle)
@@ -2592,6 +2609,7 @@ $detailDelete.Add_Click({
         if ($wasPinned) {
             try { [void](Set-SRSnapshotPinned -Path $path -Pinned $false) } catch { }
         }
+        try { [void](Set-SRSnapshotNote -Path $path -Note '') } catch { }
         $script:SelectedSnapshotPath = $null
         Refresh-StudioData
         Refresh-StudioSnapshotRows
@@ -2615,6 +2633,7 @@ $detailCard.Add_Resize({
     if ($script:Ui.DetailText.Top -lt (138 + $thumbsExtra)) { $script:Ui.DetailText.Top = 138 + $thumbsExtra + 6 }
     $script:Ui.DetailText.Height = [Math]::Max(120, $card.ClientSize.Height - $script:Ui.DetailText.Top - 62)
     $script:Ui.DetailPin.Left = $card.ClientSize.Width - 18 - $script:Ui.DetailPin.Width
+    $script:Ui.DetailNote.Left = $script:Ui.DetailPin.Left - 8 - $script:Ui.DetailNote.Width
     $script:Ui.DetailRestore.Top = $card.ClientSize.Height - 54
     $script:Ui.DetailOpen.Top = $card.ClientSize.Height - 54
     $script:Ui.DetailDelete.Top = $card.ClientSize.Height - 54
@@ -2652,6 +2671,80 @@ function Toggle-StudioSnapshotPin {
     }
 }
 
+function Show-StudioSnapshotNoteDialog {
+    $entry = Get-StudioSelectedSnapshotEntry
+    if ($null -eq $entry) { return }
+    $existing = ''
+    try { $existing = [string](Get-SRSnapshotNote -Path $entry.Path) } catch { $existing = '' }
+
+    $dialog = New-Object System.Windows.Forms.Form
+    $dialog.Text = (T 'NoteDialogTitle' 'Snapshot note')
+    $dialog.ClientSize = New-Object System.Drawing.Size(440, 262)
+    $dialog.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+    $dialog.MaximizeBox = $false
+    $dialog.MinimizeBox = $false
+    $dialog.ShowInTaskbar = $false
+    $dialog.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterParent
+    $dialog.BackColor = $script:P.Bg
+    $dialog.ForeColor = $script:P.Text
+    $dialog.Font = $script:FontBody
+    try { if ($script:IconPath) { $dialog.Icon = New-Object System.Drawing.Icon($script:IconPath) } } catch { }
+
+    $hint = New-StudioLabel -Text (T 'NoteDialogHint' 'Notes stay in config.json on this PC. They are included in a Recovery Kit and can be searched.') -X 18 -Y 14 -Width 404 -Height 34 -Font $script:FontBodySmall -Color $script:P.Muted
+    $dialog.Controls.Add($hint)
+    $box = New-StudioTextBox -X 18 -Y 54 -Width 404 -Height 118
+    $box.Multiline = $true
+    $box.AcceptsReturn = $true
+    $box.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
+    $box.MaxLength = 500
+    $box.Text = $existing
+    $dialog.Controls.Add($box)
+
+    $context = [pscustomobject]@{ Path = [string]$entry.Path; Box = $box }
+    $save = New-StudioButton -Text (T 'BtnSaveNote' 'Save note') -X 18 -Y 210 -Width 136 -Height 34 -Primary
+    $save.Tag = $context
+    $save.Add_Click({
+        param($sender, $eventArgs)
+        $state = $sender.Tag
+        try {
+            [void](Set-SRSnapshotNote -Path $state.Path -Note ([string]$state.Box.Text))
+            $script:Config = Get-SRConfig
+            Refresh-StudioSnapshotRows
+            Update-StudioSnapshotDetails
+            Show-StudioToast (T 'ToastNoteSaved' 'Note saved.') $script:P.Green
+            $sender.FindForm().Close()
+        } catch {
+            Show-StudioToast ((T 'ToastNoteFailed' 'Could not save the note: {0}') -f $_.Exception.Message) $script:P.Red
+        }
+    })
+    $dialog.Controls.Add($save)
+    $remove = New-StudioButton -Text (T 'BtnRemoveNote' 'Remove note') -X 166 -Y 210 -Width 136 -Height 34 -Danger
+    $remove.Tag = $context
+    $remove.Visible = -not [string]::IsNullOrWhiteSpace($existing)
+    $remove.Add_Click({
+        param($sender, $eventArgs)
+        $state = $sender.Tag
+        try {
+            [void](Set-SRSnapshotNote -Path $state.Path -Note '')
+            $script:Config = Get-SRConfig
+            Refresh-StudioSnapshotRows
+            Update-StudioSnapshotDetails
+            Show-StudioToast (T 'ToastNoteRemoved' 'Note removed.') $script:P.Green
+            $sender.FindForm().Close()
+        } catch {
+            Show-StudioToast ((T 'ToastNoteFailed' 'Could not save the note: {0}') -f $_.Exception.Message) $script:P.Red
+        }
+    })
+    $dialog.Controls.Add($remove)
+    $cancel = New-StudioButton -Text (T 'BtnCancel' 'Cancel') -X 314 -Y 210 -Width 108 -Height 34 -Glyph ''
+    $cancel.Add_Click({ param($sender, $eventArgs) $sender.FindForm().Close() })
+    $dialog.Controls.Add($cancel)
+    $dialog.AcceptButton = $save
+    $dialog.CancelButton = $cancel
+    $dialog.Add_Shown({ param($sender, $eventArgs) $sender.ActiveControl = $sender.Controls[1]; $sender.Controls[1].Focus() })
+    try { [void]$dialog.ShowDialog($form) } finally { $dialog.Dispose() }
+}
+
 function Update-StudioSnapshotDetails {
     if (-not $script:Ui.DetailTitle) { return }
     $entry = Get-StudioSelectedSnapshotEntry
@@ -2679,6 +2772,7 @@ function Update-StudioSnapshotDetails {
             $script:Ui.DetailPin.Enabled = $false
             $script:Ui.DetailPin.Text = (T 'BtnPin' 'Pin')
         }
+        if ($script:Ui.DetailNote) { $script:Ui.DetailNote.Enabled = $false }
         if ($script:Ui.SnapExport) { $script:Ui.SnapExport.Enabled = $false }
         return
     }
@@ -2749,9 +2843,21 @@ function Update-StudioSnapshotDetails {
         $script:Ui.DetailPin.Enabled = $true
         $script:Ui.DetailPin.Text = if ($isPinned) { (T 'BtnUnpin' 'Unpin') } else { (T 'BtnPin' 'Pin') }
     }
+    if ($script:Ui.DetailNote) { $script:Ui.DetailNote.Enabled = $true }
     if ($script:Ui.SnapExport) { $script:Ui.SnapExport.Enabled = $true }
 
     $lines = New-Object System.Collections.Generic.List[string]
+    try {
+        $noteTable = ConvertTo-SRNoteTable -Value $script:Config.snapshotNotes
+        $noteLeaf = Split-Path -Leaf $entry.Path
+        if ($noteTable.ContainsKey($noteLeaf)) {
+            $lines.Add((T 'DetailNote' 'NOTE'))
+            foreach ($noteLine in ([string]$noteTable[$noteLeaf] -split "`r?`n")) {
+                $lines.Add('  ' + $noteLine)
+            }
+            $lines.Add('')
+        }
+    } catch { }
 
     # What changed vs the previous snapshot: new/closed apps and tab movement.
     try {
@@ -2931,6 +3037,9 @@ function New-StudioSnapshotRowControl {
     $row.Tag = $Entry.Path
     $row.TimeText = Format-StudioDate -Date $Entry.CapturedAt -Format 'ddd  •  MMM d  •  HH:mm:ss'
     $row.MetaText = ((T 'SnapRowMeta' '{0} app(s)  •  {1} tab(s)  •  {2}') -f $stats.Apps, $stats.Tabs, (Format-StudioBytes -Bytes (Get-StudioSnapshotBytes -Entry $Entry)))
+    if ($script:SnapshotNotes -and $script:SnapshotNotes.ContainsKey((Split-Path -Leaf $Entry.Path))) {
+        $row.MetaText += '  •  ' + (T 'SnapRowNote' 'note')
+    }
     $row.AgeText = Format-StudioAge -CapturedAt $Entry.CapturedAt
     $row.Approximate = $approx
     $row.ApproxLabel = (T 'BadgeApprox' 'APPROX')
@@ -2987,6 +3096,9 @@ function Test-StudioSnapshotContent {
     # browser names, tab titles and URLs.
     $haystack = ($Entry.Path + ' ' + (Format-StudioDate -Date $Entry.CapturedAt -Format 'yyyy-MM-dd HH:mm') + ' ' + (Format-StudioDate -Date $Entry.CapturedAt -Format 'dddd')).ToLowerInvariant()
     if ($haystack.Contains($Needle)) { return $true }
+    if ($script:SnapshotNotes -and $script:SnapshotNotes.ContainsKey((Split-Path -Leaf $Entry.Path))) {
+        if (([string]$script:SnapshotNotes[(Split-Path -Leaf $Entry.Path)]).ToLowerInvariant().Contains($Needle)) { return $true }
+    }
 
     $snapshot = $Entry.Snapshot
     if ($null -eq $snapshot) { return $false }
@@ -3041,6 +3153,7 @@ function Refresh-StudioSnapshotRows {
             if (-not [string]::IsNullOrWhiteSpace([string]$pinned)) { [void]$script:SnapshotPinnedNames.Add([string]$pinned) }
         }
     } catch { }
+    $script:SnapshotNotes = ConvertTo-SRNoteTable -Value $script:Config.snapshotNotes
 
     $needle = ''
     if (-not [string]::IsNullOrWhiteSpace($search)) { $needle = $search.ToLowerInvariant() }
@@ -3263,6 +3376,146 @@ function New-StudioExclusionCard {
     return $card
 }
 
+function Render-StudioPrivacyFindings {
+    if (-not $script:Ui.PrivacyList) { return }
+    $list = $script:Ui.PrivacyList
+    $list.BeginUpdate()
+    try {
+        $list.Items.Clear()
+        $script:PrivacyMap = @{}
+        if (@($script:PrivacyFindings).Count -eq 0) {
+            [void]$list.Items.Add((T 'PrivacyScanEmpty' 'No sensitive apps or sites are currently captured.'))
+            if ($script:Ui.PrivacyExcludeSelected) { $script:Ui.PrivacyExcludeSelected.Enabled = $false }
+            if ($script:Ui.PrivacyExcludeAll) { $script:Ui.PrivacyExcludeAll.Enabled = $false }
+            if ($script:Ui.PrivacyStatus) {
+                $script:Ui.PrivacyStatus.Text = if ($script:PrivacyScanLoading) { (T 'BtnScanning' 'Scanning...') } else { (T 'PrivacyScanEmpty' 'No sensitive apps or sites are currently captured.') }
+                $script:Ui.PrivacyStatus.ForeColor = $script:P.Muted
+            }
+        } else {
+            $suffix = 0
+            foreach ($finding in @($script:PrivacyFindings)) {
+                if ($null -eq $finding) { continue }
+                $kind = if ([string]$finding.Kind -eq 'app') { (T 'PrivacyKindApp' 'App') } else { (T 'PrivacyKindSite' 'Site') }
+                $reason = T ([string]$finding.ReasonKey) ([string]$finding.Reason)
+                $display = '{0}  •  {1}  •  {2}' -f $kind, $reason, [string]$finding.Label
+                if ([int]$finding.MatchCount -gt 1) { $display += ('  ({0})' -f [int]$finding.MatchCount) }
+                if ($script:PrivacyMap.ContainsKey($display)) { $suffix++; $display += ('  #{0}' -f $suffix) }
+                $script:PrivacyMap[$display] = $finding
+                [void]$list.Items.Add($display)
+            }
+            if ($script:Ui.PrivacyExcludeSelected) { $script:Ui.PrivacyExcludeSelected.Enabled = $true }
+            if ($script:Ui.PrivacyExcludeAll) { $script:Ui.PrivacyExcludeAll.Enabled = $true }
+            if ($script:Ui.PrivacyStatus) {
+                $script:Ui.PrivacyStatus.Text = ((T 'PrivacyScanFound' '{0} suggestion(s) found.') -f @($script:PrivacyFindings).Count)
+                $script:Ui.PrivacyStatus.ForeColor = $script:P.Amber
+            }
+        }
+    } finally {
+        $list.EndUpdate()
+    }
+}
+
+function Add-StudioPrivacyExclusions {
+    param([object[]]$Findings = @())
+    $selected = @($Findings | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_.Pattern) })
+    if ($selected.Count -eq 0) { return }
+    $config = Get-SRConfig
+    $apps = @($config.excludeApps | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+    $urls = @($config.excludeUrls | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+    $added = 0
+    $applied = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($finding in $selected) {
+        $pattern = [string]$finding.Pattern
+        if ($pattern.Length -gt 512 -or [regex]::IsMatch($pattern, '[\x00-\x1F]')) { continue }
+        if ([string]$finding.Kind -eq 'app') {
+            if ($apps -notcontains $pattern) { $apps += $pattern; $added++ }
+        } else {
+            if ($urls -notcontains $pattern) { $urls += $pattern; $added++ }
+        }
+        [void]$applied.Add($pattern)
+    }
+    if ($added -eq 0) {
+        Show-StudioToast (T 'ToastPrivacyNone' 'Those exclusions are already in place.') $script:P.Muted
+        return
+    }
+    $config.excludeApps = @($apps)
+    $config.excludeUrls = @($urls)
+    Save-SRConfig -Config $config
+    $script:Config = Get-SRConfig
+    $script:PrivacyFindings = @($script:PrivacyFindings | Where-Object { -not $applied.Contains([string]$_.Pattern) })
+    Refresh-StudioExclusions
+    Render-StudioPrivacyFindings
+    Show-StudioToast ((T 'ToastPrivacyAdded' 'Added {0} exclusion(s).') -f $added) $script:P.Green
+}
+
+function Start-StudioPrivacyScan {
+    if ($script:PrivacyScanLoading) { return }
+    $script:PrivacyScanLoading = $true
+    $script:PrivacyFindings = @()
+    $script:PrivacyMap = @{}
+    if ($script:Ui.PrivacyScan) { $script:Ui.PrivacyScan.Enabled = $false }
+    if ($script:Ui.PrivacyExcludeSelected) { $script:Ui.PrivacyExcludeSelected.Enabled = $false }
+    if ($script:Ui.PrivacyExcludeAll) { $script:Ui.PrivacyExcludeAll.Enabled = $false }
+    if ($script:Ui.PrivacyStatus) {
+        $script:Ui.PrivacyStatus.Text = (T 'BtnScanning' 'Scanning...')
+        $script:Ui.PrivacyStatus.ForeColor = $script:P.Accent
+    }
+    if ($script:Ui.PrivacyList) {
+        $script:Ui.PrivacyList.Items.Clear()
+        [void]$script:Ui.PrivacyList.Items.Add((T 'BtnScanning' 'Scanning...'))
+    }
+    try {
+        Start-StudioWorker -Name 'PrivacyScan' -SharedRunspace -Script {
+            param($modulePath)
+            $ErrorActionPreference = 'Stop'
+            if (-not (Get-Module -Name SessionRecovery -ErrorAction SilentlyContinue)) {
+                Import-Module $modulePath -Force -ErrorAction Stop | Out-Null
+            }
+            Get-SRPrivacyFindings | ConvertTo-Json -Depth 8 -Compress
+        } -Arguments @($modulePath)
+    } catch {
+        $script:PrivacyScanLoading = $false
+        if ($script:Ui.PrivacyScan) { $script:Ui.PrivacyScan.Enabled = $true }
+        if ($script:Ui.PrivacyStatus) {
+            $script:Ui.PrivacyStatus.Text = ((T 'ToastPrivacyFailed' 'Privacy scan failed: {0}') -f $_.Exception.Message)
+            $script:Ui.PrivacyStatus.ForeColor = $script:P.Red
+        }
+        Render-StudioPrivacyFindings
+    }
+}
+
+function Complete-StudioPrivacyScanWorker {
+    param($Result)
+    $script:PrivacyScanLoading = $false
+    if ($script:Ui.PrivacyScan) { $script:Ui.PrivacyScan.Enabled = $true }
+    if (-not [string]::IsNullOrWhiteSpace([string]$Result.Error)) {
+        if ($script:Ui.PrivacyStatus) {
+            $script:Ui.PrivacyStatus.Text = ((T 'ToastPrivacyFailed' 'Privacy scan failed: {0}') -f [string]$Result.Error)
+            $script:Ui.PrivacyStatus.ForeColor = $script:P.Red
+        }
+        $script:PrivacyFindings = @()
+        Render-StudioPrivacyFindings
+        return
+    }
+    try {
+        $json = [string](@($Result.Output) | Select-Object -Last 1)
+        if ([string]::IsNullOrWhiteSpace($json)) { throw 'The privacy scan returned no data.' }
+        $report = $json | ConvertFrom-Json
+        $script:PrivacyFindings = @($report.Findings)
+        Render-StudioPrivacyFindings
+        if (@($script:PrivacyFindings).Count -eq 0) {
+            Show-StudioToast (T 'ToastPrivacyNone' 'No sensitive windows or tabs were found.') $script:P.Green
+        }
+    } catch {
+        $script:PrivacyFindings = @()
+        Render-StudioPrivacyFindings
+        if ($script:Ui.PrivacyStatus) {
+            $script:Ui.PrivacyStatus.Text = ((T 'ToastPrivacyFailed' 'Privacy scan failed: {0}') -f $_.Exception.Message)
+            $script:Ui.PrivacyStatus.ForeColor = $script:P.Red
+        }
+    }
+}
+
 $script:ExclusionPlaceholders = @{
     excludeApps    = (T 'ExclAppPlaceholder' 'e.g. steam.exe or *game*')
     excludeFolders = (T 'ExclFolderPlaceholder' 'e.g. C:\Projects\Private')
@@ -3284,6 +3537,77 @@ $exIntro = New-StudioLabel -Text (T 'ExclIntro' 'Exclusions keep private or nois
 $exIntro.AutoEllipsis = $true
 $exIntro.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 12)
 $exFlow.Controls.Add($exIntro)
+
+# ---------------------------------------------------------------------------
+# Privacy scan (lives on Exclusions so suggestions are one click from the
+# rules they modify)
+# ---------------------------------------------------------------------------
+
+$script:PrivacyCard = New-StudioCard -X 0 -Y 0 -Width 800 -Height 288 -Fill $script:P.Card -Border $script:P.BorderSoft -Radius 14
+$script:PrivacyCard.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 14)
+$privacyTitle = New-StudioLabel -Text (T 'PrivacyScanTitle' 'Privacy scan') -X 20 -Y 15 -Width 360 -Height 24 -Font $script:FontSemiboldLarge -Color $script:P.Text
+$script:PrivacyCard.Controls.Add($privacyTitle)
+$privacyDesc = New-StudioLabel -Text (T 'PrivacyScanDesc' 'Checks app names and browser tab URLs for sensitive categories, then suggests exclusions. Screenshots and page content are never inspected.') -X 20 -Y 40 -Width 760 -Height 34 -Font $script:FontBodySmall -Color $script:P.Muted
+$privacyDesc.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+$script:PrivacyCard.Controls.Add($privacyDesc)
+
+$privacyScan = New-StudioButton -Text (T 'BtnPrivacyScan' 'Scan now') -X 0 -Y 10 -Width 128 -Height 28 -Glyph ([string][char]0xE721)
+$privacyScan.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
+$privacyScan.Add_Click({ Start-StudioPrivacyScan })
+$script:PrivacyCard.Controls.Add($privacyScan)
+$script:Ui.PrivacyScan = $privacyScan
+
+$privacyList = New-Object System.Windows.Forms.ListBox
+$privacyList.Location = New-Object System.Drawing.Point(20, 80)
+$privacyList.Size = New-Object System.Drawing.Size(760, 110)
+$privacyList.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+$privacyList.BackColor = $script:P.CardAlt
+$privacyList.ForeColor = $script:P.Text
+$privacyList.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+$privacyList.Font = $script:FontBody
+$privacyList.IntegralHeight = $false
+$privacyList.SelectionMode = [System.Windows.Forms.SelectionMode]::One
+$script:PrivacyCard.Controls.Add($privacyList)
+$script:Ui.PrivacyList = $privacyList
+
+$privacyStatus = New-StudioLabel -Text (T 'PrivacyScanIdle' 'Run a scan to look for sensitive apps and sites in current windows and tabs.') -X 20 -Y 198 -Width 760 -Height 34 -Font $script:FontBodySmall -Color $script:P.Muted
+$privacyStatus.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+$script:PrivacyCard.Controls.Add($privacyStatus)
+$script:Ui.PrivacyStatus = $privacyStatus
+
+$privacyExcludeSelected = New-StudioButton -Text (T 'BtnExcludeSelected' 'Exclude selected') -X 0 -Y 244 -Width 196 -Height 32 -Glyph ''
+$privacyExcludeSelected.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Right
+$privacyExcludeSelected.Enabled = $false
+$privacyExcludeSelected.Add_Click({
+    $finding = $null
+    if ($script:Ui.PrivacyList -and $script:Ui.PrivacyList.SelectedIndex -ge 0) {
+        $finding = $script:PrivacyMap[[string]$script:Ui.PrivacyList.SelectedItem]
+    }
+    if ($null -ne $finding) { Add-StudioPrivacyExclusions -Findings @($finding) }
+})
+$script:PrivacyCard.Controls.Add($privacyExcludeSelected)
+$script:Ui.PrivacyExcludeSelected = $privacyExcludeSelected
+
+$privacyExcludeAll = New-StudioButton -Text (T 'BtnExcludeAll' 'Exclude all') -X 0 -Y 244 -Width 156 -Height 32 -Glyph ''
+$privacyExcludeAll.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Right
+$privacyExcludeAll.Enabled = $false
+$privacyExcludeAll.Add_Click({
+    Add-StudioPrivacyExclusions -Findings @($script:PrivacyFindings)
+})
+$script:PrivacyCard.Controls.Add($privacyExcludeAll)
+$script:Ui.PrivacyExcludeAll = $privacyExcludeAll
+
+$script:PrivacyCard.Add_Resize({
+    $script:Ui.PrivacyScan.Left = $script:PrivacyCard.ClientSize.Width - 20 - $script:Ui.PrivacyScan.Width
+    $right = $script:PrivacyCard.ClientSize.Width - 20
+    $script:Ui.PrivacyExcludeSelected.Left = $right - $script:Ui.PrivacyExcludeSelected.Width
+    $right = $script:Ui.PrivacyExcludeSelected.Left - 10
+    $script:Ui.PrivacyExcludeAll.Left = $right - $script:Ui.PrivacyExcludeAll.Width
+    $script:Ui.PrivacyStatus.Width = [Math]::Max(200, $script:PrivacyCard.ClientSize.Width - 40)
+    $script:Ui.PrivacyList.Width = [Math]::Max(220, $script:PrivacyCard.ClientSize.Width - 40)
+    $script:Ui.PrivacyList.Height = [Math]::Max(96, $script:PrivacyCard.ClientSize.Height - 178)
+})
+$exFlow.Controls.Add($script:PrivacyCard)
 
 $appCard = New-StudioExclusionCard -Title (T 'ExclApps' 'Applications') -Description (T 'ExclAppsDesc' 'Skip processes by name. Wildcards * and ? are supported.') -PropertyName 'excludeApps' -Placeholder $script:ExclusionPlaceholders['excludeApps']
 $exFlow.Controls.Add($appCard)
@@ -3311,6 +3635,7 @@ function Layout-StudioExclusions {
             $context.Input.Width = [Math]::Max(300, $width - $clearance)
         }
     }
+    if ($null -ne $script:PrivacyCard) { $script:PrivacyCard.Width = $width }
     $exIntro.Width = $width
     $exFooter.Width = $width
 }
@@ -3937,6 +4262,47 @@ $diagChecksCard.Controls.Add($diagCheckFlow)
 $script:Ui.DiagCheckFlow = $diagCheckFlow
 $script:DiagnosticRows = @()
 
+$diagInsightsCard = New-StudioSettingsCard -Title (T 'DiagInsights' 'Recovery insights') -Description (T 'DiagInsightsDesc' 'What your local snapshots contain. Nothing leaves this PC.') -Height 248 -WrapDescription
+$diagFlow.Controls.Add($diagInsightsCard)
+$diagInsightSummary = New-StudioLabel -Text (T 'InsightsLoading' 'Reading snapshots...') -X 20 -Y 72 -Width 760 -Height 38 -Font $script:FontBodySmall -Color $script:P.Text
+$diagInsightsCard.Controls.Add($diagInsightSummary)
+$script:Ui.InsightSummary = $diagInsightSummary
+$diagTopAppsTitle = New-StudioLabel -Text (T 'InsightsTopApps' 'MOST CAPTURED APPS') -X 20 -Y 118 -Width 360 -Height 18 -Font $script:FontMono -Color $script:P.Subtle
+$diagInsightsCard.Controls.Add($diagTopAppsTitle)
+$diagTopApps = New-StudioLabel -Text '' -X 20 -Y 140 -Width 360 -Height 80 -Font $script:FontBodySmall -Color $script:P.Text
+$diagInsightsCard.Controls.Add($diagTopApps)
+$script:Ui.InsightTopApps = $diagTopApps
+$diagTopSitesTitle = New-StudioLabel -Text (T 'InsightsTopSites' 'MOST CAPTURED SITES') -X 400 -Y 118 -Width 360 -Height 18 -Font $script:FontMono -Color $script:P.Subtle
+$diagInsightsCard.Controls.Add($diagTopSitesTitle)
+$diagTopSites = New-StudioLabel -Text '' -X 400 -Y 140 -Width 360 -Height 80 -Font $script:FontBodySmall -Color $script:P.Text
+$diagInsightsCard.Controls.Add($diagTopSites)
+$script:Ui.InsightTopSites = $diagTopSites
+
+function Update-StudioInsights {
+    if (-not $script:Ui.InsightSummary) { return }
+    try {
+        $insights = Get-SRRecoveryInsights -Entries $script:Snapshots -Config $script:Config
+        if ([int]$insights.SnapshotCount -eq 0) {
+            $script:Ui.InsightSummary.Text = (T 'InsightsNone' 'No snapshots yet. Capture one to start building local insights.')
+            $script:Ui.InsightSummary.ForeColor = $script:P.Muted
+            $script:Ui.InsightTopApps.Text = '—'
+            $script:Ui.InsightTopSites.Text = '—'
+            return
+        }
+        $script:Ui.InsightSummary.Text = ((T 'InsightsSummary' '{0} snapshot(s) over {1} day(s)  •  {2} app(s)  •  {3} site(s)  •  {4} pinned  •  {5} with notes  •  {6} imported  •  {7}') -f
+            [int]$insights.SnapshotCount, [double]$insights.SpanDays, [int]$insights.UniqueApps, [int]$insights.UniqueSites,
+            [int]$insights.PinnedCount, [int]$insights.NoteCount, [int]$insights.ImportedCount, (Format-StudioBytes -Bytes ([int64]$insights.StorageBytes)))
+        $script:Ui.InsightSummary.ForeColor = $script:P.Text
+        $appLines = @($insights.TopApps | ForEach-Object { '{0}  ({1})' -f $_.Name, $_.Count })
+        $script:Ui.InsightTopApps.Text = if ($appLines.Count -eq 0) { (T 'InsightsNoApps' 'No applications captured yet.') } else { $appLines -join "`r`n" }
+        $siteLines = @($insights.TopSites | ForEach-Object { '{0}  ({1})' -f $_.Name, $_.Count })
+        $script:Ui.InsightTopSites.Text = if ($siteLines.Count -eq 0) { (T 'InsightsNoSites' 'No browser sites captured yet.') } else { $siteLines -join "`r`n" }
+    } catch {
+        $script:Ui.InsightSummary.Text = [string]$_.Exception.Message
+        $script:Ui.InsightSummary.ForeColor = $script:P.Red
+    }
+}
+
 $diagBrowserCard = New-StudioSettingsCard -Title (T 'DiagBrowsers' 'Detected browsers') -Description (T 'DiagBrowsersDesc' 'Supported browsers found on this PC.') -Height 152
 $diagFlow.Controls.Add($diagBrowserCard)
 $diagBrowserLabel = New-StudioLabel -Text (T 'CheckingWord' 'Checking...') -X 20 -Y 70 -Width 760 -Height 64 -Font $script:FontBodySmall -Color $script:P.Muted
@@ -4168,6 +4534,7 @@ function Render-StudioDiagnostics {
             'Browsers: ' + (($browsers | ForEach-Object { $_.Name }) -join ', '),
             'Log: ' + $diag.LogPath
         ) -join "`r`n"
+        Update-StudioInsights
         Layout-StudioDiagnostics
     } catch {
         $script:Ui.DiagHealthTitle.Text = (T 'DiagFailed' 'Diagnostics could not run')
@@ -4289,7 +4656,7 @@ function Complete-StudioDiagnosticsWorker {
 
 function Layout-StudioDiagnostics {
     if (-not $script:Ui.DiagFlow) { return }
-    $width = Set-StudioVerticalStack -Panel $script:Ui.DiagFlow -Cards @($diagHealthCard, $diagChecksCard, $diagBrowserCard, $diagLogCard) -Padding 24 -BottomPadding 24 -MinWidth 620
+    $width = Set-StudioVerticalStack -Panel $script:Ui.DiagFlow -Cards @($diagHealthCard, $diagChecksCard, $diagInsightsCard, $diagBrowserCard, $diagLogCard) -Padding 24 -BottomPadding 24 -MinWidth 620
     # Ring at the right edge, with the Run checks button beneath it. The
     # headline and description may use the full width beside the ring, so
     # every translated headline still fits on one line. The detail summary
@@ -4318,6 +4685,15 @@ function Layout-StudioDiagnostics {
     }
     $diagHealthTitle.Top = 76
     $diagHealthDetail.Top = 140
+    $insightWidth = [Math]::Max(200, $width - 40)
+    $halfWidth = [Math]::Max(180, [int](($insightWidth - 16) / 2))
+    $diagInsightSummary.Width = $insightWidth
+    $diagTopAppsTitle.Width = $halfWidth
+    $diagTopApps.Width = $halfWidth
+    $diagTopSitesTitle.Left = 20 + $halfWidth + 16
+    $diagTopSitesTitle.Width = $halfWidth
+    $diagTopSites.Left = $diagTopSitesTitle.Left
+    $diagTopSites.Width = $halfWidth
     $diagCheckFlow.Width = [Math]::Max(200, $width - 40)
     $diagBrowserLabel.Width = [Math]::Max(200, $width - 40)
     $diagLogText.Width = [Math]::Max(200, $width - 40)
@@ -4328,6 +4704,155 @@ function Layout-StudioDiagnostics {
         $row.Width = [Math]::Max(200, $diagCheckFlow.ClientSize.Width - 8)
         Update-StudioDiagnosticRowLayout -Row $row
     }
+}
+
+# ---------------------------------------------------------------------------
+# Recovery Kit
+# ---------------------------------------------------------------------------
+
+function Update-StudioKitSummary {
+    if (-not $script:Ui.KitSummary) { return }
+    try {
+        $notes = ConvertTo-SRNoteTable -Value $script:Config.snapshotNotes
+        $noteCount = 0
+        $bytes = [int64]0
+        foreach ($entry in @($script:Snapshots)) {
+            if ($null -eq $entry) { continue }
+            if ($notes.ContainsKey((Split-Path -Leaf $entry.Path))) { $noteCount++ }
+            try { $bytes += (Get-Item -LiteralPath $entry.Path).Length } catch { }
+        }
+        $rules = @($script:Config.excludeApps).Count + @($script:Config.excludeFolders).Count + @($script:Config.excludeUrls).Count
+        $script:Ui.KitSummary.Text = ((T 'KitSummary' '{0} snapshot(s)  •  {1} note(s)  •  {2} exclusion rule(s)  •  {3}') -f @($script:Snapshots).Count, $noteCount, $rules, (Format-StudioBytes -Bytes $bytes))
+        $script:Ui.KitSummary.ForeColor = $script:P.Text
+    } catch {
+        $script:Ui.KitSummary.Text = [string]$_.Exception.Message
+        $script:Ui.KitSummary.ForeColor = $script:P.Red
+    }
+}
+
+function Export-StudioRecoveryKit {
+    if ($script:KitBusy) { return }
+    $dialog = New-Object System.Windows.Forms.SaveFileDialog
+    $dialog.Title = (T 'KitExportDialogTitle' 'Export recovery kit')
+    $dialog.Filter = (T 'KitFilter' 'Session Recovery kit (*.srkit)|*.srkit')
+    $dialog.FileName = ('session-recovery-{0}.srkit' -f (Get-Date -Format 'yyyyMMdd-HHmm'))
+    try {
+        if ($dialog.ShowDialog($form) -ne [System.Windows.Forms.DialogResult]::OK) { return }
+        $script:KitBusy = $true
+        [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::WaitCursor
+        $result = Export-SRRecoveryKit -Destination $dialog.FileName -AppVersion $script:AppVersion
+        Update-StudioKitSummary
+        if ($script:Ui.KitImportStatus) {
+            $script:Ui.KitImportStatus.Text = ((T 'KitExportedStatus' 'Exported {0} snapshot(s), {1} note(s) and {2} exclusion rule(s) to {3}.') -f $result.SnapshotCount, $result.NoteCount, $result.ExclusionCount, (Split-Path -Leaf $result.Path))
+            $script:Ui.KitImportStatus.ForeColor = $script:P.Green
+        }
+        Show-StudioToast ((T 'ToastKitExported' 'Recovery kit saved to {0}.') -f (Split-Path -Leaf $result.Path)) $script:P.Green
+    } catch {
+        if ($script:Ui.KitImportStatus) {
+            $script:Ui.KitImportStatus.Text = ((T 'ToastKitFailed' 'Recovery kit failed: {0}') -f $_.Exception.Message)
+            $script:Ui.KitImportStatus.ForeColor = $script:P.Red
+        }
+        Show-StudioToast ((T 'ToastKitFailed' 'Recovery kit failed: {0}') -f $_.Exception.Message) $script:P.Red
+    } finally {
+        [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
+        $script:KitBusy = $false
+        $dialog.Dispose()
+    }
+}
+
+function Import-StudioRecoveryKit {
+    if ($script:KitBusy) { return }
+    $dialog = New-Object System.Windows.Forms.OpenFileDialog
+    $dialog.Title = (T 'KitImportDialogTitle' 'Import recovery kit')
+    $dialog.Filter = (T 'KitFilter' 'Session Recovery kit (*.srkit)|*.srkit')
+    try {
+        if ($dialog.ShowDialog($form) -ne [System.Windows.Forms.DialogResult]::OK) { return }
+        $script:KitBusy = $true
+        [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::WaitCursor
+        $result = Import-SRRecoveryKit -Path $dialog.FileName
+        Refresh-StudioData
+        $message = (T 'KitImportedStatus' 'Imported {0} snapshot(s), {1} note(s) and {2} exclusion rule(s). Skipped {3}, encrypted {4}.') -f $result.Imported, $result.NotesAdded, $result.ExclusionsAdded, $result.Skipped, $result.EncryptedSkipped
+        if ($script:Ui.KitImportStatus) {
+            $script:Ui.KitImportStatus.Text = $message
+            $script:Ui.KitImportStatus.ForeColor = $script:P.Green
+        }
+        Show-StudioToast ((T 'ToastKitImported' 'Imported {0} snapshot(s) into this profile.') -f $result.Imported) $script:P.Green
+    } catch {
+        if ($script:Ui.KitImportStatus) {
+            $script:Ui.KitImportStatus.Text = ((T 'ToastKitFailed' 'Recovery kit failed: {0}') -f $_.Exception.Message)
+            $script:Ui.KitImportStatus.ForeColor = $script:P.Red
+        }
+        Show-StudioToast ((T 'ToastKitFailed' 'Recovery kit failed: {0}') -f $_.Exception.Message) $script:P.Red
+    } finally {
+        [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
+        $script:KitBusy = $false
+        $dialog.Dispose()
+    }
+}
+
+$recoveryKitPage = New-StudioPage -Name 'RecoveryKit'
+$kitFlow = New-Object System.Windows.Forms.Panel
+$kitFlow.Dock = [System.Windows.Forms.DockStyle]::Fill
+$kitFlow.Padding = New-Object System.Windows.Forms.Padding(24)
+$kitFlow.AutoScroll = $true
+$kitFlow.BackColor = $script:P.Bg
+$recoveryKitPage.Controls.Add($kitFlow)
+$script:Ui.KitFlow = $kitFlow
+
+$kitIntro = New-StudioLabel -Text (T 'KitIntro' 'Move snapshots, notes and exclusion rules between PCs with one portable file. Kits are processed locally.') -X 0 -Y 0 -Width 800 -Height 22 -Font $script:FontBody -Color $script:P.Muted
+$kitIntro.AutoEllipsis = $true
+$kitIntro.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 12)
+$kitFlow.Controls.Add($kitIntro)
+
+$kitExportCard = New-StudioSettingsCard -Title (T 'KitExportTitle' 'Create a kit') -Description (T 'KitExportDesc' 'Bundles every snapshot, snapshot note and exclusion rule into one .srkit file.') -Height 212 -WrapDescription
+$kitFlow.Controls.Add($kitExportCard)
+$kitSummary = New-StudioLabel -Text (T 'InsightsLoading' 'Reading snapshots...') -X 20 -Y 76 -Width 760 -Height 20 -Font $script:FontBodySmall -Color $script:P.Text
+$kitExportCard.Controls.Add($kitSummary)
+$script:Ui.KitSummary = $kitSummary
+$kitWarning = New-StudioLabel -Text (T 'KitWarning' 'Kits are plaintext unless snapshot encryption is enabled. Encrypted snapshots can only be read on the Windows account that created them, so the importer skips them.') -X 20 -Y 102 -Width 760 -Height 44 -Font $script:FontBodySmall -Color $script:P.Amber
+$kitWarning.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+$kitExportCard.Controls.Add($kitWarning)
+$kitExport = New-StudioButton -Text (T 'BtnKitExport' 'Export kit') -X 0 -Y 160 -Width 176 -Height 34 -Primary -Glyph ([string][char]0xE896)
+$kitExport.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Right
+$kitExport.Add_Click({ Export-StudioRecoveryKit })
+$kitExportCard.Controls.Add($kitExport)
+$script:Ui.KitExport = $kitExport
+
+$kitImportCard = New-StudioSettingsCard -Title (T 'KitImportTitle' 'Restore from a kit') -Description (T 'KitImportDesc' 'Merges kit contents into this profile. Existing settings and snapshots are never overwritten.') -Height 212 -WrapDescription
+$kitFlow.Controls.Add($kitImportCard)
+$kitImportHint = New-StudioLabel -Text (T 'KitImportHint' 'Imported snapshots are marked as untrusted and ask before they open programs.') -X 20 -Y 76 -Width 760 -Height 34 -Font $script:FontBodySmall -Color $script:P.Muted
+$kitImportHint.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+$kitImportCard.Controls.Add($kitImportHint)
+$kitImportStatus = New-StudioLabel -Text (T 'KitImportStatusIdle' 'No kit has been imported in this session.') -X 20 -Y 116 -Width 760 -Height 36 -Font $script:FontBodySmall -Color $script:P.Muted
+$kitImportStatus.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+$kitImportCard.Controls.Add($kitImportStatus)
+$script:Ui.KitImportStatus = $kitImportStatus
+$kitImport = New-StudioButton -Text (T 'BtnKitImport' 'Import kit') -X 0 -Y 160 -Width 176 -Height 34 -Glyph ([string][char]0xE8B5)
+$kitImport.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Right
+$kitImport.Add_Click({ Import-StudioRecoveryKit })
+$kitImportCard.Controls.Add($kitImport)
+$script:Ui.KitImport = $kitImport
+
+$kitFooter = New-StudioLabel -Text (T 'KitFooter' 'A kit never includes settings, logs, screenshots or browser page content.') -X 0 -Y 0 -Width 800 -Height 18 -Font $script:FontBodySmall -Color $script:P.Subtle
+$kitFooter.AutoEllipsis = $true
+$kitFooter.Margin = New-Object System.Windows.Forms.Padding(0, 2, 0, 0)
+$kitFlow.Controls.Add($kitFooter)
+
+function Layout-StudioRecoveryKit {
+    if (-not $script:Ui.KitFlow) { return }
+    $width = Set-StudioVerticalStack -Panel $script:Ui.KitFlow -Cards @($kitExportCard, $kitImportCard) -Padding 24 -BottomPadding 48 -MinWidth 620
+    $kitIntro.Left = 24
+    $kitIntro.Top = 0
+    $kitIntro.Width = $width
+    $kitFooter.Left = 24
+    $kitFooter.Top = $kitImportCard.Bottom + 8
+    $kitFooter.Width = $width
+    $kitSummary.Width = [Math]::Max(200, $width - 40)
+    $kitWarning.Width = [Math]::Max(200, $width - 40)
+    $kitImportHint.Width = [Math]::Max(200, $width - 40)
+    $kitImportStatus.Width = [Math]::Max(200, $width - 40)
+    $kitExport.Left = [Math]::Max(20, $width - 20 - $kitExport.Width)
+    $kitImport.Left = [Math]::Max(20, $width - 20 - $kitImport.Width)
 }
 
 # ---------------------------------------------------------------------------
@@ -4811,6 +5336,7 @@ function Layout-StudioPage {
         'Dashboard' { Layout-StudioDashboard }
         'Snapshots' { Layout-StudioSnapshots }
         'Exclusions' { Layout-StudioExclusions }
+        'RecoveryKit' { Layout-StudioRecoveryKit }
         'Settings' { Layout-StudioSettings }
         'Diagnostics' { Layout-StudioDiagnostics }
         'About' { Layout-StudioAbout }
@@ -4858,6 +5384,10 @@ function Show-StudioPage {
                 $pageTitle.Text = 'Exclusions'
                 $pageSubtitle.Text = 'Keep private or noisy windows out of your snapshots.'
             }
+            'RecoveryKit' {
+                $pageTitle.Text = 'Recovery Kit'
+                $pageSubtitle.Text = 'Move snapshots, notes and exclusion rules between PCs.'
+            }
             'Settings' {
                 $pageTitle.Text = 'Settings'
                 $pageSubtitle.Text = 'Tune capture, restore, startup and storage.'
@@ -4892,6 +5422,7 @@ function Show-StudioPage {
         'Dashboard' { if ($firstShow -or $script:DashboardDirty) { Refresh-StudioDashboard } }
         'Snapshots' { if ($firstShow -or $script:SnapshotsDirty) { Refresh-StudioSnapshotRows } }
         'Exclusions' { if ($firstShow -or $script:ExclusionsDirty) { Refresh-StudioExclusions } }
+        'RecoveryKit' { if ($firstShow) { Update-StudioKitSummary } }
         'Settings' { if (-not $script:SettingsLoaded) { Load-StudioSettings } }
         'Diagnostics' { if ($firstShow -or $script:DiagnosticsDirty) { Start-StudioDiagnosticsRefresh } }
     }
@@ -4899,7 +5430,7 @@ function Show-StudioPage {
         # WinForms can scroll a fresh AutoScroll panel to the last control
         # that was added or focused. Reset after the page's own loading code so
         # the first card is always the one users see when they open the page.
-        foreach ($scrollFlow in @($script:Ui.SettingsFlow, $script:Ui.DiagFlow, $script:Ui.AboutFlow)) {
+        foreach ($scrollFlow in @($script:Ui.SettingsFlow, $script:Ui.DiagFlow, $script:Ui.AboutFlow, $script:Ui.KitFlow)) {
             if ($null -ne $scrollFlow) {
                 $scrollFlow.AutoScrollPosition = New-Object System.Drawing.Point(0, 0)
             }
@@ -5159,7 +5690,7 @@ $form.Add_KeyDown({
     } elseif ($eventArgs.Control) {
         $map = @{
             'D1' = 'Dashboard'; 'D2' = 'Snapshots'; 'D3' = 'Exclusions';
-            'D4' = 'Settings'; 'D5' = 'Diagnostics'; 'D6' = 'About'
+            'D4' = 'Settings'; 'D5' = 'Diagnostics'; 'D6' = 'About'; 'D7' = 'RecoveryKit'
         }
         $keyName = [string]$eventArgs.KeyCode
         if ($map.ContainsKey($keyName)) {
@@ -5252,7 +5783,7 @@ if (-not [string]::IsNullOrWhiteSpace($RenderDir)) {
             $renderWaitMs = [Math]::Max(100, [int]$env:SESSIONRECOVERY_RENDER_MS)
         }
     } catch { }
-    foreach ($renderPage in @('Dashboard', 'Snapshots', 'Exclusions', 'Settings', 'Diagnostics', 'About')) {
+    foreach ($renderPage in @('Dashboard', 'Snapshots', 'Exclusions', 'RecoveryKit', 'Settings', 'Diagnostics', 'About')) {
         Show-StudioPage -Name $renderPage
         # The diagnostics page fills in from a background worker. Pump the
         # worker queue and wait for the loaded state so the audit covers the
@@ -5268,6 +5799,7 @@ if (-not [string]::IsNullOrWhiteSpace($RenderDir)) {
         if ([string]$env:SESSIONRECOVERY_RENDER_SCROLL -eq 'bottom') {
             $scrollFlow = switch ($renderPage) {
                 'Settings' { $script:Ui.SettingsFlow }
+                'RecoveryKit' { $script:Ui.KitFlow }
                 'Diagnostics' { $script:Ui.DiagFlow }
                 'About' { $script:Ui.AboutFlow }
                 default { $null }

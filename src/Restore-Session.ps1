@@ -914,7 +914,7 @@ $brandName.Location = New-Object System.Drawing.Point(80, 18)
 $header.Controls.Add($brandName)
 
 $brandMeta = New-Object System.Windows.Forms.Label
-$brandMeta.Text = 'LOCAL SNAPSHOTS  /  V2.6.2'
+$brandMeta.Text = 'LOCAL SNAPSHOTS  /  V2.7.0'
 $brandMeta.Font = New-Object System.Drawing.Font('Consolas', 7.5)
 $brandMeta.ForeColor = $rsMuted
 $brandMeta.AutoSize = $true
