@@ -52,8 +52,8 @@ jobs:
             if ($errors.Count -gt 0) {
               $failed = $true
               Write-Host "::error file=$file::Parse errors found"
-              foreach ($error in $errors) {
-                Write-Host ("  line {0}: {1}" -f $error.Extent.StartLineNumber, $error.Message)
+              foreach ($parseError in $errors) {
+                Write-Host ("  line {0}: {1}" -f $parseError.Extent.StartLineNumber, $parseError.Message)
               }
             } else {
               Write-Host "OK $file"
