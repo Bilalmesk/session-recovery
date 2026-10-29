@@ -37,7 +37,7 @@ Session Recovery snapshots your desktop every few minutes and offers to restore 
 | 📊 **Recovery insights** | Local counts for snapshots, apps, sites, pins, notes and storage |
 | 💤 **Hibernate checkpoints** | Pins the last three snapshots taken just before sleep or hibernate, and offers **Hibernate with checkpoint** from the tray or `--hibernate` |
 | 📦 **Export / import** | Back up snapshots as JSON or move them to another PC |
-| 🖥️ **Native tray + Studio** | Dashboard, Snapshots, Exclusions, Recovery Kit, Settings, Diagnostics and About; dark **Aurora** and light **Daylight** themes, no console windows |
+| 🖥️ **Native tray + Studio** | Dashboard, Snapshots, Exclusions, Recovery Kit, Settings, Diagnostics and About; 14 dark and light colour themes, no console windows |
 
 ## 📥 Install
 
@@ -88,6 +88,8 @@ Re-running the installer replaces program files and preserves snapshots and most
 **Automatic:** after a crash, a restore window opens 20–30 seconds after sign-in using the newest pre-logon snapshot. Untick what you don't want, pick a tab mode, and click **Restore selected** (or **Skip**).
 
 **Manual:** **Start Menu → Session Recovery → Restore Session**, or pick a snapshot in the Studio's **Snapshots** page. Manual restore works any time and shows live progress with per-item results.
+
+The restore window uses the same layout, cards and colour theme as the Studio, and its labels are translated into all nine languages, including right-to-left Arabic.
 
 ### Browser tab modes
 
@@ -185,7 +187,7 @@ Use the Studio **Settings** page, or edit `%LOCALAPPDATA%\SessionRecovery\config
 | `showNotifications` | `true` | Tray balloons and toasts |
 | `startWithWindows` | `true` | Create the Startup shortcut |
 | `desktopShortcut` | `true` | Create the desktop shortcut |
-| `theme` | `Aurora` | `Aurora` (dark) or `Daylight` (light) |
+| `theme` | `Aurora` | `Aurora`, `Daylight`, `Midnight`, `Forest`, `Ember`, `Neon`, `Sakura`, `Paper`, `Synthwave`, `Voltage`, `Frostbite`, `Magma`, `Aqua` or `Solar` |
 | `encryptSnapshots` | `false` | Seal snapshots with DPAPI for this Windows user |
 | `compressSnapshots` | `false` | Write gzip-compressed snapshots |
 | `redactUrls` | `true` | Strip URL query strings and fragments before writing |
