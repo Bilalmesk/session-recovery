@@ -1391,7 +1391,8 @@ $list.Add_KeyDown({
     }
 })
 
-if ($script:ThemeKey -notin @('Daylight', 'Solar')) {
+$themeEntry = (Get-StudioThemeCatalog)[$script:ThemeKey]
+if ($null -ne $themeEntry -and [bool]$themeEntry.Dark) {
     try { [void][SRRestoreThemeNative]::SetWindowTheme($list.Handle, 'DarkMode_Explorer', $null) } catch { }
 }
 
