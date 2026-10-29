@@ -19,7 +19,7 @@
           token or a key vault to satisfy CA rules.)
 
     Usage:
-      powershell -File .\installer\Sign-Release.ps1 -Path .\dist\SessionRecovery-2.7.0.msi
+      powershell -File .\installer\Sign-Release.ps1 -Path .\dist\SessionRecovery-2.8.0.msi
       powershell -File .\installer\Sign-Release.ps1 -Path .\dist\SessionRecovery-*.msi
 
     Exit codes: 0 signed, 1 failure, 2 no signing configuration found.

@@ -1184,6 +1184,8 @@ function Get-SRDefaultConfig {
         compressSnapshots       = $false
         encryptSnapshots        = $false
         eventSnapshots          = $true
+        hibernateGuard          = $true
+        keepHibernateCheckpoints = 3
         captureDevWorkspaces    = $true
         restoreVirtualDesktops  = $true
         launchOrder             = @()
@@ -4314,6 +4316,7 @@ function Save-SRWorkspace {
 }
 
 function New-SRSnapshot {
+    param([string]$Reason = '')
     $windows = @([SessionRecovery.WindowEnumerator]::GetVisibleWindows())
     $processMap = Get-SRProcessMap
     $config = Get-SRConfig
@@ -4486,6 +4489,9 @@ function New-SRSnapshot {
             tabs     = $tabCount
         }
     }
+    if (-not [string]::IsNullOrWhiteSpace($Reason)) {
+        $snapshot | Add-Member -NotePropertyName reason -NotePropertyValue ([string]$Reason).Trim().ToLowerInvariant() -Force
+    }
     $snapshot | Add-Member -NotePropertyName stateHash -NotePropertyValue (Get-SRSnapshotStateHash -Snapshot $snapshot) -Force
     return $snapshot
 }
@@ -4616,7 +4622,10 @@ $script:SRScreens = $null
 $script:SRForegroundChecked = $null
 
 function Save-SRSnapshot {
-    param([switch]$Force)
+    param(
+        [switch]$Force,
+        [string]$Reason = ''
+    )
     $config = Get-SRConfig
     if (-not (Test-Path -LiteralPath $script:SRSnapshotDir)) {
         New-Item -ItemType Directory -Path $script:SRSnapshotDir -Force | Out-Null
@@ -4658,7 +4667,7 @@ function Save-SRSnapshot {
     }
 
     try {
-        $snapshot = New-SRSnapshot
+        $snapshot = New-SRSnapshot -Reason $Reason
         $captured = [DateTimeOffset]::Parse([string]$snapshot.capturedAt, [System.Globalization.CultureInfo]::InvariantCulture)
 
         # Change detection: when nothing relevant changed since the newest
@@ -4726,7 +4735,17 @@ function Save-SRSnapshot {
         if ($encrypt) {
             $payload = Protect-SRSnapshotBytes -Bytes $payload
         }
-        [System.IO.File]::WriteAllBytes($path, $payload)
+        # Write a hidden temp file first: a suspend or power cut during the
+        # write must never leave a half-written snapshot under a real name.
+        $tempPath = Join-Path $script:SRSnapshotDir ('.' + $fileName + '.tmp')
+        try {
+            [System.IO.File]::WriteAllBytes($tempPath, $payload)
+            if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+            [System.IO.File]::Move($tempPath, $path)
+        } catch {
+            try { Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue } catch { }
+            throw
+        }
         Remove-OldSRSnapshots -Keep ([int]$config.keepSnapshots) -MaxAgeDays ([int]$config.keepSnapshotDays) -Pinned @($config.pinnedSnapshots)
         Write-SRLog -Message ("Snapshot saved: {0} ({1} apps, {2} folders, {3} browsers, {4} tabs)" -f $path, $snapshot.stats.apps, $snapshot.stats.folders, $snapshot.stats.browsers, $snapshot.stats.tabs)
         try {
@@ -4757,6 +4776,114 @@ function Save-SRSnapshot {
         $lock.Dispose()
         try { Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue } catch { }
     }
+}
+
+# ---------------------------------------------------------------------------
+# Hibernate checkpoint
+# ---------------------------------------------------------------------------
+
+function Test-SRHibernateGuardEnabled {
+    # The guard is opt-out: older config files do not have the property yet,
+    # so a missing value means "on".
+    try {
+        $config = Get-SRConfig
+        $property = $config.PSObject.Properties['hibernateGuard']
+        if ($null -ne $property) { return [bool]$property.Value }
+    } catch { }
+    return $true
+}
+
+function Invoke-SRHibernateSuspend {
+    # Isolated so the hibernation command can be replaced in tests without
+    # ever suspending the machine running them.
+    $shutdown = Join-Path $env:SystemRoot 'System32\shutdown.exe'
+    if (-not (Test-Path -LiteralPath $shutdown)) { $shutdown = 'shutdown.exe' }
+    $process = $null
+    try {
+        $process = Start-Process -FilePath $shutdown -ArgumentList '/h' -WindowStyle Hidden -PassThru -Wait -ErrorAction Stop
+    } catch {
+        throw ("Windows could not start the hibernate command: {0}" -f $_.Exception.Message)
+    }
+    if ($null -ne $process -and $process.ExitCode -ne 0) {
+        throw ("Windows rejected the hibernate request (exit code {0}). Hibernation may be disabled in Power Options." -f $process.ExitCode)
+    }
+}
+
+function Save-SRHibernateSnapshot {
+    [CmdletBinding()]
+    param([switch]$Force)
+
+    # Automatic suspend handlers respect the setting; explicit user actions
+    # pass -Force because they asked for a checkpoint.
+    if (-not $Force -and -not (Test-SRHibernateGuardEnabled)) {
+        Write-SRLog -Level DEBUG -Message 'Hibernate checkpoint skipped: hibernateGuard is off.'
+        return $null
+    }
+
+    $path = Save-SRSnapshot -Force -Reason 'hibernate'
+    if ([string]::IsNullOrWhiteSpace([string]$path)) {
+        Write-SRLog -Level WARN -Message 'Hibernate checkpoint was not saved because another snapshot is running.'
+        return $null
+    }
+
+    $config = Get-SRConfig
+    $keep = 3
+    try {
+        $keepProperty = $config.PSObject.Properties['keepHibernateCheckpoints']
+        if ($null -ne $keepProperty) { $keep = [int]$keepProperty.Value }
+    } catch { $keep = 3 }
+    if ($keep -lt 1) { $keep = 1 }
+    if ($keep -gt 50) { $keep = 50 }
+
+    $name = Split-Path -Leaf $path
+    $pins = @($config.pinnedSnapshots | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ })
+    if ($pins -notcontains $name) { $pins = @($pins + $name) }
+
+    # Checkpoints are identified by their snapshot reason, never by the pin
+    # list, so a user-pinned normal snapshot is never unpinned by this trim.
+    $checkpoints = New-Object System.Collections.Generic.List[string]
+    foreach ($file in @(Get-SRSnapshotFiles)) {
+        try {
+            $candidate = Read-SRSnapshotFile -Path $file.FullName
+            $reasonProperty = $candidate.PSObject.Properties['reason']
+            if ($null -ne $reasonProperty -and [string]$reasonProperty.Value -eq 'hibernate') {
+                $checkpoints.Add($file.Name)
+            }
+        } catch { }
+    }
+
+    $expired = @($checkpoints | Select-Object -Skip $keep)
+    if ($expired.Count -gt 0) {
+        $pins = @($pins | Where-Object { $expired -notcontains [string]$_ })
+    }
+
+    $config.pinnedSnapshots = @($pins)
+    Save-SRConfig -Config $config
+    Write-SRLog -Message ("Hibernate checkpoint saved: {0} (keeping {1})" -f $path, $keep)
+    return $path
+}
+
+function Invoke-SRHibernate {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param()
+
+    if (-not $PSCmdlet.ShouldProcess('this PC', 'Save a recovery checkpoint, then hibernate')) {
+        return $null
+    }
+
+    $path = $null
+    try {
+        $path = Save-SRHibernateSnapshot -Force
+    } catch {
+        throw ("Hibernation cancelled; the checkpoint could not be saved: {0}" -f $_.Exception.Message)
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$path)) {
+        throw 'Hibernation cancelled; the checkpoint could not be saved.'
+    }
+
+    Write-SRLog -Message ("Hibernate requested after checkpoint: {0}" -f $path)
+    Invoke-SRHibernateSuspend
+    return $path
 }
 
 function Get-SRSnapshots {

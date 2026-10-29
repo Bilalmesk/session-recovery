@@ -361,7 +361,7 @@ function Get-SRStrings {
         AboutLocalDesc  = 'No account, no cloud service and no telemetry.'
         AboutDataTitle  = 'Data & support'
         AboutDataDesc   = 'Session Recovery is private and local. These are the only places it writes.'
-        WhatsNewDesc    = 'Fixed text layout in every language, and closed privacy gaps.'
+        WhatsNewDesc    = 'Hibernate checkpoints, plus the 2.7 notes, privacy scan and Recovery Kit.'
         AboutVersionLine = 'You are running version {0}. Check for a newer build without leaving the Studio.'
         BtnCheckUpdates = 'Check for updates'
         BtnDownloadInstall = 'Download and install'
@@ -415,7 +415,7 @@ function Get-SRStrings {
         BtnViewGithub = 'View on GitHub'
         BtnCopyDiagnostics = 'Copy diagnostics'
         AboutLocalText = 'Snapshots are plain JSON files in your Windows profile. Browser tabs are read locally, and restore opens apps and folders without rewriting files.  The background app keeps capturing while you work. Everything can be inspected, backed up or deleted from this Studio.'
-        AboutWhatsNewText = "• Text no longer runs into other controls: labels ellipsize and badges resize in all nine languages.`r`n• Snapshots can be sealed with DPAPI encryption; gzip files now respect retention.`r`n• Virtual desktops are remembered per window and restored when possible.`r`n• Windows from unplugged monitors are mapped onto the current layout, not clamped.`r`n• PuTTY sessions and Remote Desktop targets reconnect directly on restore.`r`n• mpv reports exact playback positions through its IPC pipe.`r`n• Launch ordering rules, a restore preview, snapshot compare and a control pipe.`r`n• Pester tests and GitHub Actions CI build and verify every change."
+        AboutWhatsNewText = "• Hibernate checkpoints keep the latest three snapshots taken before sleep or hibernate pinned.`r`n• Hibernate with checkpoint in the tray, and SessionRecovery.exe --hibernate, save first and cancel if the checkpoint fails.`r`n• A checkpoint is a workspace snapshot, not a RAM image; unsaved work is still not recovered.`r`n• Hibernate checkpoints are labelled in the snapshot row and detail view.`r`n• Settings now has a Checkpoint before sleep or hibernate toggle.`r`n• Snapshot notes, the privacy scan, Recovery Kit and local insights from 2.7 remain available.`r`n• Pester tests and GitHub Actions build and verify every change."
         AboutDataDescLong = 'Session Recovery is private and local. These are the only places it writes.'
         AboutVersionLabel = 'VERSION'
         AboutDataLabelData = 'DATA'
@@ -561,6 +561,16 @@ function Get-SRStrings {
         InsightsNone = 'No snapshots yet. Capture one to start building local insights.'
         InsightsNoApps = 'No applications captured yet.'
         InsightsNoSites = 'No browser sites captured yet.'
+        # 2.8: hibernate checkpoint guard.
+        SetHibernateGuard = 'Checkpoint before sleep or hibernate'
+        HibernateGuardHint = 'Saves and pins a snapshot before Windows suspends, keeping the latest three. Automatic pinning only; unsaved work is still not captured.'
+        TrayHibernate = 'Hibernate with checkpoint'
+        HibernateConfirmTitle = 'Hibernate with checkpoint'
+        HibernateConfirmText = 'Session Recovery will save and pin a recovery snapshot, then hibernate this PC. Unsaved work can still be lost if an app cannot reopen it. Continue?'
+        TrayHibernateSaving = 'Saving a recovery checkpoint, then hibernating...'
+        HibernateFailed = 'Could not hibernate: {0}'
+        SnapRowHibernate = 'hibernate'
+        DetailHibernateSuffix = '  •  hibernate checkpoint'
     }
 
     $lang = ([string]$Language).ToLowerInvariant().Trim()
@@ -2389,6 +2399,17 @@ function Get-SRStrings {
             InsightsNone = 'لا توجد لقطات بعد. التقط واحدة لبدء الرؤى المحلية.'
             InsightsNoApps = 'لم تُلتقط تطبيقات بعد.'
             InsightsNoSites = 'لم تُلتقط مواقع متصفح بعد.'
+            SetHibernateGuard = 'حفظ نقطة استرداد قبل النوم أو السبات'
+            HibernateGuardHint = 'يحفظ لقطة ويثبتها قبل تعليق Windows، ويحتفظ بأحدث ثلاث. التثبيت تلقائي فقط؛ العمل غير المحفوظ لا يُلتقط.'
+            TrayHibernate = 'السبات مع نقطة استرداد'
+            HibernateConfirmTitle = 'السبات مع نقطة استرداد'
+            HibernateConfirmText = 'سيحفظ Session Recovery لقطة استرداد ويثبتها ثم يُسبت هذا الجهاز. قد يضيع العمل غير المحفوظ إذا لم يتمكن التطبيق من إعادة فتحه. هل تريد المتابعة؟'
+            TrayHibernateSaving = 'جارٍ حفظ نقطة الاسترداد ثم السبات...'
+            HibernateFailed = 'تعذّر السبات: {0}'
+            SnapRowHibernate = 'سبات'
+            DetailHibernateSuffix = '  •  نقطة استرداد السبات'
+            WhatsNewDesc = 'نقاط استرداد السبات، مع ملاحظات 2.7 وفحص الخصوصية ومجموعة الاستعادة.'
+            AboutWhatsNewText = "• تحتفظ نقاط استرداد السبات بأحدث ثلاث لقطات قبل النوم أو السبات مثبتة.`r`n• «السبات مع نقطة استرداد» في الدرج وSessionRecovery.exe --hibernate يحفظان أولًا ويلغيان إذا فشل الحفظ.`r`n• نقطة الاسترداد لقطة مساحة عمل وليست صورة ذاكرة؛ العمل غير المحفوظ لا يُستعاد.`r`n• تُوسم نقاط استرداد السبات في صف اللقطة وصفحة التفاصيل.`r`n• أضيف خيار «حفظ نقطة استرداد قبل النوم أو السبات» إلى الإعدادات.`r`n• تبقى ملاحظات اللقطات وفحص الخصوصية ومجموعة الاستعادة والرؤى من 2.7 متاحة.`r`n• تتحقق اختبارات Pester وGitHub Actions من كل تغيير."
         }
         fr = @{
             NavRecoveryKit = 'Kit de secours'
@@ -2453,6 +2474,17 @@ function Get-SRStrings {
             InsightsNone = 'Aucun instantané. Capturez-en un pour commencer.'
             InsightsNoApps = 'Aucune application capturée.'
             InsightsNoSites = 'Aucun site capturé.'
+            SetHibernateGuard = 'Point de contrôle avant veille ou hibernation'
+            HibernateGuardHint = "Enregistre et épingle un instantané avant la suspension Windows, en conservant les trois derniers. Épinglage automatique uniquement ; le travail non enregistré n’est pas capturé."
+            TrayHibernate = 'Hiberner avec point de contrôle'
+            HibernateConfirmTitle = 'Hiberner avec point de contrôle'
+            HibernateConfirmText = 'Session Recovery va enregistrer et épingler un instantané de secours, puis hiberner ce PC. Le travail non enregistré peut encore être perdu si une application ne peut pas rouvrir son fichier. Continuer ?'
+            TrayHibernateSaving = 'Enregistrement du point de contrôle, puis hibernation...'
+            HibernateFailed = "Impossible d’hiberner : {0}"
+            SnapRowHibernate = 'hibernation'
+            DetailHibernateSuffix = "  •  point de contrôle d’hibernation"
+            WhatsNewDesc = "Points de contrôle d’hibernation, plus les notes, l’analyse de confidentialité et le kit de secours de 2.7."
+            AboutWhatsNewText = "• Les points de contrôle d’hibernation conservent les trois derniers instantanés pris avant la veille ou l’hibernation.`r`n• « Hiberner avec point de contrôle » et SessionRecovery.exe --hibernate enregistrent d’abord et annulent si l’enregistrement échoue.`r`n• Un point de contrôle est un instantané d’espace de travail, pas une image de la RAM ; le travail non enregistré n’est pas récupéré.`r`n• Les points de contrôle d’hibernation sont indiqués dans la ligne et le détail de l’instantané.`r`n• Les réglages proposent désormais « Point de contrôle avant veille ou hibernation ».`r`n• Les notes, l’analyse de confidentialité, le kit de secours et les analyses locales de 2.7 restent disponibles.`r`n• Les tests Pester et GitHub Actions compilent et vérifient chaque changement."
         }
         es = @{
             NavRecoveryKit = 'Kit de rescate'
@@ -2517,6 +2549,17 @@ function Get-SRStrings {
             InsightsNone = 'Aún no hay instantáneas. Captura una para empezar.'
             InsightsNoApps = 'Aún no se capturaron aplicaciones.'
             InsightsNoSites = 'Aún no se capturaron sitios.'
+            SetHibernateGuard = 'Punto de control antes de suspender o hibernar'
+            HibernateGuardHint = 'Guarda y fija una instantánea antes de que Windows se suspenda, conservando las tres más recientes. Solo fijación automática; el trabajo sin guardar no se captura.'
+            TrayHibernate = 'Hibernar con punto de control'
+            HibernateConfirmTitle = 'Hibernar con punto de control'
+            HibernateConfirmText = 'Session Recovery guardará y fijará una instantánea de recuperación y luego hibernará este PC. El trabajo sin guardar aún puede perderse si una aplicación no puede reabrirlo. ¿Continuar?'
+            TrayHibernateSaving = 'Guardando el punto de control y luego hibernando...'
+            HibernateFailed = 'No se pudo hibernar: {0}'
+            SnapRowHibernate = 'hibernación'
+            DetailHibernateSuffix = '  •  punto de control de hibernación'
+            WhatsNewDesc = 'Puntos de control de hibernación, además de las notas, el análisis de privacidad y el kit de 2.7.'
+            AboutWhatsNewText = "• Los puntos de control de hibernación mantienen fijadas las tres últimas instantáneas tomadas antes de suspender o hibernar.`r`n• «Hibernar con punto de control» y SessionRecovery.exe --hibernate guardan primero y cancelan si falla el guardado.`r`n• Un punto de control es una instantánea del espacio de trabajo, no una imagen de la RAM; el trabajo sin guardar no se recupera.`r`n• Los puntos de control de hibernación se etiquetan en la fila y el detalle de la instantánea.`r`n• Ajustes incluye ahora «Punto de control antes de suspender o hibernar».`r`n• Las notas, el análisis de privacidad, el kit de recuperación y las ideas locales de 2.7 siguen disponibles.`r`n• Las pruebas Pester y GitHub Actions compilan y verifican cada cambio."
         }
         de = @{
             NavRecoveryKit = 'Notfallkit'
@@ -2581,6 +2624,17 @@ function Get-SRStrings {
             InsightsNone = 'Noch keine Snapshots. Erfassen Sie einen für lokale Einblicke.'
             InsightsNoApps = 'Noch keine Apps erfasst.'
             InsightsNoSites = 'Noch keine Websites erfasst.'
+            SetHibernateGuard = 'Prüfpunkt vor Ruhezustand oder Standby'
+            HibernateGuardHint = 'Speichert und fixiert einen Schnappschuss, bevor Windows den Ruhezustand startet, und behält die letzten drei. Nur automatisches Fixieren; ungespeicherte Arbeit wird weiterhin nicht erfasst.'
+            TrayHibernate = 'Mit Prüfpunkt in den Ruhezustand'
+            HibernateConfirmTitle = 'Mit Prüfpunkt in den Ruhezustand'
+            HibernateConfirmText = 'Session Recovery speichert und fixiert einen Wiederherstellungs-Schnappschuss und versetzt diesen PC dann in den Ruhezustand. Ungespeicherte Arbeit kann verloren gehen, wenn eine App sie nicht wieder öffnen kann. Fortfahren?'
+            TrayHibernateSaving = 'Prüfpunkt wird gespeichert, dann Ruhezustand...'
+            HibernateFailed = 'Ruhezustand nicht möglich: {0}'
+            SnapRowHibernate = 'Ruhezustand'
+            DetailHibernateSuffix = '  •  Ruhezustand-Prüfpunkt'
+            WhatsNewDesc = 'Ruhezustand-Prüfpunkte sowie Notizen, Datenschutzscan und Recovery-Kit aus 2.7.'
+            AboutWhatsNewText = "• Ruhezustand-Prüfpunkte halten die letzten drei Schnappschüsse vor Standby oder Ruhezustand fixiert.`r`n• »Mit Prüfpunkt in den Ruhezustand« und SessionRecovery.exe --hibernate speichern zuerst und brechen bei einem Fehler ab.`r`n• Ein Prüfpunkt ist ein Arbeitsbereichs-Schnappschuss, kein RAM-Abbild; ungespeicherte Arbeit wird nicht wiederhergestellt.`r`n• Ruhezustand-Prüfpunkte sind in der Snapshot-Zeile und der Detailansicht gekennzeichnet.`r`n• In den Einstellungen gibt es jetzt »Prüfpunkt vor Ruhezustand oder Standby«.`r`n• Notizen, Datenschutzscan, Recovery-Kit und lokale Einblicke aus 2.7 bleiben verfügbar.`r`n• Pester-Tests und GitHub Actions bauen und prüfen jede Änderung."
         }
         pt = @{
             NavRecoveryKit = 'Kit de recuperação'
@@ -2645,6 +2699,17 @@ function Get-SRStrings {
             InsightsNone = 'Ainda não há instantâneos. Capture um para começar.'
             InsightsNoApps = 'Ainda não foram capturadas aplicações.'
             InsightsNoSites = 'Ainda não foram capturados sites.'
+            SetHibernateGuard = 'Ponto de verificação antes de suspender ou hibernar'
+            HibernateGuardHint = 'Guarda e fixa um instantâneo antes de o Windows suspender, mantendo os três mais recentes. Apenas fixação automática; trabalho não guardado continua sem ser capturado.'
+            TrayHibernate = 'Hibernar com ponto de verificação'
+            HibernateConfirmTitle = 'Hibernar com ponto de verificação'
+            HibernateConfirmText = 'O Session Recovery vai guardar e fixar um instantâneo de recuperação e, em seguida, hibernar este PC. O trabalho não guardado ainda pode perder-se se uma aplicação não o conseguir reabrir. Continuar?'
+            TrayHibernateSaving = 'A guardar o ponto de verificação e a hibernar...'
+            HibernateFailed = 'Não foi possível hibernar: {0}'
+            SnapRowHibernate = 'hibernação'
+            DetailHibernateSuffix = '  •  ponto de verificação de hibernação'
+            WhatsNewDesc = 'Pontos de verificação de hibernação, além das notas, análise de privacidade e kit de 2.7.'
+            AboutWhatsNewText = "• Os pontos de verificação de hibernação mantêm fixos os três instantâneos mais recentes tirados antes de suspender ou hibernar.`r`n• «Hibernar com ponto de verificação» e SessionRecovery.exe --hibernate guardam primeiro e cancelam se a gravação falhar.`r`n• Um ponto de verificação é um instantâneo do ambiente de trabalho, não uma imagem da RAM; o trabalho não guardado não é recuperado.`r`n• Os pontos de verificação de hibernação são identificados na linha e no detalhe do instantâneo.`r`n• As definições incluem agora «Ponto de verificação antes de suspender ou hibernar».`r`n• As notas, a análise de privacidade, o kit de recuperação e as informações locais de 2.7 continuam disponíveis.`r`n• Os testes Pester e o GitHub Actions compilam e verificam cada alteração."
         }
         ru = @{
             NavRecoveryKit = 'Комплект'
@@ -2709,6 +2774,17 @@ function Get-SRStrings {
             InsightsNone = 'Снимков пока нет. Сделайте первый для локальной аналитики.'
             InsightsNoApps = 'Приложения ещё не захвачены.'
             InsightsNoSites = 'Сайты ещё не захвачены.'
+            SetHibernateGuard = 'Контрольная точка перед сном или гибернацией'
+            HibernateGuardHint = 'Сохраняет и закрепляет снимок перед приостановкой Windows, оставляя три последних. Закрепление выполняется автоматически; несохранённая работа по-прежнему не захватывается.'
+            TrayHibernate = 'Гибернация с контрольной точкой'
+            HibernateConfirmTitle = 'Гибернация с контрольной точкой'
+            HibernateConfirmText = 'Session Recovery сохранит и закрепит снимок восстановления, а затем переведёт этот компьютер в гибернацию. Несохранённая работа всё ещё может быть потеряна, если приложение не сможет её восстановить. Продолжить?'
+            TrayHibernateSaving = 'Сохранение контрольной точки, затем гибернация...'
+            HibernateFailed = 'Не удалось перейти в гибернацию: {0}'
+            SnapRowHibernate = 'гибернация'
+            DetailHibernateSuffix = '  •  контрольная точка гибернации'
+            WhatsNewDesc = 'Контрольные точки гибернации, а также заметки, проверка приватности и набор восстановления из 2.7.'
+            AboutWhatsNewText = "• Контрольные точки гибернации сохраняют закреплёнными три последних снимка, сделанных перед сном или гибернацией.`r`n• «Гибернация с контрольной точкой» и SessionRecovery.exe --hibernate сначала сохраняют снимок и отменяют действие при ошибке.`r`n• Контрольная точка — это снимок рабочего пространства, а не образ ОЗУ; несохранённая работа не восстанавливается.`r`n• Контрольные точки гибернации отмечены в строке снимка и в подробностях.`r`n• В настройках появился переключатель «Контрольная точка перед сном или гибернацией».`r`n• Заметки, проверка приватности, набор восстановления и локальная аналитика из 2.7 остаются доступны.`r`n• Тесты Pester и GitHub Actions собирают и проверяют каждое изменение."
         }
         zh = @{
             NavRecoveryKit = '恢复工具包'
@@ -2773,6 +2849,17 @@ function Get-SRStrings {
             InsightsNone = '还没有快照。捕获一个以开始本地洞察。'
             InsightsNoApps = '尚未捕获应用。'
             InsightsNoSites = '尚未捕获网站。'
+            SetHibernateGuard = '睡眠或休眠前创建检查点'
+            HibernateGuardHint = '在 Windows 挂起前保存并固定快照，保留最近三个。仅自动固定；未保存的工作仍不会被捕获。'
+            TrayHibernate = '创建检查点并休眠'
+            HibernateConfirmTitle = '创建检查点并休眠'
+            HibernateConfirmText = 'Session Recovery 将保存并固定恢复快照，然后让此电脑休眠。如果应用无法重新打开，未保存的工作仍可能丢失。是否继续？'
+            TrayHibernateSaving = '正在保存恢复检查点，随后休眠...'
+            HibernateFailed = '无法休眠：{0}'
+            SnapRowHibernate = '休眠'
+            DetailHibernateSuffix = '  •  休眠检查点'
+            WhatsNewDesc = '休眠检查点，以及 2.7 的备注、隐私扫描和恢复工具包。'
+            AboutWhatsNewText = "• 休眠检查点会固定睡眠或休眠前拍摄的最近三个快照。`r`n• 托盘中的「创建检查点并休眠」和 SessionRecovery.exe --hibernate 会先保存，保存失败则取消。`r`n• 检查点是工作区快照，不是内存镜像；未保存的工作仍无法恢复。`r`n• 休眠检查点会在快照行和详情中标记。`r`n• 设置中新增「睡眠或休眠前创建检查点」开关。`r`n• 2.7 的备注、隐私扫描、恢复工具包和本地洞察仍然可用。`r`n• Pester 测试和 GitHub Actions 会构建并验证每次更改。"
         }
         tr = @{
             NavRecoveryKit = 'Kurtarma Kiti'
@@ -2837,6 +2924,17 @@ function Get-SRStrings {
             InsightsNone = 'Henüz anlık görüntü yok. Yerel içgörüler için bir tane yakalayın.'
             InsightsNoApps = 'Henüz uygulama yakalanmadı.'
             InsightsNoSites = 'Henüz site yakalanmadı.'
+            SetHibernateGuard = 'Uyku veya hazırda bekletmeden önce kontrol noktası'
+            HibernateGuardHint = 'Windows askıya alınmadan önce bir anlık görüntü kaydeder ve sabitler; son üçünü tutar. Yalnızca otomatik sabitleme; kaydedilmemiş çalışma yine yakalanmaz.'
+            TrayHibernate = 'Kontrol noktasıyla hazırda beklet'
+            HibernateConfirmTitle = 'Kontrol noktasıyla hazırda beklet'
+            HibernateConfirmText = 'Session Recovery bir kurtarma anlık görüntüsünü kaydedip sabitleyecek, ardından bu bilgisayarı hazırda bekletme moduna alacak. Bir uygulama yeniden açamazsa kaydedilmemiş çalışma yine kaybolabilir. Devam edilsin mi?'
+            TrayHibernateSaving = 'Kurtarma kontrol noktası kaydediliyor, ardından hazırda bekletiliyor...'
+            HibernateFailed = 'Hazırda bekletilemedi: {0}'
+            SnapRowHibernate = 'hazırda bekletme'
+            DetailHibernateSuffix = '  •  hazırda bekletme kontrol noktası'
+            WhatsNewDesc = 'Hazırda bekletme kontrol noktaları ile 2.7 notları, gizlilik taraması ve kurtarma kiti.'
+            AboutWhatsNewText = "• Hazırda bekletme kontrol noktaları, uyku veya hazırda bekletmeden önce alınan son üç anlık görüntüyü sabit tutar.`r`n• Tepsideki 'Kontrol noktasıyla hazırda beklet' ve SessionRecovery.exe --hibernate önce kaydeder, kayıt başarısızsa iptal eder.`r`n• Kontrol noktası bir çalışma alanı anlık görüntüsüdür, RAM görüntüsü değildir; kaydedilmemiş çalışma kurtarılmaz.`r`n• Hazırda bekletme kontrol noktaları anlık görüntü satırında ve ayrıntıda etiketlenir.`r`n• Ayarlarda artık 'Uyku veya hazırda bekletmeden önce kontrol noktası' anahtarı var.`r`n• 2.7'deki notlar, gizlilik taraması, kurtarma kiti ve yerel içgörüler kullanılabilir.`r`n• Pester testleri ve GitHub Actions her değişikliği derleyip doğrular."
         }
     }
     foreach ($extraLang in @($extra.Keys)) {

@@ -13,7 +13,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string]$Version = '2.7.0',
+    [string]$Version = '2.8.0',
     [switch]$NoRestore
 )
 
@@ -75,8 +75,23 @@ Session Recovery {0}
 Reopen the apps, File Explorer folders and browser tabs that were open before
 a crash, power cut or unexpected restart.
 
-What's new in 2.7.0
+What's new in 2.8.0
 -------------------
+- Hibernate checkpoints: the tray saves and pins a recovery snapshot just
+  before Windows sleeps or hibernates, keeping the latest three. It also
+  catches Modern Standby through display-off and lid-close, debounced so one
+  transition does not duplicate the checkpoint. Older checkpoints return to
+  normal retention and unrelated user pins are kept.
+- Hibernate with checkpoint in the tray, and SessionRecovery.exe --hibernate,
+  save a checkpoint first and cancel if it fails. The checkpoint is a normal
+  workspace snapshot, not a RAM image; unsaved work is still not recovered.
+- The Studio Settings page has a Checkpoint before sleep or hibernate toggle.
+  Hibernate checkpoints are marked in the snapshot row and detail view.
+- Snapshots are written to a hidden temp file and moved into place, so a
+  power loss during a checkpoint cannot leave a half-written snapshot file.
+
+Also in 2.7.0
+-------------
 - Snapshot notes: add a searchable note to any snapshot. Notes live in
   config.json, are included in Recovery Kits, and disappear with the snapshot.
 - Privacy scan on the Exclusions page checks visible app names and browser tab
@@ -153,7 +168,8 @@ Install
    after the next sign-in; you can also open Start Menu > Session Recovery >
    Run in Background.
 4. Left-click the tray icon to open the Studio, or right-click it for the menu
-   (restore, snapshot now, pause, folders, settings, diagnostics, exit).
+   (restore, snapshot now, pause, hibernate, folders, settings, diagnostics,
+   exit).
 
 Verify the download (optional)
 ------------------------------

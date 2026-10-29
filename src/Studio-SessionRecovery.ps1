@@ -17,7 +17,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-$script:AppVersion = '2.7.0'
+$script:AppVersion = '2.8.0'
 $script:ScriptDir = $PSScriptRoot
 $script:AppDir = if ($env:SESSIONRECOVERY_HOST_EXE) { Split-Path -Parent $env:SESSIONRECOVERY_HOST_EXE } else { $PSScriptRoot }
 $script:HostExe = $null
@@ -2834,6 +2834,12 @@ function Update-StudioSnapshotDetails {
     $script:Ui.DetailBadge.TextColor = if ($isPinned) { $script:P.Accent } else { $script:P.Green }
     $script:Ui.DetailTitle.Text = Format-StudioDate -Date $entry.CapturedAt -Format 'dddd, MMM d  •  HH:mm:ss'
     $pinnedText = if ($isPinned) { (T 'DetailPinnedSuffix' '  •  pinned') } else { '' }
+    try {
+        $reasonProperty = $entry.Snapshot.PSObject.Properties['reason']
+        if ($null -ne $reasonProperty -and [string]$reasonProperty.Value -eq 'hibernate') {
+            $pinnedText += (T 'DetailHibernateSuffix' '  •  hibernate checkpoint')
+        }
+    } catch { }
     $script:Ui.DetailMeta.Text = ((T 'DetailMetaAppsTabs' '{0}  •  {1}  •  {2} app(s)  •  {3} folder(s){4}') -f (Format-StudioAge -CapturedAt $entry.CapturedAt), (Format-StudioBytes -Bytes $bytes), $stats.Apps, $stats.Folders, $pinnedText)
     $script:Ui.DetailSummary.Text = ((T 'DetailSummaryCaptured' 'Captured {0} browser tab(s) across {1} browser(s). Nothing in this snapshot modifies files.') -f $stats.Tabs, $stats.Browsers)
     $script:Ui.DetailRestore.Enabled = $true
@@ -3037,6 +3043,12 @@ function New-StudioSnapshotRowControl {
     $row.Tag = $Entry.Path
     $row.TimeText = Format-StudioDate -Date $Entry.CapturedAt -Format 'ddd  •  MMM d  •  HH:mm:ss'
     $row.MetaText = ((T 'SnapRowMeta' '{0} app(s)  •  {1} tab(s)  •  {2}') -f $stats.Apps, $stats.Tabs, (Format-StudioBytes -Bytes (Get-StudioSnapshotBytes -Entry $Entry)))
+    try {
+        $reasonProperty = $Entry.Snapshot.PSObject.Properties['reason']
+        if ($null -ne $reasonProperty -and [string]$reasonProperty.Value -eq 'hibernate') {
+            $row.MetaText += '  •  ' + (T 'SnapRowHibernate' 'hibernate')
+        }
+    } catch { }
     if ($script:SnapshotNotes -and $script:SnapshotNotes.ContainsKey((Split-Path -Leaf $Entry.Path))) {
         $row.MetaText += '  •  ' + (T 'SnapRowNote' 'note')
     }
@@ -3893,7 +3905,7 @@ $languageHint = New-StudioLabel -Text 'English, Arabic, French, Spanish, German,
 $appearanceCard.Controls.Add($languageHint)
 
 # Card: smart capture
-$smartCard = New-StudioSettingsCard -Title 'Smart capture' -Description 'Skip snapshots nobody needs, and capture from anywhere.' -Height 382
+$smartCard = New-StudioSettingsCard -Title 'Smart capture' -Description 'Skip snapshots nobody needs, and capture from anywhere.' -Height 438
 $settingsFlow.Controls.Add($smartCard)
 $settingsCards.Add($smartCard)
 
@@ -3921,11 +3933,18 @@ $smartCard.Controls.Add($toggleEvents)
 $eventsLabel = New-StudioLabel -Text 'Capture on lock, sleep and low battery' -X 76 -Y 254 -Width 420 -Height 20 -Font $script:FontBody -Color $script:P.Text
 $smartCard.Controls.Add($eventsLabel)
 
-$toggleDev = New-StudioToggle -X 20 -Y 300 -Checked $true
+$toggleHibernate = New-StudioToggle -X 20 -Y 300 -Checked $true
+$smartCard.Controls.Add($toggleHibernate)
+$hibernateLabel = New-StudioLabel -Text 'Checkpoint before sleep or hibernate' -X 76 -Y 304 -Width 420 -Height 20 -Font $script:FontBody -Color $script:P.Text
+$smartCard.Controls.Add($hibernateLabel)
+$hibernateHint = New-StudioLabel -Text 'Saves and pins a snapshot before Windows suspends, keeping the latest three. Automatic pinning only; unsaved work is still not captured.' -X 76 -Y 324 -Width 620 -Height 34 -Font $script:FontBodySmall -Color $script:P.Subtle
+$smartCard.Controls.Add($hibernateHint)
+
+$toggleDev = New-StudioToggle -X 20 -Y 356 -Checked $true
 $smartCard.Controls.Add($toggleDev)
-$devLabel = New-StudioLabel -Text 'Capture dev workspaces (VS Code, Cursor, JetBrains, Windows Terminal)' -X 76 -Y 310 -Width 660 -Height 20 -Font $script:FontBody -Color $script:P.Text
+$devLabel = New-StudioLabel -Text 'Capture dev workspaces (VS Code, Cursor, JetBrains, Windows Terminal)' -X 76 -Y 360 -Width 660 -Height 20 -Font $script:FontBody -Color $script:P.Text
 $smartCard.Controls.Add($devLabel)
-$devHint = New-StudioLabel -Text 'Reads the editors'' own recent-files state so restore can reopen the same folders.' -X 76 -Y 330 -Width 560 -Height 34 -Font $script:FontBodySmall -Color $script:P.Subtle
+$devHint = New-StudioLabel -Text 'Reads the editors'' own recent-files state so restore can reopen the same folders.' -X 76 -Y 380 -Width 560 -Height 34 -Font $script:FontBodySmall -Color $script:P.Subtle
 $smartCard.Controls.Add($devHint)
 
 # Card: storage and privacy
@@ -4052,6 +4071,8 @@ function Load-StudioSettings {
     $toggleRedact.Checked = if ($null -ne $redactProperty) { [bool]$redactProperty.Value } else { $true }
     $eventsProperty = $script:Config.PSObject.Properties['eventSnapshots']
     $toggleEvents.Checked = if ($null -ne $eventsProperty) { [bool]$eventsProperty.Value } else { $true }
+    $hibernateProperty = $script:Config.PSObject.Properties['hibernateGuard']
+    $toggleHibernate.Checked = if ($null -ne $hibernateProperty) { [bool]$hibernateProperty.Value } else { $true }
     $devProperty = $script:Config.PSObject.Properties['captureDevWorkspaces']
     $toggleDev.Checked = if ($null -ne $devProperty) { [bool]$devProperty.Value } else { $true }
     $thumbsSettingProperty = $script:Config.PSObject.Properties['captureThumbnails']
@@ -4107,6 +4128,7 @@ function Save-StudioSettings {
         $config.captureApproximateTabs = [bool]$toggleApprox.Checked
         $config.redactUrls = [bool]$toggleRedact.Checked
         $config.eventSnapshots = [bool]$toggleEvents.Checked
+        $config.hibernateGuard = [bool]$toggleHibernate.Checked
         $config.captureDevWorkspaces = [bool]$toggleDev.Checked
         $config.captureThumbnails = [bool]$toggleThumbs.Checked
         $config.compressSnapshots = [bool]$toggleCompress.Checked

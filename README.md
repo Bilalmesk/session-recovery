@@ -6,7 +6,7 @@
 
 ![Windows 10/11](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?logo=windows&logoColor=white)
 ![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-5391FE?logo=powershell&logoColor=white)
-![Version](https://img.shields.io/badge/version-2.7.0-8B5CF6)
+![Version](https://img.shields.io/badge/version-2.8.0-8B5CF6)
 ![Local only](https://img.shields.io/badge/privacy-100%25%20local-22C55E)
 
 [Install](#-install) · [Restore](#-restore) · [Configure](#%EF%B8%8F-configure) · [Troubleshoot](#-troubleshooting) · [Uninstall](#-uninstall)
@@ -35,6 +35,7 @@ Session Recovery snapshots your desktop every few minutes and offers to restore 
 | 🕵️ **Privacy scan** | Finds sensitive apps and sites from names and tab URLs, never page content |
 | 🧳 **Recovery Kit** | Move snapshots, notes and exclusions between PCs in one `.srkit` file |
 | 📊 **Recovery insights** | Local counts for snapshots, apps, sites, pins, notes and storage |
+| 💤 **Hibernate checkpoints** | Pins the last three snapshots taken just before sleep or hibernate, and offers **Hibernate with checkpoint** from the tray or `--hibernate` |
 | 📦 **Export / import** | Back up snapshots as JSON or move them to another PC |
 | 🖥️ **Native tray + Studio** | Dashboard, Snapshots, Exclusions, Recovery Kit, Settings, Diagnostics and About; dark **Aurora** and light **Daylight** themes, no console windows |
 
@@ -104,6 +105,7 @@ Re-running the installer replaces program files and preserves snapshots and most
 $app = "$env:LOCALAPPDATA\SessionRecovery\app"
 
 & "$app\SessionRecovery.exe" --snapshot          # take a snapshot
+& "$app\SessionRecovery.exe" --hibernate         # checkpoint, then hibernate
 & "$app\SessionRecovery.exe" --restore-manual    # open restore window
 
 $rs = "$app\Restore-Session.ps1"
@@ -131,9 +133,11 @@ Filters apply to `-NoUI` and `-DryRun` only. Pass multiple patterns as one comma
 
 ## 🧭 Tray app
 
-Left-click opens the Studio. Right-click for restore, snapshot now, pause, **pause for 1 hour**, folders, settings, diagnostics and exit. If Windows hides the icon, drag it out of the `^` overflow onto the taskbar.
+Left-click opens the Studio. Right-click for restore, snapshot now, pause, **pause for 1 hour**, **Hibernate with checkpoint**, folders, settings, diagnostics and exit. If Windows hides the icon, drag it out of the `^` overflow onto the taskbar.
 
-When scheduled tasks drive snapshots, the tray runs in monitor-only mode so snapshots are never duplicated.
+**Hibernate with checkpoint** saves a pinned recovery snapshot first and only then asks Windows to hibernate. The same thing happens automatically on suspend, display-off or lid-close while the guard is on. The latest three checkpoints stay pinned; older ones return to normal retention. This is a fast workspace checkpoint, not a memory image: apps still relaunch from disk and unsaved work is not recovered.
+
+When scheduled tasks drive snapshots, the tray runs in monitor-only mode so normal snapshots are never duplicated. The one-off hibernate checkpoint still runs at suspend.
 
 ## ⚙️ Configure
 
@@ -152,6 +156,8 @@ Use the Studio **Settings** page, or edit `%LOCALAPPDATA%\SessionRecovery\config
   "encryptSnapshots": false,
   "compressSnapshots": false,
   "redactUrls": true,
+  "hibernateGuard": true,
+  "keepHibernateCheckpoints": 3,
   "excludeApps": ["KeePass*"],
   "excludeFolders": ["D:\\Taxes"],
   "excludeUrls": ["*bank*", "*mail.google.com*"],
@@ -183,6 +189,8 @@ Use the Studio **Settings** page, or edit `%LOCALAPPDATA%\SessionRecovery\config
 | `encryptSnapshots` | `false` | Seal snapshots with DPAPI for this Windows user |
 | `compressSnapshots` | `false` | Write gzip-compressed snapshots |
 | `redactUrls` | `true` | Strip URL query strings and fragments before writing |
+| `hibernateGuard` | `true` | Save and pin a checkpoint whenever Windows suspends |
+| `keepHibernateCheckpoints` | `3` | Number of hibernate/suspend checkpoints kept pinned |
 | `excludeApps` / `excludeFolders` / `excludeUrls` | `[]` | Case-insensitive wildcards |
 | `pinnedSnapshots` | `[]` | Files retention never deletes (managed via **Pin**) |
 | `snapshotNotes` | `{}` | Searchable notes keyed by snapshot file name |
@@ -211,6 +219,17 @@ Use the Studio **Settings** page, or edit `%LOCALAPPDATA%\SessionRecovery\config
 - **Privacy scan** on the Exclusions page inspects visible app/process names and browser tab URLs and titles for categories such as password managers, banking, messaging, email, health and social media. It suggests wildcard exclusions you can add one at a time or all at once. It never reads screenshots, window pixels or page content.
 - **Recovery Kit** bundles every snapshot, note and exclusion rule into one portable `.srkit` file. Import merges notes and rules without overwriting existing settings, marks imported snapshots as untrusted, and skips DPAPI-encrypted snapshots because only the Windows account that created them can read them. A kit never contains settings, logs, screenshots or page content. The `.srkit` is a ZIP archive and is plaintext unless the snapshots inside are encrypted, so treat it like a private document.
 - **Recovery insights** on Diagnostics summarize locally what the snapshot store contains: counts, time span, unique apps and sites, pins, notes, imports and storage use.
+
+</details>
+
+<details>
+<summary><b>Hibernate checkpoints and deep-state limits</b></summary>
+
+- **What it does:** with `hibernateGuard` on, the tray saves a forced snapshot when Windows reports suspend (sleep or hibernate), marks it `reason: "hibernate"`, pins it, and keeps the newest `keepHibernateCheckpoints` (default 3). Older checkpoints are unpinned; normal retention decides when they go. Classic suspend arrives through `PowerModeChanged`. Modern Standby often skips that message, so the same checkpoint also runs on display-off and lid-close, with a 30-second debounce so one transition does not create duplicates. Use **Hibernate with checkpoint** in the tray or `SessionRecovery.exe --hibernate` to do it explicitly. If the checkpoint cannot be saved, the explicit action cancels instead of hibernating without one.
+- **What it cannot do:** Windows offers no safe user-mode way to freeze and resume an arbitrary app's RAM. This is a workspace checkpoint, not a process clone or VM snapshot. Unsaved editor buffers, passwords and form data are still not captured. Hibernate itself is handled by Windows; if hibernation is disabled in Power Options, `shutdown.exe /h` fails and the app reports the error.
+- **No memory dumps:** the app never reads another process's memory or writes a crash dump. The only data saved is the same app, folder, tab, window and workspace metadata as a normal snapshot.
+- **Crashes and power cuts cannot be predicted:** Windows sends no suspend notification before a blue screen or a hard power loss. The normal 3-minute timer and crash detection remain the safety net, so the worst case is a layout from the last few minutes rather than the exact moment before the crash.
+- **Virtual desktops are best-effort:** restore uses the documented `IVirtualDesktopManager` interface and only moves windows owned by the restarted app. If a desktop no longer exists, the window stays on the current one. Moving arbitrary apps between desktops would need undocumented interfaces that change between Windows 11 builds, so it is out of scope.
 
 </details>
 
@@ -285,7 +304,7 @@ Get-ScheduledTask -TaskName 'SessionRecovery-*' -ErrorAction SilentlyContinue | 
 ## 👩‍💻 Development
 
 ```powershell
-# Build the MSI (needs .NET SDK 6+ and internet for WiX restore) → dist\SessionRecovery-2.7.0.msi
+# Build the MSI (needs .NET SDK 6+ and internet for WiX restore) → dist\SessionRecovery-2.8.0.msi
 powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\Build-MSI.ps1
 
 # Build the native host only

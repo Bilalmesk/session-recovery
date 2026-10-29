@@ -15,8 +15,8 @@ using WinFormsTimer = System.Windows.Forms.Timer;
 [assembly: AssemblyDescription("Session Recovery desktop host")]
 [assembly: AssemblyProduct("Session Recovery")]
 [assembly: AssemblyCompany("Bilalmesk")]
-[assembly: AssemblyVersion("2.7.0.0")]
-[assembly: AssemblyFileVersion("2.7.0.0")]
+[assembly: AssemblyVersion("2.8.0.0")]
+[assembly: AssemblyFileVersion("2.8.0.0")]
 
 namespace SessionRecoveryLauncher
 {
@@ -74,6 +74,14 @@ namespace SessionRecoveryLauncher
                     scriptName = "Save-Session.ps1";
                     scriptArguments = "-Quiet -Force";
                     showErrors = false;
+                    notifySnapshot = false;
+                    break;
+                case "--hibernate":
+                    // Save a pinned checkpoint, then hibernate through
+                    // shutdown.exe. The checkpoint is mandatory.
+                    scriptName = "Save-Session.ps1";
+                    scriptArguments = "-Hibernate";
+                    showErrors = true;
                     notifySnapshot = false;
                     break;
                 case "--restore":

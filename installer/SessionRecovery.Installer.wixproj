@@ -1,7 +1,7 @@
 <Project Sdk="WixToolset.Sdk/5.0.2">
   <PropertyGroup>
     <OutputType>Package</OutputType>
-    <ProductVersion Condition="'$(ProductVersion)' == ''">2.2.0</ProductVersion>
+    <ProductVersion Condition="'$(ProductVersion)' == ''">2.8.0</ProductVersion>
     <OutputName>SessionRecovery-$(ProductVersion)</OutputName>
     <OutputPath>..\dist\</OutputPath>
     <DefineConstants>ProductVersion=$(ProductVersion)</DefineConstants>

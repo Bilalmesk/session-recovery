@@ -86,6 +86,16 @@ Describe 'String tables' {
         }
     }
 
+    It 'exposes the 2.8 hibernate keys in every language' {
+        foreach ($language in @('en', 'ar', 'fr', 'es', 'de', 'pt', 'ru', 'zh', 'tr')) {
+            $strings = Get-SRStrings -Language $language
+            foreach ($key in @('SetHibernateGuard', 'HibernateGuardHint', 'TrayHibernate', 'HibernateConfirmTitle', 'HibernateConfirmText', 'TrayHibernateSaving', 'HibernateFailed', 'SnapRowHibernate', 'DetailHibernateSuffix')) {
+                $strings[$key] | Should -Not -BeNullOrEmpty -Because "$language should translate '$key'"
+            }
+            $strings['HibernateFailed'] | Should -Match '\{0\}' -Because "$language must show the failure detail"
+        }
+    }
+
     It 'falls back to English for unknown languages' {
         $strings = Get-SRStrings -Language 'xx'
         $strings.NavDashboard | Should -Be 'Dashboard'
@@ -317,6 +327,24 @@ Describe 'Snapshot storage round-trip' {
         $path | Should -Match '\.gz$'
         $snapshot = Read-SRSnapshotFile -Path $path
         $snapshot.capturedAt | Should -Not -BeNullOrEmpty
+    }
+
+    It 'writes through a hidden temp file and ignores partial leftovers' {
+        $config = Get-SRConfig
+        $config.compressSnapshots = $false
+        $config.encryptSnapshots = $false
+        Save-SRConfig -Config $config
+
+        $dir = Get-SRSnapshotDirectory
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $partial = Join-Path $dir '.session-partial.json.tmp'
+        [System.IO.File]::WriteAllText($partial, '{"capturedAt":"partial"}')
+        @(Get-SRSnapshotFiles | Where-Object { $_.Name -eq '.session-partial.json.tmp' }).Count | Should -Be 0 -Because 'a partial write must never be listed as a snapshot'
+
+        $path = Save-SRSnapshot -Force
+        $path | Should -Not -BeNullOrEmpty
+        Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
+        @(Get-ChildItem -LiteralPath $dir -Filter '.*.tmp' -File -ErrorAction SilentlyContinue).Count | Should -Be 0 -Because 'the temp file is moved into place after a complete write'
     }
 
     It 'stamps locally created snapshots with this installation ID' {
@@ -1209,5 +1237,114 @@ Describe '2.7 recovery features' {
             $snapshot = Read-SRSnapshotFile -Path $path
             $snapshot.capturedAt | Should -Be '2026-10-01T09:00:00+00:00'
         }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# 2.8 hibernate checkpoints
+# ---------------------------------------------------------------------------
+
+Describe 'Hibernate checkpoints' {
+    BeforeAll {
+        function New-TestHibernateFile {
+            param(
+                [Parameter(Mandatory = $true)][string]$Name,
+                [Parameter(Mandatory = $true)][datetime]$CapturedAt,
+                [string]$Reason = 'hibernate'
+            )
+            $dir = Get-SRSnapshotDirectory
+            if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+            $snapshot = [ordered]@{
+                capturedAt = $CapturedAt.ToString('o')
+                apps       = @()
+                explorer   = @()
+                browsers   = @()
+                reason     = $Reason
+            }
+            $path = Join-Path $dir $Name
+            $json = $snapshot | ConvertTo-Json -Depth 5
+            [System.IO.File]::WriteAllText($path, $json, (New-Object System.Text.UTF8Encoding($false)))
+            (Get-Item -LiteralPath $path).LastWriteTime = $CapturedAt
+            return $path
+        }
+
+        function Reset-TestHibernateState {
+            $config = Get-SRConfig
+            $config.pinnedSnapshots = @()
+            $config.snapshotNotes = @{}
+            $config.hibernateGuard = $true
+            $config.keepHibernateCheckpoints = 3
+            $config.encryptSnapshots = $false
+            $config.compressSnapshots = $false
+            $config.captureThumbnails = $false
+            $config.autoExportFolder = ''
+            Save-SRConfig -Config $config
+            $dir = Get-SRSnapshotDirectory
+            if (Test-Path -LiteralPath $dir) {
+                @(Get-ChildItem -LiteralPath $dir -Filter 'session-*' -File -ErrorAction SilentlyContinue) | Remove-Item -Force -ErrorAction SilentlyContinue
+            } else {
+                New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            }
+        }
+    }
+
+    BeforeEach { Reset-TestHibernateState }
+
+    AfterAll {
+        try { Reset-TestHibernateState } catch { }
+    }
+
+    It 'saves a hibernate checkpoint, pins it and keeps the newest three' {
+        $now = Get-Date
+        [void](New-TestHibernateFile -Name 'session-hib-oldest.json' -CapturedAt $now.AddHours(-3))
+        [void](New-TestHibernateFile -Name 'session-hib-middle.json' -CapturedAt $now.AddHours(-2))
+        [void](New-TestHibernateFile -Name 'session-hib-newer.json' -CapturedAt $now.AddHours(-1))
+        [void](New-TestHibernateFile -Name 'session-normal-pin.json' -CapturedAt $now.AddHours(-4) -Reason 'scheduled')
+
+        $config = Get-SRConfig
+        $config.pinnedSnapshots = @(
+            'session-hib-oldest.json',
+            'session-hib-middle.json',
+            'session-hib-newer.json',
+            'session-normal-pin.json'
+        )
+        Save-SRConfig -Config $config
+
+        $path = Save-SRHibernateSnapshot -Force
+        $path | Should -Not -BeNullOrEmpty
+        (Read-SRSnapshotFile -Path $path).reason | Should -Be 'hibernate'
+
+        $pins = @((Get-SRConfig).pinnedSnapshots)
+        $pins -contains (Split-Path -Leaf $path) | Should -BeTrue
+        $pins -contains 'session-hib-oldest.json' | Should -BeFalse -Because 'only the latest three checkpoints stay pinned'
+        $pins -contains 'session-hib-middle.json' | Should -BeTrue
+        $pins -contains 'session-hib-newer.json' | Should -BeTrue
+        $pins -contains 'session-normal-pin.json' | Should -BeTrue -Because 'unrelated user pins must never be removed'
+    }
+
+    It 'skips an automatic checkpoint when the guard is off' {
+        $config = Get-SRConfig
+        $config.hibernateGuard = $false
+        Save-SRConfig -Config $config
+        $before = @(Get-SRSnapshotFiles).Count
+
+        Save-SRHibernateSnapshot | Should -BeNullOrEmpty
+        @(Get-SRSnapshotFiles).Count | Should -Be $before
+    }
+
+    It 'still checkpoints an explicit request when the guard is off' {
+        $config = Get-SRConfig
+        $config.hibernateGuard = $false
+        Save-SRConfig -Config $config
+
+        $path = Save-SRHibernateSnapshot -Force
+        $path | Should -Not -BeNullOrEmpty
+        (Read-SRSnapshotFile -Path $path).reason | Should -Be 'hibernate'
+    }
+
+    It 'does not save a checkpoint or hibernate under -WhatIf' {
+        $before = @(Get-SRSnapshotFiles).Count
+        Invoke-SRHibernate -WhatIf | Should -BeNullOrEmpty
+        @(Get-SRSnapshotFiles).Count | Should -Be $before
     }
 }

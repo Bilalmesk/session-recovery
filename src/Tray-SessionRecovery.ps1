@@ -51,6 +51,95 @@ try {
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
+# Classic suspend arrives through PowerModeChanged. Modern Standby often
+# does not send that message, so also watch the display and lid state; both
+# are reliable early signals that the machine is about to leave the desktop.
+if (-not ('SessionRecovery.TrayPowerMonitor' -as [type])) {
+    Add-Type -ReferencedAssemblies 'System.Windows.Forms' -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
+
+namespace SessionRecovery
+{
+    public sealed class TrayPowerMonitor : NativeWindow, IDisposable
+    {
+        private const int WM_POWERBROADCAST = 0x0218;
+        private const int PBT_POWERSETTINGCHANGE = 0x8013;
+        private const int DEVICE_NOTIFY_WINDOW_HANDLE = 0;
+        private static readonly Guid DisplayGuid = new Guid("2B84C20E-AD23-4DDF-93DB-05FFBD7EFCA5");
+        private static readonly Guid LidGuid = new Guid("BA3E0F4D-B817-4094-A2D1-D56379E6A0F3");
+        private IntPtr displayNotification;
+        private IntPtr lidNotification;
+        private bool disposed;
+
+        public event EventHandler DisplayOff;
+        public event EventHandler LidClosed;
+
+        public bool DisplayRegistered { get { return displayNotification != IntPtr.Zero; } }
+        public bool LidRegistered { get { return lidNotification != IntPtr.Zero; } }
+
+        public TrayPowerMonitor()
+        {
+            CreateParams cp = new CreateParams();
+            cp.Caption = "SessionRecoveryPowerMonitor";
+            CreateHandle(cp);
+
+            // The API requires a modifiable Guid, so copy the static values.
+            Guid display = DisplayGuid;
+            Guid lid = LidGuid;
+            displayNotification = RegisterPowerSettingNotification(Handle, ref display, DEVICE_NOTIFY_WINDOW_HANDLE);
+            lidNotification = RegisterPowerSettingNotification(Handle, ref lid, DEVICE_NOTIFY_WINDOW_HANDLE);
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == WM_POWERBROADCAST && m.WParam.ToInt64() == PBT_POWERSETTINGCHANGE && m.LParam != IntPtr.Zero)
+            {
+                Guid setting = (Guid)Marshal.PtrToStructure(m.LParam, typeof(Guid));
+                int length = Marshal.ReadInt32(m.LParam, 16);
+                if (length >= 4)
+                {
+                    int value = Marshal.ReadInt32(m.LParam, 20);
+                    if (setting == DisplayGuid && value == 0) { Raise(DisplayOff); }
+                    else if (setting == LidGuid && value == 0) { Raise(LidClosed); }
+                }
+            }
+            base.WndProc(ref m);
+        }
+
+        private void Raise(EventHandler handler)
+        {
+            if (handler != null) { handler(this, EventArgs.Empty); }
+        }
+
+        public void Dispose()
+        {
+            if (disposed) { return; }
+            disposed = true;
+            if (displayNotification != IntPtr.Zero)
+            {
+                UnregisterPowerSettingNotification(displayNotification);
+                displayNotification = IntPtr.Zero;
+            }
+            if (lidNotification != IntPtr.Zero)
+            {
+                UnregisterPowerSettingNotification(lidNotification);
+                lidNotification = IntPtr.Zero;
+            }
+            DestroyHandle();
+        }
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr RegisterPowerSettingNotification(IntPtr hRecipient, ref Guid powerSettingGuid, int flags);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool UnregisterPowerSettingNotification(IntPtr handle);
+    }
+}
+'@
+}
+
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 $script:ink = [System.Drawing.Color]::FromArgb(32, 37, 43)
@@ -68,6 +157,8 @@ $script:snapshotTimer = $null
 $script:firstTimer = $null
 $script:healthTimer = $null
 $script:resumeTimer = $null
+$script:powerWindow = $null
+$script:lastPowerCheckpointAt = [DateTime]::MinValue
 $script:appContext = $null
 $script:installRoot = $PSScriptRoot
 $script:exiting = $false
@@ -93,6 +184,53 @@ function Test-SRTrayEventSnapshots {
         if ($null -ne $property) { return [bool]$property.Value }
     } catch { }
     return $true
+}
+
+function Test-SRTrayHibernateGuard {
+    try { return (Test-SRHibernateGuardEnabled) } catch { }
+    return $true
+}
+
+function Test-SRTrayRecentHibernateCheckpoint {
+    param([int]$WithinSeconds = 30)
+
+    # An explicit --hibernate or tray hibernate already saved a checkpoint.
+    # The suspend event that follows must not create a duplicate.
+    try {
+        $newest = @(Get-SRSnapshotFiles) | Select-Object -First 1
+        if ($null -eq $newest) { return $false }
+        if ($newest.LastWriteTime -lt (Get-Date).AddSeconds(-$WithinSeconds)) { return $false }
+        $snapshot = Read-SRSnapshotFile -Path $newest.FullName
+        $reason = $snapshot.PSObject.Properties['reason']
+        return ($null -ne $reason -and [string]$reason.Value -eq 'hibernate')
+    } catch { return $false }
+}
+
+function Invoke-SRTrayPowerCheckpoint {
+    param([string]$Source = 'suspend')
+
+    # Display-off and lid-close are the practical Modern Standby signals.
+    # They arrive a moment before the machine is throttled, so use the same
+    # quick, pinned checkpoint as classic suspend and debounce the burst.
+    if ($script:exiting -or $script:paused) { return }
+    if (-not (Test-SRTrayEventSnapshots)) { return }
+    if (-not (Test-SRTrayHibernateGuard)) { return }
+    if ($script:lastPowerCheckpointAt -ne [DateTime]::MinValue -and
+        ((Get-Date) - $script:lastPowerCheckpointAt).TotalSeconds -lt 30) { return }
+    if (Test-SRTrayRecentHibernateCheckpoint -WithinSeconds 30) {
+        $script:lastPowerCheckpointAt = Get-Date
+        return
+    }
+
+    try {
+        $path = Save-SRHibernateSnapshot -Force
+        if (-not [string]::IsNullOrWhiteSpace([string]$path)) {
+            $script:lastPowerCheckpointAt = Get-Date
+            try { Write-SRLog -Message (("Power checkpoint ({0}) saved: {1}") -f $Source, $path) } catch { }
+        }
+    } catch {
+        try { Write-SRLog -Level ERROR -Message (("Power checkpoint ({0}) failed: {1}") -f $Source, $_.Exception.Message) } catch { }
+    }
 }
 
 function Get-SRTrayIntervalMinutes {
@@ -266,6 +404,24 @@ function Invoke-SRTraySnapshot {
     }
 }
 
+function Invoke-SRTrayHibernate {
+    $answer = [System.Windows.Forms.MessageBox]::Show(
+        (T 'HibernateConfirmText' 'Session Recovery will save and pin a recovery snapshot, then hibernate this PC. Unsaved work can still be lost if an app cannot reopen it. Continue?'),
+        (T 'HibernateConfirmTitle' 'Hibernate with checkpoint'),
+        [System.Windows.Forms.MessageBoxButtons]::YesNo,
+        [System.Windows.Forms.MessageBoxIcon]::Warning,
+        [System.Windows.Forms.MessageBoxDefaultButton]::Button2)
+    if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+
+    try {
+        Show-SRTrayBalloon -Text (T 'TrayHibernateSaving' 'Saving a recovery checkpoint, then hibernating...') -Icon Information
+        [void](Invoke-SRHibernate)
+    } catch {
+        try { Write-SRLog -Level ERROR -Message ("Hibernate from tray failed: {0}" -f $_.Exception.Message) } catch { }
+        Show-SRTrayBalloon -Text ((T 'HibernateFailed' 'Could not hibernate: {0}') -f $_.Exception.Message) -Icon Error -Timeout 8000
+    }
+}
+
 function Start-SRTrayFirstSnapshot {
     if (-not $script:ownsSnapshots -or $script:paused -or $script:exiting) { return }
     if ($null -eq $script:firstTimer) { return }
@@ -351,6 +507,10 @@ function Exit-SRTray {
     if ($null -ne $script:resumeTimer) {
         try { $script:resumeTimer.Stop(); $script:resumeTimer.Dispose() } catch { }
         $script:resumeTimer = $null
+    }
+    if ($null -ne $script:powerWindow) {
+        try { $script:powerWindow.Dispose() } catch { }
+        $script:powerWindow = $null
     }
     try {
         if ($null -ne $script:notify) {
@@ -561,6 +721,10 @@ $script:pauseHourItem = New-Object System.Windows.Forms.ToolStripMenuItem((T 'Tr
     Show-SRTrayBalloon -Text ((T 'TrayPausedUntil' 'Snapshots paused until {0}. They resume automatically.') -f $script:resumeAt.ToString('HH:mm'))
 })
 [void]$script:menu.Items.Add($script:pauseHourItem)
+
+$hibernateItem = New-Object System.Windows.Forms.ToolStripMenuItem((T 'TrayHibernate' 'Hibernate with checkpoint'))
+[void]$hibernateItem.Add_Click({ Invoke-SRTrayHibernate })
+[void]$script:menu.Items.Add($hibernateItem)
 
 [void]$script:menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 
@@ -858,14 +1022,38 @@ try {
             }
         }
         if ($e.Mode -eq [Microsoft.Win32.PowerModes]::Suspend) {
-            # Capture right before sleep: this is the snapshot that matters
-            # when the battery dies or the machine never wakes up.
-            if ((Test-SRTrayEventSnapshots) -and $script:ownsSnapshots -and -not $script:paused) {
-                Invoke-SRTraySnapshot
+            # Capture right before sleep or hibernate: this is the snapshot
+            # that matters when the battery dies or the machine never wakes
+            # up. The hibernate guard is a one-off checkpoint, so it also
+            # runs while a scheduled task owns the normal snapshot timer.
+            # With the guard on, the checkpoint is pinned and the latest few
+            # survive retention.
+            if ((Test-SRTrayEventSnapshots) -and -not $script:paused) {
+                if (Test-SRTrayHibernateGuard) {
+                    Invoke-SRTrayPowerCheckpoint -Source 'suspend'
+                } elseif ($script:ownsSnapshots) {
+                    Invoke-SRTraySnapshot
+                }
             }
         }
     }
 } catch { }
+
+# Modern Standby (and some lid-close paths) does not reliably send the
+# classic suspend message. Display-off and lid-close arrive early enough to
+# save the same checkpoint, and the 30 second debounce prevents duplicates
+# when both fire for one transition.
+try {
+    $script:powerWindow = New-Object SessionRecovery.TrayPowerMonitor
+    $script:powerWindow.add_DisplayOff({ Invoke-SRTrayPowerCheckpoint -Source 'display-off' })
+    $script:powerWindow.add_LidClosed({ Invoke-SRTrayPowerCheckpoint -Source 'lid-closed' })
+    try {
+        Write-SRLog -Message ('Power monitor registered (display: {0}, lid: {1}).' -f $script:powerWindow.DisplayRegistered, $script:powerWindow.LidRegistered)
+    } catch { }
+} catch {
+    $script:powerWindow = $null
+    try { Write-SRLog -Level WARN -Message ("Power monitor unavailable; classic suspend only: {0}" -f $_.Exception.Message) } catch { }
+}
 
 try {
     [Microsoft.Win32.SystemEvents]::SessionSwitch += {
