@@ -1,9 +1,11 @@
-﻿<#
+﻿#requires -Version 5.1
+<#
     StudioTheme.ps1
-    Shared colour themes for Session Recovery Studio and the restore window.
-    Dot-source this file; it only defines functions and a catalog cache.
-    Get-StudioPalette returns a hashtable of System.Drawing colours.
+    Shared theme catalog and palette helpers for the Studio and the restore
+    window. Dot-source this file after the localization helpers so theme
+    labels can fall back to English when a translation is missing.
 #>
+
 $script:StudioThemeCatalog = $null
 function Get-StudioThemeCatalog {
     if ($null -ne $script:StudioThemeCatalog) { return $script:StudioThemeCatalog }
@@ -657,4 +659,55 @@ function Get-StudioPalette {
     $key = Resolve-StudioThemeKey -Theme $Theme
     $entry = (Get-StudioThemeCatalog)[$key]
     return $entry.Palette.Clone()
+}
+
+function Update-StudioThemeControl {
+    param($Control, [hashtable]$ColorMap)
+    if ($null -eq $Control) { return }
+    $type = $Control.GetType()
+    while ($null -ne $type) {
+        foreach ($property in $type.GetProperties([System.Reflection.BindingFlags]'Instance,Public')) {
+            if ($property.PropertyType -ne [System.Drawing.Color] -or -not $property.CanRead -or -not $property.CanWrite) { continue }
+            if ($property.GetIndexParameters().Length -gt 0) { continue }
+            try {
+                $current = [System.Drawing.Color]$property.GetValue($Control, $null)
+                if ($current.IsEmpty) { continue }
+                $argb = [int]$current.ToArgb()
+                if ($ColorMap.ContainsKey($argb)) {
+                    $next = [System.Drawing.Color]$ColorMap[$argb]
+                    if ($next -ne $current) { $property.SetValue($Control, $next, $null) }
+                }
+            } catch { }
+        }
+        $type = $type.BaseType
+    }
+    foreach ($child in @($Control.Controls)) {
+        Update-StudioThemeControl -Control $child -ColorMap $ColorMap
+    }
+}
+
+function Apply-StudioTheme {
+    param([string]$Theme, $Root)
+    $key = Resolve-StudioThemeKey -Theme $Theme
+    if ($key -eq $script:ThemeKey) { return $key }
+    $oldPalette = $script:P
+    $newPalette = Get-StudioPalette -Theme $key
+    $map = @{}
+    foreach ($name in @($oldPalette.Keys)) {
+        if (-not $newPalette.ContainsKey($name)) { continue }
+        $oldColor = [System.Drawing.Color]$oldPalette[$name]
+        if ($oldColor.IsEmpty) { continue }
+        $argb = [int]$oldColor.ToArgb()
+        if (-not $map.ContainsKey($argb)) { $map[$argb] = [System.Drawing.Color]$newPalette[$name] }
+    }
+    $script:ThemeKey = $key
+    $script:P = $newPalette
+    if ($null -ne $Root) {
+        Update-StudioThemeControl -Control $Root -ColorMap $map
+        try {
+            $Root.Invalidate($true)
+            $Root.Update()
+        } catch { }
+    }
+    return $key
 }

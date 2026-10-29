@@ -117,67 +117,7 @@ if ($script:HostExe) {
     } catch { }
 }
 
-# Theme catalog and palettes are shared with the restore window.
-$studioThemePath = Join-Path $PSScriptRoot 'StudioTheme.ps1'
-if (-not (Test-Path -LiteralPath $studioThemePath)) {
-    $studioThemePath = Join-Path (Split-Path $PSScriptRoot -Parent) 'src\StudioTheme.ps1'
-}
-if (-not (Test-Path -LiteralPath $studioThemePath)) {
-    [System.Windows.Forms.MessageBox]::Show('StudioTheme.ps1 is missing. Reinstall Session Recovery.', 'Session Recovery', 'OK', 'Error') | Out-Null
-    exit 2
-}
-. $studioThemePath
-
-function Update-StudioThemeControl {
-    param($Control, [hashtable]$ColorMap)
-    if ($null -eq $Control) { return }
-    $type = $Control.GetType()
-    while ($null -ne $type) {
-        foreach ($property in $type.GetProperties([System.Reflection.BindingFlags]'Instance,Public')) {
-            if ($property.PropertyType -ne [System.Drawing.Color] -or -not $property.CanRead -or -not $property.CanWrite) { continue }
-            if ($property.GetIndexParameters().Length -gt 0) { continue }
-            try {
-                $current = [System.Drawing.Color]$property.GetValue($Control, $null)
-                if ($current.IsEmpty) { continue }
-                $argb = [int]$current.ToArgb()
-                if ($ColorMap.ContainsKey($argb)) {
-                    $next = [System.Drawing.Color]$ColorMap[$argb]
-                    if ($next -ne $current) { $property.SetValue($Control, $next, $null) }
-                }
-            } catch { }
-        }
-        $type = $type.BaseType
-    }
-    foreach ($child in @($Control.Controls)) {
-        Update-StudioThemeControl -Control $child -ColorMap $ColorMap
-    }
-}
-
-function Apply-StudioTheme {
-    param([string]$Theme, $Root)
-    $key = Resolve-StudioThemeKey -Theme $Theme
-    if ($key -eq $script:ThemeKey) { return $key }
-    $oldPalette = $script:P
-    $newPalette = Get-StudioPalette -Theme $key
-    $map = @{}
-    foreach ($name in @($oldPalette.Keys)) {
-        if (-not $newPalette.ContainsKey($name)) { continue }
-        $oldColor = [System.Drawing.Color]$oldPalette[$name]
-        if ($oldColor.IsEmpty) { continue }
-        $argb = [int]$oldColor.ToArgb()
-        if (-not $map.ContainsKey($argb)) { $map[$argb] = [System.Drawing.Color]$newPalette[$name] }
-    }
-    $script:ThemeKey = $key
-    $script:P = $newPalette
-    if ($null -ne $Root) {
-        Update-StudioThemeControl -Control $Root -ColorMap $map
-        try {
-            $Root.Invalidate($true)
-            $Root.Update()
-        } catch { }
-    }
-    return $key
-}
+. (Join-Path $PSScriptRoot 'StudioTheme.ps1')
 
 $studioTheme = 'Aurora'
 try {
@@ -629,6 +569,7 @@ function New-StudioCombo {
     $combo.BackColor = $script:P.CardAlt
     $combo.ForeColor = $script:P.Text
     $combo.SelectionBackColor = $script:P.ComboSelection
+    $combo.BorderColor = $script:P.Border
     return $combo
 }
 

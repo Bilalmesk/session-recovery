@@ -148,6 +148,7 @@ $moduleFiles = @(
     'RunHidden.vbs',
     'Studio-SessionRecovery.ps1',
     'Strings.ps1',
+    'StudioTheme.ps1',
     'Control-SessionRecovery.ps1',
     'StudioControls.cs',
     'StudioTheme.ps1',

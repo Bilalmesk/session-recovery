@@ -610,8 +610,13 @@ namespace SessionRecovery.Studio
     public class StudioComboBox : ComboBox
     {
         private Color _selectionBackColor = Color.FromArgb(40, 52, 72);
+        private Color _borderColor = Color.FromArgb(34, 45, 61);
+        private const int WM_PAINT = 0x000F;
+        private const int WM_PRINT = 0x0317;
+        private const int WM_PRINTCLIENT = 0x0318;
 
         public Color SelectionBackColor { get { return _selectionBackColor; } set { _selectionBackColor = value; Invalidate(); } }
+        public Color BorderColor { get { return _borderColor; } set { _borderColor = value; Invalidate(); } }
 
         public StudioComboBox()
         {
@@ -621,6 +626,72 @@ namespace SessionRecovery.Studio
             BackColor = Color.FromArgb(18, 25, 36);
             ForeColor = Color.FromArgb(228, 236, 247);
             Font = new Font("Segoe UI", 9f, FontStyle.Regular, GraphicsUnit.Point);
+            SetStyle(ControlStyles.OptimizedDoubleBuffer, true);
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            base.WndProc(ref m);
+            if (m.Msg == WM_PAINT) PaintClosedState(null);
+            else if ((m.Msg == WM_PRINT || m.Msg == WM_PRINTCLIENT) && m.WParam != IntPtr.Zero)
+            {
+                using (Graphics graphics = Graphics.FromHdc(m.WParam)) PaintClosedState(graphics);
+            }
+        }
+
+        protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
+        protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
+        protected override void OnSelectedIndexChanged(EventArgs e) { base.OnSelectedIndexChanged(e); Invalidate(); }
+        protected override void OnEnabledChanged(EventArgs e) { base.OnEnabledChanged(e); Invalidate(); }
+        protected override void OnResize(EventArgs e) { base.OnResize(e); Invalidate(); }
+
+        private void PaintClosedState(Graphics target)
+        {
+            if (!IsHandleCreated || Width <= 0 || Height <= 0) return;
+            bool owned = false;
+            Graphics graphics = target;
+            try
+            {
+                if (graphics == null)
+                {
+                    graphics = Graphics.FromHwnd(Handle);
+                    owned = true;
+                }
+                graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                Color canvas = Parent != null ? Parent.BackColor : BackColor;
+                graphics.Clear(canvas);
+                Rectangle rect = new Rectangle(0, 0, Width - 1, Height - 1);
+                Color fillColor = Enabled ? BackColor : SystemColors.Control;
+                Color textColor = Enabled ? ForeColor : SystemColors.GrayText;
+                using (GraphicsPath path = Draw.RoundRect(rect, 8))
+                using (SolidBrush fill = new SolidBrush(fillColor))
+                {
+                    graphics.FillPath(fill, path);
+                    Color borderColor = Enabled ? _borderColor : SystemColors.ControlDark;
+                    if (Focused && Enabled) borderColor = _selectionBackColor;
+                    using (Pen border = new Pen(borderColor))
+                    {
+                        graphics.DrawPath(border, path);
+                    }
+                }
+                string text = SelectedIndex >= 0 ? GetItemText(SelectedItem) : Text;
+                Rectangle textRect = new Rectangle(8, 0, Width - 34, Height);
+                TextRenderer.DrawText(graphics, text, Font, textRect, textColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+                int centerX = Width - 15;
+                int centerY = Height / 2;
+                using (Pen arrow = new Pen(textColor, 1.4f))
+                {
+                    arrow.StartCap = LineCap.Round;
+                    arrow.EndCap = LineCap.Round;
+                    graphics.DrawLine(arrow, centerX - 4, centerY - 2, centerX, centerY + 2);
+                    graphics.DrawLine(arrow, centerX, centerY + 2, centerX + 4, centerY - 2);
+                }
+            }
+            catch { }
+            finally
+            {
+                if (owned && graphics != null) graphics.Dispose();
+            }
         }
 
         protected override void OnDrawItem(DrawItemEventArgs e)
@@ -686,36 +757,41 @@ namespace SessionRecovery.Studio
     {
         private int _value;
         private Color _trackColor = Color.FromArgb(34, 45, 61);
-        private Color _fillColor = Color.FromArgb(108, 99, 255);
-        private Color _fillEndColor = Color.FromArgb(51, 181, 229);
+        private Color _progressColor = Color.FromArgb(108, 99, 255);
+        private Color _progressEndColor = Color.FromArgb(51, 181, 229);
+        private int _cornerRadius = 4;
 
         public int Value { get { return _value; } set { _value = Math.Max(0, Math.Min(100, value)); Invalidate(); } }
         public Color TrackColor { get { return _trackColor; } set { _trackColor = value; Invalidate(); } }
-        public Color FillColor { get { return _fillColor; } set { _fillColor = value; Invalidate(); } }
-        public Color FillEndColor { get { return _fillEndColor; } set { _fillEndColor = value; Invalidate(); } }
+        public Color ProgressColor { get { return _progressColor; } set { _progressColor = value; Invalidate(); } }
+        public Color ProgressEndColor { get { return _progressEndColor; } set { _progressEndColor = value; Invalidate(); } }
+        public int CornerRadius { get { return _cornerRadius; } set { _cornerRadius = value; Invalidate(); } }
 
         public StudioProgress()
         {
-            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.UserPaint, true);
-            Size = new Size(200, 6);
-            TabStop = false;
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.UserPaint | ControlStyles.SupportsTransparentBackColor, true);
+            BackColor = Color.Transparent;
+            Size = new Size(200, 8);
         }
 
         protected override void OnPaint(PaintEventArgs e)
         {
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            Color canvas = Parent != null ? Parent.BackColor : Color.FromArgb(8, 12, 18);
+            Color canvas = Parent != null ? Parent.BackColor : Color.FromArgb(18, 25, 36);
             e.Graphics.Clear(canvas);
-            Rectangle track = new Rectangle(0, 0, Width - 1, Height - 1);
-            int radius = Math.Max(1, track.Height / 2);
-            Draw.FillRoundRect(e.Graphics, track, radius, _trackColor);
-            int fillWidth = (int)Math.Round((double)track.Width * _value / 100.0);
-            if (fillWidth < track.Height) fillWidth = _value > 0 ? track.Height : 0;
-            if (fillWidth > track.Width) fillWidth = track.Width;
-            if (fillWidth <= 0) return;
-            Rectangle fill = new Rectangle(0, 0, fillWidth, track.Height);
-            using (GraphicsPath path = Draw.RoundRect(fill, radius))
-            using (LinearGradientBrush brush = new LinearGradientBrush(new Rectangle(0, 0, Math.Max(2, track.Width), Math.Max(2, track.Height)), _fillColor, _fillEndColor, 0f))
+            Rectangle track = new Rectangle(0, (Height - 8) / 2, Width - 1, 7);
+            if (track.Width <= 0) return;
+            using (GraphicsPath path = Draw.RoundRect(track, _cornerRadius))
+            using (SolidBrush brush = new SolidBrush(_trackColor))
+            {
+                e.Graphics.FillPath(brush, path);
+            }
+            int filled = (int)Math.Round(track.Width * (double)_value / 100.0);
+            if (filled <= 0) return;
+            Rectangle fill = new Rectangle(track.X, track.Y, filled, track.Height);
+            if (fill.Width > track.Width) fill.Width = track.Width;
+            using (GraphicsPath path = Draw.RoundRect(fill, _cornerRadius))
+            using (LinearGradientBrush brush = new LinearGradientBrush(new Rectangle(0, 0, Math.Max(1, track.Width), Math.Max(1, track.Height)), _progressColor, _progressEndColor, 0f))
             {
                 e.Graphics.FillPath(brush, path);
             }
