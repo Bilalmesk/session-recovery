@@ -277,9 +277,12 @@ function Add-RSListItem {
 function New-RSFolderIconBitmap {
     $bitmap = New-Object System.Drawing.Bitmap(20, 20)
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-    $darkBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(41, 79, 130))
+    # Accent colour comes from the active Studio theme when it is loaded.
+    $folderColor = [System.Drawing.Color]::FromArgb(41, 79, 130)
+    if ($null -ne $script:rsP -and $script:rsP.ContainsKey('Accent')) { $folderColor = [System.Drawing.Color]$script:rsP.Accent }
+    $darkBrush = New-Object System.Drawing.SolidBrush($folderColor)
     $lightBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(226, 234, 244))
-    $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(41, 79, 130), 1)
+    $pen = New-Object System.Drawing.Pen($folderColor, 1)
     try {
         $graphics.Clear([System.Drawing.Color]::Transparent)
         $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
@@ -623,240 +626,201 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
-if (-not ('SRCardPanel' -as [type]) -or -not ('SRButton' -as [type])) {
-    Add-Type -TypeDefinition @'
-using System;
-using System.Drawing;
-using System.Drawing.Drawing2D;
-using System.Windows.Forms;
+# The restore window uses the same controls and colour themes as the Studio,
+# so it follows the theme chosen in Settings and looks like part of the app.
+$controlsPath = Join-Path $PSScriptRoot 'StudioControls.cs'
+if (-not (Test-Path -LiteralPath $controlsPath)) {
+    $controlsPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'src\StudioControls.cs'
+}
+$themePath = Join-Path $PSScriptRoot 'StudioTheme.ps1'
+if (-not (Test-Path -LiteralPath $themePath)) {
+    $themePath = Join-Path (Split-Path $PSScriptRoot -Parent) 'src\StudioTheme.ps1'
+}
+if (-not (Test-Path -LiteralPath $controlsPath) -or -not (Test-Path -LiteralPath $themePath)) {
+    Show-RSMessage -Text 'StudioControls.cs or StudioTheme.ps1 is missing. Reinstall Session Recovery.' -Icon 'Error'
+    exit 2
+}
+if (-not ('SessionRecovery.Studio.StudioProgress' -as [type])) {
+    Add-Type -Path $controlsPath -ReferencedAssemblies 'System.Windows.Forms', 'System.Drawing'
+}
+. $themePath
 
-public class SRCardPanel : Panel
-{
-    private Color _borderColor;
-    private Color _fillColor;
-    private int _cornerRadius;
-
-    public Color BorderColor
-    {
-        get { return _borderColor; }
-        set { _borderColor = value; Invalidate(); }
-    }
-
-    public Color FillColor
-    {
-        get { return _fillColor; }
-        set { _fillColor = value; Invalidate(); }
-    }
-
-    public int CornerRadius
-    {
-        get { return _cornerRadius; }
-        set { _cornerRadius = value; Invalidate(); }
-    }
-
-    public SRCardPanel()
-    {
-        _borderColor = Color.FromArgb(224, 229, 233);
-        _fillColor = Color.White;
-        _cornerRadius = 8;
-        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.UserPaint, true);
-        BackColor = Color.FromArgb(244, 246, 248);
-        Padding = new Padding(1);
-    }
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        e.Graphics.Clear(BackColor);
-        Rectangle rect = new Rectangle(0, 0, Width - 1, Height - 1);
-        using (GraphicsPath path = CreateRoundRect(rect, _cornerRadius))
-        using (SolidBrush brush = new SolidBrush(_fillColor))
-        using (Pen pen = new Pen(_borderColor))
-        {
-            e.Graphics.FillPath(brush, path);
-            e.Graphics.DrawPath(pen, path);
-        }
-    }
-
-    private static GraphicsPath CreateRoundRect(Rectangle rect, int radius)
-    {
-        GraphicsPath path = new GraphicsPath();
-        int diameter = radius * 2;
-        if (diameter > rect.Width) { diameter = rect.Width; }
-        if (diameter > rect.Height) { diameter = rect.Height; }
-        if (diameter <= 0)
-        {
-            path.AddRectangle(rect);
-            return path;
-        }
-        path.AddArc(rect.X, rect.Y, diameter, diameter, 180, 90);
-        path.AddArc(rect.Right - diameter, rect.Y, diameter, diameter, 270, 90);
-        path.AddArc(rect.Right - diameter, rect.Bottom - diameter, diameter, diameter, 0, 90);
-        path.AddArc(rect.X, rect.Bottom - diameter, diameter, diameter, 90, 90);
-        path.CloseFigure();
-        return path;
-    }
+# Dark scroll bars and check boxes for the native list view.
+if (-not ('SessionRecovery.RestoreNative' -as [type])) {
+    try {
+        Add-Type -Namespace SessionRecovery -Name RestoreNative -MemberDefinition '[System.Runtime.InteropServices.DllImport("uxtheme.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)] public static extern int SetWindowTheme(System.IntPtr hWnd, string pszSubAppName, string pszSubIdList);'
+    } catch { }
 }
 
-public class SRButton : Button
-{
-    private bool _hover;
-    private bool _pressed;
-    private Color _fillColor;
-    private Color _hoverColor;
-    private Color _pressedColor;
-    private Color _outlineColor;
-    private int _cornerRadius;
-
-    public Color FillColor
-    {
-        get { return _fillColor; }
-        set { _fillColor = value; Invalidate(); }
+$rsThemeName = 'Aurora'
+try {
+    $rsThemeProperty = $config.PSObject.Properties['theme']
+    if ($null -ne $rsThemeProperty -and -not [string]::IsNullOrWhiteSpace([string]$rsThemeProperty.Value)) {
+        $rsThemeName = [string]$rsThemeProperty.Value
     }
+} catch { }
+$rsThemeKey = Resolve-StudioThemeKey -Theme $rsThemeName
+$script:rsP = Get-StudioPalette -Theme $rsThemeKey
+$rsThemeDark = $true
+try { $rsThemeDark = [bool]((Get-StudioThemeCatalog)[$rsThemeKey].Dark) } catch { }
 
-    public Color HoverColor
-    {
-        get { return _hoverColor; }
-        set { _hoverColor = value; Invalidate(); }
-    }
+$script:rsFontBody = New-Object System.Drawing.Font('Segoe UI', 9)
+$script:rsFontSmall = New-Object System.Drawing.Font('Segoe UI', 8.25)
+$script:rsFontSemibold = New-Object System.Drawing.Font('Segoe UI Semibold', 9.5)
+$script:rsFontMono = New-Object System.Drawing.Font('Consolas', 8.25)
 
-    public Color PressedColor
-    {
-        get { return _pressedColor; }
-        set { _pressedColor = value; Invalidate(); }
-    }
-
-    public Color OutlineColor
-    {
-        get { return _outlineColor; }
-        set { _outlineColor = value; Invalidate(); }
-    }
-
-    public int CornerRadius
-    {
-        get { return _cornerRadius; }
-        set { _cornerRadius = value; Invalidate(); }
-    }
-
-    public SRButton()
-    {
-        _fillColor = Color.FromArgb(41, 79, 130);
-        _hoverColor = Color.FromArgb(34, 69, 115);
-        _pressedColor = Color.FromArgb(27, 56, 93);
-        _outlineColor = Color.Empty;
-        _cornerRadius = 6;
-        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.UserPaint, true);
-        FlatStyle = FlatStyle.Flat;
-        FlatAppearance.BorderSize = 0;
-        Cursor = Cursors.Hand;
-        Font = new Font("Segoe UI Semibold", 9.25f, FontStyle.Regular, GraphicsUnit.Point);
-        UseVisualStyleBackColor = false;
-        ForeColor = Color.White;
-    }
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        Color parentColor = Parent != null ? Parent.BackColor : Color.White;
-        e.Graphics.Clear(parentColor);
-        Color fill = !Enabled ? Color.FromArgb(244, 246, 248) : (_pressed ? _pressedColor : (_hover ? _hoverColor : _fillColor));
-        Rectangle rect = new Rectangle(0, 0, Width - 1, Height - 1);
-        using (GraphicsPath path = CreateRoundRect(rect, _cornerRadius))
-        using (SolidBrush brush = new SolidBrush(fill))
-        {
-            e.Graphics.FillPath(brush, path);
-            if (!_outlineColor.IsEmpty)
-            {
-                using (Pen pen = new Pen(_outlineColor))
-                {
-                    e.Graphics.DrawPath(pen, path);
-                }
-            }
-        }
-        Color textColor = Enabled ? ForeColor : Color.FromArgb(139, 148, 158);
-        TextRenderer.DrawText(e.Graphics, Text, Font, rect, textColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
-        if (Focused)
-        {
-            ControlPaint.DrawFocusRectangle(e.Graphics, Rectangle.Inflate(rect, -4, -4), textColor, fill);
-        }
-    }
-
-    protected override void OnMouseEnter(EventArgs e)
-    {
-        _hover = true;
-        Invalidate();
-        base.OnMouseEnter(e);
-    }
-
-    protected override void OnMouseLeave(EventArgs e)
-    {
-        _hover = false;
-        _pressed = false;
-        Invalidate();
-        base.OnMouseLeave(e);
-    }
-
-    protected override void OnMouseDown(MouseEventArgs e)
-    {
-        if (e.Button == MouseButtons.Left) { _pressed = true; Invalidate(); }
-        base.OnMouseDown(e);
-    }
-
-    protected override void OnMouseUp(MouseEventArgs e)
-    {
-        _pressed = false;
-        Invalidate();
-        base.OnMouseUp(e);
-    }
-
-    protected override void OnEnabledChanged(EventArgs e)
-    {
-        Invalidate();
-        base.OnEnabledChanged(e);
-    }
-
-    private static GraphicsPath CreateRoundRect(Rectangle rect, int radius)
-    {
-        GraphicsPath path = new GraphicsPath();
-        int diameter = radius * 2;
-        if (diameter > rect.Width) { diameter = rect.Width; }
-        if (diameter > rect.Height) { diameter = rect.Height; }
-        if (diameter <= 0)
-        {
-            path.AddRectangle(rect);
-            return path;
-        }
-        path.AddArc(rect.X, rect.Y, diameter, diameter, 180, 90);
-        path.AddArc(rect.Right - diameter, rect.Y, diameter, diameter, 270, 90);
-        path.AddArc(rect.Right - diameter, rect.Bottom - diameter, diameter, diameter, 0, 90);
-        path.AddArc(rect.X, rect.Bottom - diameter, diameter, diameter, 90, 90);
-        path.CloseFigure();
-        return path;
-    }
+function New-RSLabel {
+    param(
+        [string]$Text = '',
+        [int]$X = 0,
+        [int]$Y = 0,
+        [int]$Width = 200,
+        [int]$Height = 20,
+        $Font = $null,
+        $Color = $null,
+        [string]$Align = 'MiddleLeft'
+    )
+    $label = New-Object System.Windows.Forms.Label
+    $label.Text = $Text
+    $label.Location = New-Object System.Drawing.Point($X, $Y)
+    $label.Size = New-Object System.Drawing.Size($Width, $Height)
+    $label.Font = if ($null -ne $Font) { $Font } else { $script:rsFontBody }
+    $label.ForeColor = if ($null -ne $Color) { $Color } else { $script:rsP.Text }
+    $label.BackColor = [System.Drawing.Color]::Transparent
+    $label.TextAlign = [System.Drawing.ContentAlignment]$Align
+    $label.AutoSize = $false
+    $label.AutoEllipsis = $true
+    $label.UseMnemonic = $false
+    return $label
 }
-'@ -ReferencedAssemblies 'System.Windows.Forms', 'System.Drawing'
+
+function New-RSCard {
+    param(
+        [int]$X = 0,
+        [int]$Y = 0,
+        [int]$Width = 300,
+        [int]$Height = 120,
+        $Fill = $null,
+        $Border = $null,
+        $Canvas = $null,
+        [int]$Radius = 14
+    )
+    $card = New-Object SessionRecovery.Studio.StudioCard
+    $card.Location = New-Object System.Drawing.Point($X, $Y)
+    $card.Size = New-Object System.Drawing.Size($Width, $Height)
+    $card.FillColor = if ($null -ne $Fill) { $Fill } else { $script:rsP.Card }
+    $card.BorderColor = if ($null -ne $Border) { $Border } else { $script:rsP.Border }
+    $card.CanvasColor = if ($null -ne $Canvas) { $Canvas } else { $script:rsP.Bg }
+    $card.CornerRadius = $Radius
+    return $card
+}
+
+function New-RSButton {
+    param(
+        [string]$Text = '',
+        [int]$Width = 120,
+        [int]$Height = 40,
+        [switch]$Primary,
+        [string]$Glyph = ''
+    )
+    $button = New-Object SessionRecovery.Studio.StudioButton
+    $button.Text = $Text
+    $button.Size = New-Object System.Drawing.Size($Width, $Height)
+    $button.CornerRadius = 9
+    $button.Glyph = $Glyph
+    $button.DisabledFillColor = $script:rsP.DisabledFill
+    $button.DisabledTextColor = $script:rsP.DisabledText
+    if ($Primary) {
+        $button.FillColor = $script:rsP.Accent
+        $button.GradientEndColor = $script:rsP.Accent2
+        $button.HoverColor = $script:rsP.AccentHover
+        $button.PressedColor = $script:rsP.AccentPressed
+        $button.TextColor = $script:rsP.AccentText
+        $button.OutlineColor = [System.Drawing.Color]::Empty
+    } else {
+        $button.FillColor = $script:rsP.CardAlt
+        $button.GradientEndColor = [System.Drawing.Color]::Empty
+        $button.HoverColor = $script:rsP.CardHover
+        $button.PressedColor = $script:rsP.Pressed
+        $button.TextColor = $script:rsP.Text
+        $button.OutlineColor = $script:rsP.Border
+    }
+    return $button
+}
+
+function New-RSToggle {
+    param([int]$X = 0, [int]$Y = 0, [bool]$Checked = $false)
+    $toggle = New-Object SessionRecovery.Studio.StudioToggle
+    $toggle.Location = New-Object System.Drawing.Point($X, $Y)
+    $toggle.Checked = $Checked
+    $toggle.OnColor = $script:rsP.Accent
+    $toggle.OffColor = $script:rsP.ToggleOff
+    return $toggle
+}
+
+function New-RSCombo {
+    param([int]$X = 0, [int]$Y = 0, [int]$Width = 200)
+    $combo = New-Object SessionRecovery.Studio.StudioComboBox
+    $combo.Location = New-Object System.Drawing.Point($X, $Y)
+    $combo.Size = New-Object System.Drawing.Size($Width, 28)
+    $combo.BackColor = $script:rsP.CardAlt
+    $combo.ForeColor = $script:rsP.Text
+    $combo.SelectionBackColor = $script:rsP.ComboSelection
+    return $combo
+}
+
+function New-RSRule {
+    param([int]$X, [int]$Y, [int]$Width)
+    $rule = New-Object System.Windows.Forms.Panel
+    $rule.Location = New-Object System.Drawing.Point($X, $Y)
+    $rule.Size = New-Object System.Drawing.Size($Width, 1)
+    $rule.BackColor = $script:rsP.BorderSoft
+    return $rule
 }
 
 $script:rsSnapshotEntries = $snapshotEntries
 $script:rsUpdating = $false
 $script:rsRestoring = $false
 
-$rsInk = [System.Drawing.Color]::FromArgb(32, 37, 43)
-$rsMuted = [System.Drawing.Color]::FromArgb(91, 101, 112)
-$rsLine = [System.Drawing.Color]::FromArgb(224, 229, 233)
-$rsSoft = [System.Drawing.Color]::FromArgb(244, 246, 248)
-$rsAccent = [System.Drawing.Color]::FromArgb(41, 79, 130)
-$rsAccentHover = [System.Drawing.Color]::FromArgb(34, 69, 115)
-$rsAccentPressed = [System.Drawing.Color]::FromArgb(27, 56, 93)
-$rsWhite = [System.Drawing.Color]::White
+# A plain-language crash reason replaces guesswork in the header.
+$rsCrash = $false
+$rsCrashText = ''
+try {
+    $shutdownInfo = Get-SRLastShutdownReason
+    if ([string]$shutdownInfo.Kind -eq 'crash' -and -not [string]::IsNullOrWhiteSpace([string]$shutdownInfo.Reason)) {
+        $rsCrash = $true
+        $reasonText = Format-SRShutdownReason -Shutdown $shutdownInfo -Strings $script:RestoreStrings
+        $rsCrashText = ((T 'RstShutdownReason' 'Windows stopped unexpectedly: {0}') -f $reasonText)
+    }
+} catch { }
+
+$rsVersion = ''
+try {
+    $rsHostExe = @(
+        (Join-Path $PSScriptRoot 'SessionRecovery.exe'),
+        (Join-Path (Split-Path $PSScriptRoot -Parent) 'dist\SessionRecovery.exe')
+    ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if ($rsHostExe) {
+        $rsVersionMatch = [regex]::Match([string](Get-Item -LiteralPath $rsHostExe).VersionInfo.FileVersion, '^\d+\.\d+\.\d+')
+        if ($rsVersionMatch.Success) { $rsVersion = $rsVersionMatch.Value }
+    }
+} catch { }
+
+$anchorTL = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left
+$anchorTLR = $anchorTL -bor [System.Windows.Forms.AnchorStyles]::Right
+$anchorTR = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
+$anchorBL = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+$anchorBLR = $anchorBL -bor [System.Windows.Forms.AnchorStyles]::Right
+$anchorBR = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Right
+$anchorAll = $anchorTLR -bor [System.Windows.Forms.AnchorStyles]::Bottom
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'Session Recovery'
-$form.ClientSize = New-Object System.Drawing.Size(900, 700)
-$form.MinimumSize = New-Object System.Drawing.Size(820, 640)
+$form.ClientSize = New-Object System.Drawing.Size(1020, 700)
+$form.MinimumSize = New-Object System.Drawing.Size(940, 640)
 $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
-$form.Font = New-Object System.Drawing.Font('Segoe UI', 9)
-$form.BackColor = $rsWhite
+$form.Font = $script:rsFontBody
+$form.BackColor = $script:rsP.Bg
 $form.ShowInTaskbar = $true
 
 $iconPath = Join-Path $PSScriptRoot 'SessionRecovery.ico'
@@ -874,97 +838,6 @@ if ($iconPath) {
     }
 }
 
-$accentBar = New-Object System.Windows.Forms.Panel
-$accentBar.Location = New-Object System.Drawing.Point(0, 0)
-$accentBar.Size = New-Object System.Drawing.Size(900, 4)
-$accentBar.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
-$accentBar.BackColor = $rsAccent
-$form.Controls.Add($accentBar)
-
-$header = New-Object System.Windows.Forms.Panel
-$header.Location = New-Object System.Drawing.Point(0, 4)
-$header.Size = New-Object System.Drawing.Size(900, 120)
-$header.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
-$header.BackColor = $rsWhite
-$header.Add_Paint({
-    param($sender, $e)
-    $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(224, 229, 233))
-    try {
-        $e.Graphics.DrawLine($pen, 0, $sender.Height - 1, $sender.Width, $sender.Height - 1)
-    } finally {
-        $pen.Dispose()
-    }
-})
-$form.Controls.Add($header)
-
-$brandLogo = New-Object System.Windows.Forms.PictureBox
-$brandLogo.Location = New-Object System.Drawing.Point(34, 18)
-$brandLogo.Size = New-Object System.Drawing.Size(36, 36)
-$brandLogo.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
-$brandLogo.BackColor = $rsWhite
-if ($brandImage) { $brandLogo.Image = $brandImage } else { $brandLogo.Visible = $false }
-$header.Controls.Add($brandLogo)
-
-$brandName = New-Object System.Windows.Forms.Label
-$brandName.Text = 'SESSION RECOVERY'
-$brandName.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 10.5)
-$brandName.ForeColor = $rsInk
-$brandName.AutoSize = $true
-$brandName.Location = New-Object System.Drawing.Point(80, 18)
-$header.Controls.Add($brandName)
-
-$brandMeta = New-Object System.Windows.Forms.Label
-$brandMeta.Text = 'LOCAL SNAPSHOTS  /  V2.8.0'
-$brandMeta.Font = New-Object System.Drawing.Font('Consolas', 7.5)
-$brandMeta.ForeColor = $rsMuted
-$brandMeta.AutoSize = $true
-$brandMeta.Location = New-Object System.Drawing.Point(82, 39)
-$header.Controls.Add($brandMeta)
-
-$privacyLabel = New-Object System.Windows.Forms.Label
-$privacyLabel.Text = 'LOCAL ONLY  /  NO CLOUD'
-$privacyLabel.Font = New-Object System.Drawing.Font('Consolas', 8)
-$privacyLabel.ForeColor = $rsMuted
-$privacyLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
-$privacyLabel.AutoSize = $false
-$privacyLabel.Size = New-Object System.Drawing.Size(260, 24)
-$privacyLabel.Location = New-Object System.Drawing.Point(606, 26)
-$privacyLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
-$header.Controls.Add($privacyLabel)
-
-$titleLabel = New-Object System.Windows.Forms.Label
-$titleLabel.Text = (T 'RstTitle' 'Restore your previous session')
-$titleLabel.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 20)
-$titleLabel.ForeColor = $rsInk
-$titleLabel.AutoSize = $false
-$titleLabel.Size = New-Object System.Drawing.Size(830, 36)
-$titleLabel.AutoEllipsis = $true
-$titleLabel.Location = New-Object System.Drawing.Point(34, 62)
-$titleLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
-$header.Controls.Add($titleLabel)
-
-$subtitleLabel = New-Object System.Windows.Forms.Label
-$subtitleLabel.Text = (T 'RstSubtitle' 'Choose what to reopen. Everything stays on this PC.')
-try {
-    # A plain-language crash reason replaces guesswork in the header.
-    $shutdownInfo = Get-SRLastShutdownReason
-    if ([string]$shutdownInfo.Kind -eq 'crash' -and -not [string]::IsNullOrWhiteSpace([string]$shutdownInfo.Reason)) {
-        $reasonText = Format-SRShutdownReason -Shutdown $shutdownInfo -Strings $script:RestoreStrings
-        $subtitleLabel.Text = ((T 'RstShutdownReason' 'Windows stopped unexpectedly: {0}') -f $reasonText)
-        $subtitleLabel.ForeColor = [System.Drawing.Color]::FromArgb(176, 48, 66)
-    }
-} catch { }
-$subtitleLabel.Font = New-Object System.Drawing.Font('Segoe UI', 9.5)
-$subtitleLabel.ForeColor = $rsMuted
-# Long crash reasons in any language must ellipsize inside the header band
-# instead of running over the snapshot card below it.
-$subtitleLabel.AutoSize = $false
-$subtitleLabel.Size = New-Object System.Drawing.Size(830, 20)
-$subtitleLabel.AutoEllipsis = $true
-$subtitleLabel.Location = New-Object System.Drawing.Point(36, 97)
-$subtitleLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
-$header.Controls.Add($subtitleLabel)
-
 # Right-to-left languages get correctly shaped, right-aligned text. Layout
 # mirroring is intentionally not used: it scrambles custom-painted controls.
 try {
@@ -973,102 +846,127 @@ try {
     }
 } catch { }
 
-$content = New-Object System.Windows.Forms.Panel
-$content.Location = New-Object System.Drawing.Point(0, 124)
-$content.Size = New-Object System.Drawing.Size(900, 576)
-$content.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
-$content.BackColor = $rsSoft
-$form.Controls.Add($content)
+# ---- Sidebar (same structure as the Studio sidebar) ------------------------
 
-$snapshotCard = New-Object SRCardPanel
-$snapshotCard.Location = New-Object System.Drawing.Point(32, 18)
-$snapshotCard.Size = New-Object System.Drawing.Size(836, 68)
-$snapshotCard.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
-$content.Controls.Add($snapshotCard)
+$sidebar = New-Object System.Windows.Forms.Panel
+$sidebar.Location = New-Object System.Drawing.Point(0, 0)
+$sidebar.Size = New-Object System.Drawing.Size(236, 700)
+$sidebar.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+$sidebar.BackColor = $script:rsP.Sidebar
+$form.Controls.Add($sidebar)
 
-$snapshotLabel = New-Object System.Windows.Forms.Label
-$snapshotLabel.Text = 'SNAPSHOT'
-$snapshotLabel.Font = New-Object System.Drawing.Font('Consolas', 7.5)
-$snapshotLabel.ForeColor = $rsMuted
-$snapshotLabel.BackColor = $rsWhite
-$snapshotLabel.AutoSize = $true
-$snapshotLabel.Location = New-Object System.Drawing.Point(18, 11)
-$snapshotCard.Controls.Add($snapshotLabel)
+$brandPic = New-Object System.Windows.Forms.PictureBox
+$brandPic.Location = New-Object System.Drawing.Point(22, 24)
+$brandPic.Size = New-Object System.Drawing.Size(38, 38)
+$brandPic.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
+$brandPic.BackColor = [System.Drawing.Color]::Transparent
+if ($brandImage) { $brandPic.Image = $brandImage } else { $brandPic.Visible = $false }
+$sidebar.Controls.Add($brandPic)
 
-$snapshotCombo = New-Object System.Windows.Forms.ComboBox
-$snapshotCombo.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
-$snapshotCombo.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
-$snapshotCombo.IntegralHeight = $false
-$snapshotCombo.Font = New-Object System.Drawing.Font('Segoe UI', 9.25)
-$snapshotCombo.ForeColor = $rsInk
-$snapshotCombo.BackColor = $rsWhite
-$snapshotCombo.Location = New-Object System.Drawing.Point(18, 30)
-$snapshotCombo.Size = New-Object System.Drawing.Size(600, 26)
+$brandName = New-RSLabel -Text (T 'BrandSession' 'Session') -X 70 -Y 23 -Width 150 -Height 24 -Font (New-Object System.Drawing.Font('Segoe UI Semibold', 13))
+$sidebar.Controls.Add($brandName)
+$brandSub = New-RSLabel -Text (T 'BrandRecoveryRestore' 'RECOVERY  /  RESTORE') -X 72 -Y 45 -Width 162 -Height 16 -Font $script:rsFontMono -Color $script:rsP.Subtle
+$sidebar.Controls.Add($brandSub)
+
+$sideCard = New-RSCard -X 14 -Y 84 -Width 208 -Height 206 -Fill $script:rsP.CardAlt -Border $script:rsP.BorderSoft -Canvas $script:rsP.Sidebar -Radius 12
+$sidebar.Controls.Add($sideCard)
+
+$sideBadge = New-Object SessionRecovery.Studio.StudioBadge
+$sideBadge.Size = New-Object System.Drawing.Size(120, 22)
+$sideBadge.Location = New-Object System.Drawing.Point(14, 13)
+$sideCard.Controls.Add($sideBadge)
+if ($rsCrash) {
+    $sideBadge.FillColor = $script:rsP.AmberSoft
+    $sideBadge.TextColor = $script:rsP.Amber
+    $sideBadge.Text = (T 'BadgeAttention' 'ATTENTION')
+} else {
+    $sideBadge.FillColor = $script:rsP.GreenSoft
+    $sideBadge.TextColor = $script:rsP.Green
+    $sideBadge.Text = (T 'BadgeReady' 'READY TO RESTORE')
+}
+
+$sideTitle = New-RSLabel -Text 'CAPTURED' -X 14 -Y 44 -Width 180 -Height 16 -Font $script:rsFontMono -Color $script:rsP.Subtle
+$sideCard.Controls.Add($sideTitle)
+$ageLabel = New-RSLabel -Text '' -X 14 -Y 61 -Width 182 -Height 24 -Font (New-Object System.Drawing.Font('Segoe UI Semibold', 11)) -Color $script:rsP.Text
+$sideCard.Controls.Add($ageLabel)
+$sideCard.Controls.Add((New-RSRule -X 14 -Y 94 -Width 180))
+
+$statTexts = @(
+    (T 'RstApps' 'Applications'),
+    (T 'RstFolders' 'Folders'),
+    (T 'RstBrowsers' 'Browsers'),
+    (T 'RstBrowserTabs' 'Browser tabs')
+)
+$statValueLabels = @()
+for ($statIndex = 0; $statIndex -lt $statTexts.Count; $statIndex++) {
+    $statY = 104 + (24 * $statIndex)
+    $sideCard.Controls.Add((New-RSLabel -Text $statTexts[$statIndex] -X 14 -Y $statY -Width 120 -Height 20 -Font $script:rsFontSmall -Color $script:rsP.Muted))
+    $valueLabel = New-RSLabel -Text '0' -X 136 -Y $statY -Width 58 -Height 20 -Font $script:rsFontSemibold -Color $script:rsP.Text -Align 'MiddleRight'
+    $sideCard.Controls.Add($valueLabel)
+    $statValueLabels += $valueLabel
+}
+$statApps = $statValueLabels[0]
+$statFolders = $statValueLabels[1]
+$statBrowsers = $statValueLabels[2]
+$statTabs = $statValueLabels[3]
+
+$sideVersionText = (T 'BadgeLocalOnly' 'LOCAL ONLY')
+if (-not [string]::IsNullOrWhiteSpace($rsVersion)) { $sideVersionText = ('RESTORE {0}  /  {1}' -f $rsVersion, $sideVersionText) }
+$sideVersion = New-RSLabel -Text $sideVersionText -X 14 -Y 664 -Width 208 -Height 16 -Font $script:rsFontMono -Color $script:rsP.Subtle -Align 'MiddleCenter'
+$sideVersion.Anchor = $anchorBLR
+$sidebar.Controls.Add($sideVersion)
+
+# ---- Main area ------------------------------------------------------------
+
+$main = New-Object System.Windows.Forms.Panel
+$main.Location = New-Object System.Drawing.Point(236, 0)
+$main.Size = New-Object System.Drawing.Size(784, 700)
+$main.Anchor = $anchorAll
+$main.BackColor = $script:rsP.Bg
+$form.Controls.Add($main)
+
+$titleLabel = New-RSLabel -Text (T 'RstTitle' 'Restore your previous session') -X 32 -Y 22 -Width 720 -Height 36 -Font (New-Object System.Drawing.Font('Segoe UI Semibold', 19))
+$titleLabel.Anchor = $anchorTLR
+$main.Controls.Add($titleLabel)
+
+$subtitleLabel = New-RSLabel -Text (T 'RstSubtitle' 'Choose what to reopen. Everything stays on this PC.') -X 34 -Y 60 -Width 718 -Height 20 -Font (New-Object System.Drawing.Font('Segoe UI', 9.5)) -Color $script:rsP.Muted
+if ($rsCrash) {
+    $subtitleLabel.Text = $rsCrashText
+    $subtitleLabel.ForeColor = $script:rsP.Red
+}
+$subtitleLabel.Anchor = $anchorTLR
+$main.Controls.Add($subtitleLabel)
+
+$snapshotCard = New-RSCard -X 32 -Y 94 -Width 720 -Height 78
+$snapshotCard.Anchor = $anchorTLR
+$main.Controls.Add($snapshotCard)
+$snapshotCard.Controls.Add((New-RSLabel -Text 'SNAPSHOT' -X 18 -Y 11 -Width 200 -Height 16 -Font $script:rsFontMono -Color $script:rsP.Subtle))
+
+$snapshotCombo = New-RSCombo -X 18 -Y 34 -Width 684
+$snapshotCombo.Anchor = $anchorTLR
 $snapshotCard.Controls.Add($snapshotCombo)
 
-$ageLabel = New-Object System.Windows.Forms.Label
-$ageLabel.Text = ''
-$ageLabel.Font = New-Object System.Drawing.Font('Consolas', 8.25)
-$ageLabel.ForeColor = $rsMuted
-$ageLabel.BackColor = $rsWhite
-$ageLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
-$ageLabel.AutoSize = $false
-$ageLabel.Size = New-Object System.Drawing.Size(180, 24)
-$ageLabel.AutoEllipsis = $true
-$ageLabel.Location = New-Object System.Drawing.Point(636, 32)
-$ageLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
-$snapshotCard.Controls.Add($ageLabel)
+$listCard = New-RSCard -X 32 -Y 186 -Width 720 -Height 320
+$listCard.Anchor = $anchorAll
+$main.Controls.Add($listCard)
 
-$listCard = New-Object SRCardPanel
-$listCard.Location = New-Object System.Drawing.Point(32, 98)
-$listCard.Size = New-Object System.Drawing.Size(836, 300)
-$listCard.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
-$content.Controls.Add($listCard)
-
-$listHeading = New-Object System.Windows.Forms.Label
-$listHeading.Text = (T 'RstItems' 'ITEMS TO REOPEN')
-$listHeading.Font = New-Object System.Drawing.Font('Consolas', 7.5)
-$listHeading.ForeColor = $rsMuted
-$listHeading.BackColor = $rsWhite
-$listHeading.AutoSize = $true
-$listHeading.Location = New-Object System.Drawing.Point(18, 12)
+$listHeading = New-RSLabel -Text (T 'RstItems' 'ITEMS TO REOPEN') -X 18 -Y 14 -Width 400 -Height 18 -Font $script:rsFontMono -Color $script:rsP.Subtle
 $listCard.Controls.Add($listHeading)
 
-$selectAll = New-Object System.Windows.Forms.CheckBox
-$selectAll.Text = (T 'RstSelectAll' 'Select all')
-$selectAll.Checked = $true
-$selectAll.AutoSize = $false
-$selectAll.Size = New-Object System.Drawing.Size(94, 22)
-$selectAll.Location = New-Object System.Drawing.Point(724, 8)
-$selectAll.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
-$selectAll.Font = New-Object System.Drawing.Font('Segoe UI', 9)
-$selectAll.ForeColor = $rsInk
-$selectAll.BackColor = $rsWhite
+$selectAll = New-RSToggle -X 656 -Y 9 -Checked $true
+$selectAll.Anchor = $anchorTR
 $listCard.Controls.Add($selectAll)
+$selectAllLabel = New-RSLabel -Text (T 'RstSelectAll' 'Select all') -X 536 -Y 11 -Width 114 -Height 22 -Font $script:rsFontBody -Color $script:rsP.Text -Align 'MiddleRight'
+$selectAllLabel.Anchor = $anchorTR
+$listCard.Controls.Add($selectAllLabel)
 
-$listRule = New-Object System.Windows.Forms.Panel
-$listRule.Location = New-Object System.Drawing.Point(18, 38)
-$listRule.Size = New-Object System.Drawing.Size(800, 1)
-$listRule.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
-$listRule.BackColor = $rsLine
+$listRule = New-RSRule -X 18 -Y 44 -Width 684
+$listRule.Anchor = $anchorTLR
 $listCard.Controls.Add($listRule)
 
-$itemHeader = New-Object System.Windows.Forms.Label
-$itemHeader.Text = 'ITEM'
-$itemHeader.Font = New-Object System.Drawing.Font('Consolas', 7.5)
-$itemHeader.ForeColor = $rsMuted
-$itemHeader.BackColor = $rsWhite
-$itemHeader.AutoSize = $true
-$itemHeader.Location = New-Object System.Drawing.Point(18, 46)
+$itemHeader = New-RSLabel -Text 'ITEM' -X 18 -Y 52 -Width 160 -Height 16 -Font $script:rsFontMono -Color $script:rsP.Subtle
 $listCard.Controls.Add($itemHeader)
-
-$detailsHeader = New-Object System.Windows.Forms.Label
-$detailsHeader.Text = (T 'RstDetails' 'DETAILS')
-$detailsHeader.Font = New-Object System.Drawing.Font('Consolas', 7.5)
-$detailsHeader.ForeColor = $rsMuted
-$detailsHeader.BackColor = $rsWhite
-$detailsHeader.AutoSize = $true
-$detailsHeader.Location = New-Object System.Drawing.Point(306, 46)
+$detailsHeader = New-RSLabel -Text (T 'RstDetails' 'DETAILS') -X 270 -Y 52 -Width 200 -Height 16 -Font $script:rsFontMono -Color $script:rsP.Subtle
 $listCard.Controls.Add($detailsHeader)
 
 $list = New-Object System.Windows.Forms.ListView
@@ -1080,12 +978,12 @@ $list.HeaderStyle = [System.Windows.Forms.ColumnHeaderStyle]::None
 $list.HideSelection = $false
 $list.MultiSelect = $true
 $list.BorderStyle = [System.Windows.Forms.BorderStyle]::None
-$list.BackColor = $rsWhite
-$list.ForeColor = $rsInk
+$list.BackColor = $script:rsP.Card
+$list.ForeColor = $script:rsP.Text
 $list.Font = New-Object System.Drawing.Font('Segoe UI', 9.25)
-$list.Location = New-Object System.Drawing.Point(18, 66)
-$list.Size = New-Object System.Drawing.Size(800, 220)
-$list.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+$list.Location = New-Object System.Drawing.Point(18, 74)
+$list.Size = New-Object System.Drawing.Size(684, 232)
+$list.Anchor = $anchorAll
 $rowImages = New-Object System.Windows.Forms.ImageList
 $rowImages.ImageSize = New-Object System.Drawing.Size(20, 20)
 $rowImages.ColorDepth = [System.Windows.Forms.ColorDepth]::Depth32Bit
@@ -1095,8 +993,8 @@ $rowImages.TransparentColor = [System.Drawing.Color]::Transparent
 $list.SmallImageList = $rowImages
 $script:rsRowImages = $rowImages
 $script:rsIconCache = @{}
-[void]$list.Columns.Add('Item', 288)
-[void]$list.Columns.Add('Details', 500)
+[void]$list.Columns.Add('Item', 250)
+[void]$list.Columns.Add('Details', 420)
 $list.Add_Resize({
     if ($list.Columns.Count -lt 2) { return }
     $available = [Math]::Max(300, $list.ClientSize.Width)
@@ -1105,41 +1003,25 @@ $list.Add_Resize({
     $list.Columns[1].Width = [Math]::Max(140, $available - $first - 4)
     $detailsHeader.Left = $list.Left + $first
 })
+$list.Add_HandleCreated({
+    try {
+        $themeName = if ($rsThemeDark) { 'DarkMode_Explorer' } else { 'Explorer' }
+        [void][SessionRecovery.RestoreNative]::SetWindowTheme($list.Handle, $themeName, $null)
+    } catch { }
+})
 $listCard.Controls.Add($list)
 
-$optionsCard = New-Object SRCardPanel
-$optionsCard.Location = New-Object System.Drawing.Point(32, 410)
-$optionsCard.Size = New-Object System.Drawing.Size(836, 88)
-$optionsCard.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
-$content.Controls.Add($optionsCard)
+$optionsCard = New-RSCard -X 32 -Y 520 -Width 720 -Height 100
+$optionsCard.Anchor = $anchorBLR
+$main.Controls.Add($optionsCard)
 
-$optionsHeading = New-Object System.Windows.Forms.Label
-$optionsHeading.Text = (T 'RstOptions' 'RESTORE OPTIONS')
-$optionsHeading.Font = New-Object System.Drawing.Font('Consolas', 7.5)
-$optionsHeading.ForeColor = $rsMuted
-$optionsHeading.BackColor = $rsWhite
-$optionsHeading.AutoSize = $true
-$optionsHeading.Location = New-Object System.Drawing.Point(18, 10)
+$optionsHeading = New-RSLabel -Text (T 'RstOptions' 'RESTORE OPTIONS') -X 18 -Y 12 -Width 400 -Height 18 -Font $script:rsFontMono -Color $script:rsP.Subtle
 $optionsCard.Controls.Add($optionsHeading)
 
-$tabModeLabel = New-Object System.Windows.Forms.Label
-$tabModeLabel.Text = (T 'RstBrowserTabs' 'Browser tabs')
-$tabModeLabel.Font = New-Object System.Drawing.Font('Segoe UI', 9)
-$tabModeLabel.ForeColor = $rsInk
-$tabModeLabel.BackColor = $rsWhite
-$tabModeLabel.AutoSize = $true
-$tabModeLabel.Location = New-Object System.Drawing.Point(18, 37)
+$tabModeLabel = New-RSLabel -Text (T 'RstBrowserTabs' 'Browser tabs') -X 18 -Y 40 -Width 110 -Height 24 -Font $script:rsFontBody -Color $script:rsP.Text
 $optionsCard.Controls.Add($tabModeLabel)
 
-$tabModeCombo = New-Object System.Windows.Forms.ComboBox
-$tabModeCombo.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
-$tabModeCombo.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
-$tabModeCombo.IntegralHeight = $false
-$tabModeCombo.Font = New-Object System.Drawing.Font('Segoe UI', 9)
-$tabModeCombo.ForeColor = $rsInk
-$tabModeCombo.BackColor = $rsWhite
-$tabModeCombo.Location = New-Object System.Drawing.Point(116, 33)
-$tabModeCombo.Size = New-Object System.Drawing.Size(410, 26)
+$tabModeCombo = New-RSCombo -X 134 -Y 38 -Width 420
 [void]$tabModeCombo.Items.Add('Smart - reopen captured tabs when available')
 [void]$tabModeCombo.Items.Add('Captured tabs - reopen the exact tabs')
 [void]$tabModeCombo.Items.Add('Browser session - use the browser''s own restore')
@@ -1152,60 +1034,38 @@ switch ($TabMode) {
 }
 $optionsCard.Controls.Add($tabModeCombo)
 
-$forceCheck = New-Object System.Windows.Forms.CheckBox
-$forceCheck.Text = (T 'RstStartAnyway' 'Start applications even when they are already running')
-$forceCheck.AutoSize = $true
-$forceCheck.Font = New-Object System.Drawing.Font('Segoe UI', 9)
-$forceCheck.ForeColor = $rsInk
-$forceCheck.BackColor = $rsWhite
-$forceCheck.Location = New-Object System.Drawing.Point(18, 61)
+$forceCheck = New-RSToggle -X 14 -Y 66
 $optionsCard.Controls.Add($forceCheck)
+$forceLabel = New-RSLabel -Text (T 'RstStartAnyway' 'Start applications even when they are already running') -X 66 -Y 68 -Width 630 -Height 22 -Font $script:rsFontBody -Color $script:rsP.Text
+$forceLabel.Anchor = $anchorTLR
+$optionsCard.Controls.Add($forceLabel)
 
-$statusLabel = New-Object System.Windows.Forms.Label
-$statusLabel.Text = ''
-$statusLabel.AutoSize = $false
-$statusLabel.Size = New-Object System.Drawing.Size(540, 30)
-$statusLabel.AutoEllipsis = $true
-$statusLabel.Font = New-Object System.Drawing.Font('Consolas', 8.5)
-$statusLabel.ForeColor = $rsMuted
-$statusLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
-$statusLabel.Location = New-Object System.Drawing.Point(34, 510)
-$statusLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
-$content.Controls.Add($statusLabel)
+# ---- Footer: status, progress and actions --------------------------------
 
-$progressBar = New-Object System.Windows.Forms.ProgressBar
-$progressBar.Location = New-Object System.Drawing.Point(34, 501)
-$progressBar.Size = New-Object System.Drawing.Size(520, 7)
-$progressBar.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
-$progressBar.Minimum = 0
-$progressBar.Maximum = 100
+$statusLabel = New-RSLabel -Text '' -X 34 -Y 636 -Width 420 -Height 22 -Font $script:rsFontMono -Color $script:rsP.Muted
+$statusLabel.Anchor = $anchorBL
+$main.Controls.Add($statusLabel)
+
+$progressBar = New-Object SessionRecovery.Studio.StudioProgress
+$progressBar.Location = New-Object System.Drawing.Point(34, 664)
+$progressBar.Size = New-Object System.Drawing.Size(420, 6)
+$progressBar.Anchor = $anchorBL
+$progressBar.TrackColor = $script:rsP.Border
+$progressBar.FillColor = $script:rsP.Accent
+$progressBar.FillEndColor = $script:rsP.Accent2
 $progressBar.Visible = $false
-$content.Controls.Add($progressBar)
+$main.Controls.Add($progressBar)
 
-$skipButton = New-Object SRButton
-$skipButton.Text = 'Skip'
-$skipButton.Size = New-Object System.Drawing.Size(110, 40)
-$skipButton.Location = New-Object System.Drawing.Point(586, 506)
-$skipButton.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Right
-$skipButton.FillColor = $rsWhite
-$skipButton.HoverColor = $rsSoft
-$skipButton.PressedColor = $rsLine
-$skipButton.OutlineColor = $rsLine
-$skipButton.ForeColor = $rsInk
+$skipButton = New-RSButton -Text 'Skip' -Width 110 -Height 40
+$skipButton.Location = New-Object System.Drawing.Point(460, 636)
+$skipButton.Anchor = $anchorBR
 $skipButton.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
-$content.Controls.Add($skipButton)
+$main.Controls.Add($skipButton)
 
-$restoreButton = New-Object SRButton
-$restoreButton.Text = (T 'RstRestoreSelected' 'Restore selected')
-$restoreButton.Size = New-Object System.Drawing.Size(160, 40)
-$restoreButton.Location = New-Object System.Drawing.Point(708, 506)
-$restoreButton.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Right
-$restoreButton.FillColor = $rsAccent
-$restoreButton.HoverColor = $rsAccentHover
-$restoreButton.PressedColor = $rsAccentPressed
-$restoreButton.OutlineColor = $rsAccent
-$restoreButton.ForeColor = $rsWhite
-$content.Controls.Add($restoreButton)
+$restoreButton = New-RSButton -Text (T 'RstRestoreSelected' 'Restore selected') -Width 170 -Height 40 -Primary -Glyph ([string][char]0xE777)
+$restoreButton.Location = New-Object System.Drawing.Point(582, 636)
+$restoreButton.Anchor = $anchorBR
+$main.Controls.Add($restoreButton)
 
 $form.AcceptButton = $restoreButton
 $form.CancelButton = $skipButton
@@ -1225,13 +1085,17 @@ function Update-RSSelection {
         Populate-RSList -List $list -Snapshot $selected.Snapshot
         $ageLabel.Text = Format-RSAge -CapturedAt $selected.CapturedAt
         $stats = Get-RSStats -Snapshot $selected.Snapshot
-        $statusLabel.Text = ('{0} apps  /  {1} folders  /  {2} browsers  /  {3} tabs' -f $stats.Apps, $stats.Folders, $stats.Browsers, $stats.Tabs)
+        $statApps.Text = [string]$stats.Apps
+        $statFolders.Text = [string]$stats.Folders
+        $statBrowsers.Text = [string]$stats.Browsers
+        $statTabs.Text = [string]$stats.Tabs
+        $statusLabel.Text = ''
         $selectAll.Checked = $true
         # Restore preview: what is already running versus what would start.
         try {
             $preview = Get-SRRestorePreview -Plan (New-SRRestorePlan -Snapshot $selected.Snapshot -All -TabMode 'Smart')
             if ($preview.Running -gt 0) {
-                $statusLabel.Text += ('  |  {0} running, {1} to start' -f $preview.Running, $preview.WillStart)
+                $statusLabel.Text = ('{0} running, {1} to start' -f $preview.Running, $preview.WillStart)
             }
         } catch { }
     } finally {
@@ -1396,6 +1260,7 @@ $restoreButton.Add_Click({
     $progressBar.Visible = $false
     $listHeading.Text = (T 'RstResults' 'RESTORE RESULTS')
     $selectAll.Visible = $false
+    $selectAllLabel.Visible = $false
     $list.CheckBoxes = $false
     $list.BeginUpdate()
     try {
@@ -1433,6 +1298,11 @@ $restoreButton.Add_Click({
     $skipButton.Text = 'Close'
     $skipButton.Enabled = $true
     $restoreButton.Visible = $false
+    if (-not $failure) {
+        $sideBadge.FillColor = $script:rsP.GreenSoft
+        $sideBadge.TextColor = $script:rsP.Green
+        $sideBadge.Text = (T 'BadgeRestored' 'RESTORED')
+    }
 })
 
 $skipButton.Add_Click({

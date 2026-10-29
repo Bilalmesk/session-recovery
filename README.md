@@ -330,6 +330,7 @@ session-recovery/
     ├── SessionRecoveryLauncher.cs  Native host (no console windows)
     ├── Studio-SessionRecovery.ps1  Studio UI
     ├── StudioControls.cs           Custom WinForms controls
+    ├── StudioTheme.ps1             Shared colour themes (Studio and restore window)
     ├── SessionRecovery.psm1        Capture, exclusions, browsers, diagnostics, restore engine
     ├── Save-Session.ps1            One-shot snapshot
     ├── Restore-Session.ps1         Restore UI and selective CLI restore

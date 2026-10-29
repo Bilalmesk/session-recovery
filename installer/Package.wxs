@@ -77,6 +77,7 @@
         <File Id="StudioPs1" Source="..\src\Studio-SessionRecovery.ps1" />
         <File Id="StringsPs1" Source="..\src\Strings.ps1" />
         <File Id="StudioControlsCs" Source="..\src\StudioControls.cs" />
+        <File Id="StudioThemePs1" Source="..\src\StudioTheme.ps1" />
         <File Id="ControlSessionRecoveryPs1" Source="..\src\Control-SessionRecovery.ps1" />
         <File Id="BrandIconFile" Source="..\assets\SessionRecovery.ico" />
         <File Id="ReadmeMd" Source="..\README.md" />
@@ -94,6 +95,7 @@
         <RemoveFile Id="RemoveStudio" Name="Studio-SessionRecovery.ps1" On="install" />
         <RemoveFile Id="RemoveStrings" Name="Strings.ps1" On="install" />
         <RemoveFile Id="RemoveStudioControls" Name="StudioControls.cs" On="install" />
+        <RemoveFile Id="RemoveStudioTheme" Name="StudioTheme.ps1" On="install" />
         <RemoveFile Id="RemoveControlSessionRecovery" Name="Control-SessionRecovery.ps1" On="install" />
         <RemoveFile Id="RemoveBrandIcon" Name="SessionRecovery.ico" On="install" />
         <RemoveFile Id="RemoveReadme" Name="README.md" On="install" />

@@ -681,4 +681,44 @@ namespace SessionRecovery.Studio
             }
         }
     }
+
+    public class StudioProgress : Control
+    {
+        private int _value;
+        private Color _trackColor = Color.FromArgb(34, 45, 61);
+        private Color _fillColor = Color.FromArgb(108, 99, 255);
+        private Color _fillEndColor = Color.FromArgb(51, 181, 229);
+
+        public int Value { get { return _value; } set { _value = Math.Max(0, Math.Min(100, value)); Invalidate(); } }
+        public Color TrackColor { get { return _trackColor; } set { _trackColor = value; Invalidate(); } }
+        public Color FillColor { get { return _fillColor; } set { _fillColor = value; Invalidate(); } }
+        public Color FillEndColor { get { return _fillEndColor; } set { _fillEndColor = value; Invalidate(); } }
+
+        public StudioProgress()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.UserPaint, true);
+            Size = new Size(200, 6);
+            TabStop = false;
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            Color canvas = Parent != null ? Parent.BackColor : Color.FromArgb(8, 12, 18);
+            e.Graphics.Clear(canvas);
+            Rectangle track = new Rectangle(0, 0, Width - 1, Height - 1);
+            int radius = Math.Max(1, track.Height / 2);
+            Draw.FillRoundRect(e.Graphics, track, radius, _trackColor);
+            int fillWidth = (int)Math.Round((double)track.Width * _value / 100.0);
+            if (fillWidth < track.Height) fillWidth = _value > 0 ? track.Height : 0;
+            if (fillWidth > track.Width) fillWidth = track.Width;
+            if (fillWidth <= 0) return;
+            Rectangle fill = new Rectangle(0, 0, fillWidth, track.Height);
+            using (GraphicsPath path = Draw.RoundRect(fill, radius))
+            using (LinearGradientBrush brush = new LinearGradientBrush(new Rectangle(0, 0, Math.Max(2, track.Width), Math.Max(2, track.Height)), _fillColor, _fillEndColor, 0f))
+            {
+                e.Graphics.FillPath(brush, path);
+            }
+        }
+    }
 }

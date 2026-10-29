@@ -33,6 +33,7 @@ jobs:
             'src/Restore-Session.ps1',
             'src/Tray-SessionRecovery.ps1',
             'src/Strings.ps1',
+            'src/StudioTheme.ps1',
             'src/Control-SessionRecovery.ps1',
             'src/Save-Session.ps1',
             'src/Watch-Session.ps1',
