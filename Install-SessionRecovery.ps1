@@ -151,7 +151,6 @@ $moduleFiles = @(
     'StudioTheme.ps1',
     'Control-SessionRecovery.ps1',
     'StudioControls.cs',
-    'StudioTheme.ps1',
     'InstallManifest.ps1'
 )
 
