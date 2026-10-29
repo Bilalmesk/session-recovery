@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
 # Winget manifest for Session Recovery.
 # Submit new versions as a PR to microsoft/winget-pkgs using:
 #   wingetcreate submit --token <GH_TOKEN> --urls <msi-url>,<sha256-url> --version 2.8.0
@@ -13,7 +14,7 @@ InstallModes:
 InstallerSwitches:
   Silent: /qn /norestart
   SilentWithProgress: /passive /norestart
-UpgradeBehavior: install
+UpgradeBehavior: uninstallPrevious
 Installers:
   - Architecture: x64
     InstallerUrl: https://github.com/Bilalmesk/session-recovery/releases/download/v2.8.0/SessionRecovery-2.8.0.msi
@@ -22,5 +23,6 @@ Installers:
       - DisplayName: Session Recovery
         DisplayVersion: 2.8.0
         Publisher: Bilalmesk
+        ProductCode: '{9702CE0D-9681-4029-91F9-8F905D84F014}'
 ManifestType: installer
-ManifestVersion: 1.6.0
+ManifestVersion: 1.12.0
