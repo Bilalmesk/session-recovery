@@ -1,9 +1,9 @@
 # Winget manifest for Session Recovery.
 # Submit new versions as a PR to microsoft/winget-pkgs using:
-#   wingetcreate submit --token <GH_TOKEN> --urls <msi-url>,<sha256-url> --version 2.7.0
+#   wingetcreate submit --token <GH_TOKEN> --urls <msi-url>,<sha256-url> --version 2.8.0
 # The files below are the fully written-out equivalent manifest.
 PackageIdentifier: Bilalmesk.SessionRecovery
-PackageVersion: 2.7.0
+PackageVersion: 2.8.0
 InstallerType: wix
 Scope: user
 InstallModes:
@@ -16,11 +16,11 @@ InstallerSwitches:
 UpgradeBehavior: install
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/Bilalmesk/session-recovery/releases/download/v2.7.0/SessionRecovery-2.7.0.msi
-    InstallerSha256: DE6500E9A4E89E7F7419F2D15D93D855814C3A42D34A27B65211A9939D85AF30
+    InstallerUrl: https://github.com/Bilalmesk/session-recovery/releases/download/v2.8.0/SessionRecovery-2.8.0.msi
+    InstallerSha256: 5931F6084659E5643E721EBE2F3DAA530CAD197429539CCE4921D025C84C645B
     AppsAndFeaturesEntries:
       - DisplayName: Session Recovery
-        DisplayVersion: 2.7.0
+        DisplayVersion: 2.8.0
         Publisher: Bilalmesk
 ManifestType: installer
 ManifestVersion: 1.6.0
