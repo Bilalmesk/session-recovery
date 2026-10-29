@@ -57,6 +57,36 @@ function Invoke-MsiExec {
     return $process.ExitCode
 }
 
+function Get-PayloadHash {
+    param(
+        [string]$Path,
+        [switch]$NormalizeLineEndings
+    )
+    if (-not $NormalizeLineEndings) {
+        return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+    }
+
+    # Normalize bytes rather than text so UTF-8 and BOMs stay untouched.
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    $stream = New-Object System.IO.MemoryStream
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        for ($index = 0; $index -lt $bytes.Length; $index++) {
+            if ($bytes[$index] -eq 13) {
+                $stream.WriteByte(10)
+                if ($index + 1 -lt $bytes.Length -and $bytes[$index + 1] -eq 10) { $index++ }
+            } else {
+                $stream.WriteByte($bytes[$index])
+            }
+        }
+        $digest = $sha.ComputeHash($stream.ToArray())
+        return ([System.BitConverter]::ToString($digest) -replace '-', '')
+    } finally {
+        $sha.Dispose()
+        $stream.Dispose()
+    }
+}
+
 Write-Host ("MSI: {0}" -f $MsiPath)
 $installer = New-Object -ComObject WindowsInstaller.Installer
 $database = $installer.OpenDatabase($MsiPath, 0)
@@ -77,9 +107,11 @@ if ($installExit -ne 0) {
 }
 Write-Host 'Install succeeded.'
 
-# Verify every source-controlled payload byte-for-byte. The native launcher is
-# built from source and is not present in a checkout unless the build job ran,
-# so it is checked separately when available.
+# Verify every source-controlled payload against the working tree. Text files
+# are compared with CRLF/CR normalized to LF because Git may check the same
+# blob out with either ending on Windows; binaries stay byte-for-byte. The
+# native launcher is built from source and is not present in a checkout unless
+# the build job ran, so it is checked separately when available.
 $expected = @(
     @{ Name = 'SessionRecovery.psm1'; Source = 'src\SessionRecovery.psm1' },
     @{ Name = 'Save-Session.ps1'; Source = 'src\Save-Session.ps1' },
@@ -97,6 +129,7 @@ $expected = @(
     @{ Name = 'README.md'; Source = 'README.md' }
 )
 
+$textExtensions = @('.ps1', '.psm1', '.cs', '.md', '.vbs')
 foreach ($item in $expected) {
     $sourcePath = Join-Path $SourceRoot $item.Source
     $installedPath = Join-Path $appDir $item.Name
@@ -108,8 +141,9 @@ foreach ($item in $expected) {
         $failures.Add("Missing installed file: $($item.Name)")
         continue
     }
-    $sourceHash = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash
-    $installedHash = (Get-FileHash -LiteralPath $installedPath -Algorithm SHA256).Hash
+    $normalize = $textExtensions -contains ([System.IO.Path]::GetExtension($item.Name).ToLowerInvariant())
+    $sourceHash = Get-PayloadHash -Path $sourcePath -NormalizeLineEndings:$normalize
+    $installedHash = Get-PayloadHash -Path $installedPath -NormalizeLineEndings:$normalize
     if ($sourceHash -ne $installedHash) {
         $failures.Add("Installed file does not match source: $($item.Name)")
     }
