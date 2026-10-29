@@ -6,7 +6,7 @@
 
 ![Windows 10/11](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?logo=windows&logoColor=white)
 ![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-5391FE?logo=powershell&logoColor=white)
-![Version](https://img.shields.io/badge/version-2.2.0-8B5CF6)
+![Version](https://img.shields.io/badge/version-2.7.0-8B5CF6)
 ![Local only](https://img.shields.io/badge/privacy-100%25%20local-22C55E)
 
 [Install](#-install) · [Restore](#-restore) · [Configure](#%EF%B8%8F-configure) · [Troubleshoot](#-troubleshooting) · [Uninstall](#-uninstall)
@@ -31,8 +31,12 @@ Session Recovery snapshots your desktop every few minutes and offers to restore 
 | 🎬 **VLC playback** | Resumes within one snapshot interval of where you left off |
 | 🎯 **Selective restore** | Include/exclude by app, folder or browser with wildcards |
 | 🔒 **Exclusions & pinning** | Keep apps, folders or URLs out of snapshots; pin snapshots forever |
+| 📝 **Snapshot notes** | Searchable note on each snapshot; included in kits, removed with the snapshot |
+| 🕵️ **Privacy scan** | Finds sensitive apps and sites from names and tab URLs, never page content |
+| 🧳 **Recovery Kit** | Move snapshots, notes and exclusions between PCs in one `.srkit` file |
+| 📊 **Recovery insights** | Local counts for snapshots, apps, sites, pins, notes and storage |
 | 📦 **Export / import** | Back up snapshots as JSON or move them to another PC |
-| 🖥️ **Native tray + Studio** | Dark **Aurora** and light **Daylight** themes, no console windows |
+| 🖥️ **Native tray + Studio** | Dashboard, Snapshots, Exclusions, Recovery Kit, Settings, Diagnostics and About; dark **Aurora** and light **Daylight** themes, no console windows |
 
 ## 📥 Install
 
@@ -145,9 +149,13 @@ Use the Studio **Settings** page, or edit `%LOCALAPPDATA%\SessionRecovery\config
   "defaultTabMode": "Smart",
   "restoreWindowPositions": true,
   "theme": "Aurora",
+  "encryptSnapshots": false,
+  "compressSnapshots": false,
+  "redactUrls": true,
   "excludeApps": ["KeePass*"],
   "excludeFolders": ["D:\\Taxes"],
-  "excludeUrls": ["*bank*", "*mail.google.com*"]
+  "excludeUrls": ["*bank*", "*mail.google.com*"],
+  "snapshotNotes": {}
 }
 ```
 
@@ -172,8 +180,12 @@ Use the Studio **Settings** page, or edit `%LOCALAPPDATA%\SessionRecovery\config
 | `startWithWindows` | `true` | Create the Startup shortcut |
 | `desktopShortcut` | `true` | Create the desktop shortcut |
 | `theme` | `Aurora` | `Aurora` (dark) or `Daylight` (light) |
+| `encryptSnapshots` | `false` | Seal snapshots with DPAPI for this Windows user |
+| `compressSnapshots` | `false` | Write gzip-compressed snapshots |
+| `redactUrls` | `true` | Strip URL query strings and fragments before writing |
 | `excludeApps` / `excludeFolders` / `excludeUrls` | `[]` | Case-insensitive wildcards |
 | `pinnedSnapshots` | `[]` | Files retention never deletes (managed via **Pin**) |
+| `snapshotNotes` | `{}` | Searchable notes keyed by snapshot file name |
 
 **Notes**
 - Exclusions affect **new snapshots only**; delete old files to remove earlier data.
@@ -192,6 +204,16 @@ Use the Studio **Settings** page, or edit `%LOCALAPPDATA%\SessionRecovery\config
 
 </details>
 
+<details>
+<summary><b>Notes, privacy scan, Recovery Kit and insights</b></summary>
+
+- **Snapshot notes** hold up to 500 characters of searchable text per snapshot. They live in `config.json` keyed by snapshot file name, are included in Recovery Kits, and are removed when their snapshot is deleted. Notes are plain text even when snapshots are encrypted.
+- **Privacy scan** on the Exclusions page inspects visible app/process names and browser tab URLs and titles for categories such as password managers, banking, messaging, email, health and social media. It suggests wildcard exclusions you can add one at a time or all at once. It never reads screenshots, window pixels or page content.
+- **Recovery Kit** bundles every snapshot, note and exclusion rule into one portable `.srkit` file. Import merges notes and rules without overwriting existing settings, marks imported snapshots as untrusted, and skips DPAPI-encrypted snapshots because only the Windows account that created them can read them. A kit never contains settings, logs, screenshots or page content. The `.srkit` is a ZIP archive and is plaintext unless the snapshots inside are encrypted, so treat it like a private document.
+- **Recovery insights** on Diagnostics summarize locally what the snapshot store contains: counts, time span, unique apps and sites, pins, notes, imports and storage use.
+
+</details>
+
 ## 🩺 Diagnostics
 
 Open **Studio → Diagnostics** or **Start Menu → Run Diagnostics** for snapshot freshness, background mode, browsers and recent errors. For a script-friendly report:
@@ -207,15 +229,15 @@ Reports contain paths, URLs and log lines, so review them before sharing.
 
 ## 🔐 Privacy & data
 
-- Everything stays on your PC: no network requests, no extension, no debugging port.
-- Snapshots hold executable paths, window titles, folder paths and URLs. They are **not encrypted**, so use BitLocker or account permissions on shared PCs.
+- Everything stays on your PC: no extension, no debugging port and no telemetry. The app makes no network requests unless you check for or download an update.
+- Snapshots hold executable paths, window titles, folder paths and URLs. They are plaintext by default; enable `encryptSnapshots` for DPAPI protection. Snapshot notes are always plaintext in `config.json`, and a Recovery Kit is a plain ZIP unless the snapshots inside are encrypted. Use BitLocker or account permissions on shared PCs.
 - To back up a session, copy its JSON and restore it elsewhere with `-SnapshotPath`.
 
 | Path (under `%LOCALAPPDATA%\SessionRecovery`) | Contents |
 |---|---|
 | `snapshots\` | Snapshot JSON files |
 | `logs\session-recovery.log` | Snapshot, restore and error messages |
-| `config.json` | Settings |
+| `config.json` | Settings and snapshot notes |
 | `media-state.json` | VLC tracking between snapshots |
 | `app\` | Program files |
 
@@ -263,7 +285,7 @@ Get-ScheduledTask -TaskName 'SessionRecovery-*' -ErrorAction SilentlyContinue | 
 ## 👩‍💻 Development
 
 ```powershell
-# Build the MSI (needs .NET SDK 6+ and internet for WiX restore) → dist\SessionRecovery-2.2.0.msi
+# Build the MSI (needs .NET SDK 6+ and internet for WiX restore) → dist\SessionRecovery-2.7.0.msi
 powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\Build-MSI.ps1
 
 # Build the native host only
