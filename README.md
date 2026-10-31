@@ -6,7 +6,7 @@
 
 ![Windows 10/11](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?logo=windows&logoColor=white)
 ![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-5391FE?logo=powershell&logoColor=white)
-![Version](https://img.shields.io/badge/version-2.8.0-8B5CF6)
+![Version](https://img.shields.io/badge/version-2.8.1-8B5CF6)
 ![Local only](https://img.shields.io/badge/privacy-100%25%20local-22C55E)
 
 [Install](#-install) · [Restore](#-restore) · [Configure](#%EF%B8%8F-configure) · [Troubleshoot](#-troubleshooting) · [Uninstall](#-uninstall)
@@ -306,7 +306,7 @@ Get-ScheduledTask -TaskName 'SessionRecovery-*' -ErrorAction SilentlyContinue | 
 ## 👩‍💻 Development
 
 ```powershell
-# Build the MSI (needs .NET SDK 6+ and internet for WiX restore) → dist\SessionRecovery-2.8.0.msi
+# Build the MSI (needs .NET SDK 6+ and internet for WiX restore) → dist\SessionRecovery-2.8.1.msi
 powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\Build-MSI.ps1
 
 # Build the native host only

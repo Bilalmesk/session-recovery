@@ -13,7 +13,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string]$Version = '2.8.0',
+    [string]$Version = '2.8.1',
     [switch]$NoRestore
 )
 
@@ -75,8 +75,17 @@ Session Recovery {0}
 Reopen the apps, File Explorer folders and browser tabs that were open before
 a crash, power cut or unexpected restart.
 
-What's new in 2.8.0
+What's new in 2.8.1
 -------------------
+- Restore window scrollbars now follow the active theme. Light themes such as
+  Sakura and Paper no longer get a dark scrollbar, and every dark theme keeps
+  the dark scrollbar.
+- The installer release check compares packaged text files independently of
+  Windows CRLF/LF line endings, so a Windows checkout validates against the
+  published MSI. Binary payloads remain byte-for-byte.
+
+Also in 2.8.0
+-------------
 - Hibernate checkpoints: the tray saves and pins a recovery snapshot just
   before Windows sleeps or hibernates, keeping the latest three. It also
   catches Modern Standby through display-off and lid-close, debounced so one

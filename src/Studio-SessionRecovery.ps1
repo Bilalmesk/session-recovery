@@ -17,7 +17,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-$script:AppVersion = '2.8.0'
+$script:AppVersion = '2.8.1'
 $script:ScriptDir = $PSScriptRoot
 $script:AppDir = if ($env:SESSIONRECOVERY_HOST_EXE) { Split-Path -Parent $env:SESSIONRECOVERY_HOST_EXE } else { $PSScriptRoot }
 $script:HostExe = $null
