@@ -17,7 +17,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-$script:AppVersion = '3.0.1'
+$script:AppVersion = '3.0.2'
 $script:ScriptDir = $PSScriptRoot
 $script:AppDir = if ($env:SESSIONRECOVERY_HOST_EXE) { Split-Path -Parent $env:SESSIONRECOVERY_HOST_EXE } else { $PSScriptRoot }
 $script:HostExe = $null
@@ -658,6 +658,104 @@ function Enable-StudioDoubleBufferTree {
     }
 }
 
+function Set-StudioFocusKeepScroll {
+    # WinForms scrolls a control into view when it takes focus, which moved the
+    # Settings and About pages by hundreds of pixels on the first click.
+    # Focusing with the page layout suspended keeps the scroll position.
+    param($Control)
+    if ($null -eq $Control) { return }
+    $panel = $null
+    $walk = $Control.Parent
+    while ($null -ne $walk) {
+        if ($walk.AutoScroll) { $panel = $walk; break }
+        if ($walk -is [System.Windows.Forms.Form]) { break }
+        $walk = $walk.Parent
+    }
+    if ($null -eq $panel) { return }
+    $panel.SuspendLayout()
+    try {
+        [void]$Control.Focus()
+    } finally {
+        $panel.ResumeLayout($false)
+    }
+}
+
+function Add-StudioFocusKeepScroll {
+    # Focused buttons are what clicked pages react to. Guarding every button and
+    # toggle once keeps their first click from scrolling the page.
+    param($Root)
+    if ($null -eq $Root) { return }
+    if ($null -eq $script:FocusGuardedControls) { $script:FocusGuardedControls = New-Object System.Collections.ArrayList }
+    $stack = New-Object System.Collections.Stack
+    $stack.Push($Root)
+    while ($stack.Count -gt 0) {
+        $current = $stack.Pop()
+        $typeName = $current.GetType().Name
+        if ($typeName -eq 'StudioButton' -or $typeName -eq 'StudioNavButton' -or $typeName -eq 'StudioToggle' -or $current -is [System.Windows.Forms.Button] -or $current -is [System.Windows.Forms.CheckBox]) {
+            if (-not $script:FocusGuardedControls.Contains($current)) {
+                [void]$script:FocusGuardedControls.Add($current)
+                $current.Add_MouseDown({
+                    param($sender, $eventArgs)
+                    Set-StudioFocusKeepScroll -Control $sender
+                })
+            }
+        }
+        foreach ($child in @($current.Controls)) { $stack.Push($child) }
+    }
+}
+
+
+function Add-StudioWheelForwarding {
+    # Windows sends the wheel to the control under the pointer. On a page made
+    # of cards that control is usually a label or a button, so the page only
+    # scrolled over the narrow gaps between cards, which is what felt sticky.
+    # Buttons and labels forward their wheel to the surrounding page.
+    param($Panel)
+    if ($null -eq $Panel) { return }
+    $stack = New-Object System.Collections.Stack
+    foreach ($child in @($Panel.Controls)) { $stack.Push($child) }
+    while ($stack.Count -gt 0) {
+        $current = $stack.Pop()
+        $typeName = $current.GetType().Name
+        if ($typeName -eq 'StudioButton' -or $typeName -eq 'StudioToggle' -or $current -is [System.Windows.Forms.Button] -or $current -is [System.Windows.Forms.Label]) {
+            if ($null -eq $script:WheelForwarded) { $script:WheelForwarded = New-Object System.Collections.ArrayList }
+            if (-not $script:WheelForwarded.Contains($current)) {
+                [void]$script:WheelForwarded.Add($current)
+                $current.Add_MouseWheel({
+                    param($sender, $eventArgs)
+                    $page = $null
+                    $walk = $sender.Parent
+                    while ($null -ne $walk) {
+                        if ($walk.AutoScroll) { $page = $walk; break }
+                        $walk = $walk.Parent
+                    }
+                    if ($null -eq $page) { return }
+                    $next = Get-StudioWheelTarget -Page $page -Delta $eventArgs.Delta
+                    if ($null -ne $next) { $page.AutoScrollPosition = $next }
+                })
+            }
+        }
+        foreach ($child in @($current.Controls)) { $stack.Push($child) }
+    }
+}
+
+function Get-StudioWheelTarget {
+    # One wheel notch moves 90 px, so the page glides instead of jumping a
+    # whole card per notch.
+    param($Page, [int]$Delta)
+    $current = [Math]::Abs([int]$Page.AutoScrollPosition.Y)
+    $maximum = [Math]::Max(0, [int]$Page.AutoScrollMinSize.Height - [int]$Page.ClientSize.Height)
+    $step = if ($Delta -gt 0) { -90 } else { 90 }
+    $target = [Math]::Min($maximum, [Math]::Max(0, $current + $step))
+    if ($target -eq $current) { return $null }
+    return New-Object System.Drawing.Point(0, $target)
+}
+
+function Add-StudioWheelForwardingToPages {
+    # Called when a page is shown, after its cards exist.
+    param($Root)
+    Add-StudioWheelForwarding -Panel $Root
+}
 function New-StudioScrollPanel {
     # One entry point for every AutoScroll page, so the smooth panel is used
     # consistently and falls back to a plain Panel if the type cannot load.
@@ -5335,6 +5433,8 @@ function Show-StudioPage {
             $target.Size = $script:PageHost.ClientSize
         }
         $target.Visible = $true
+        Add-StudioFocusKeepScroll -Root $target
+        Add-StudioWheelForwardingToPages -Root $target
         Layout-StudioPage -Name $Name
         $target.BringToFront()
     } finally {
@@ -5785,4 +5885,3 @@ if (-not [string]::IsNullOrWhiteSpace($RenderDir)) {
 }
 [void]$form.ShowDialog()
 $form.Dispose()
-

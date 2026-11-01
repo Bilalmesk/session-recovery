@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 <#
     Build-MSI.ps1
     Builds the per-user Session Recovery MSI with WiX.
@@ -13,7 +13,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string]$Version = '3.0.1',
+    [string]$Version = '3.0.2',
     [switch]$NoRestore
 )
 
@@ -75,8 +75,19 @@ Session Recovery {0}
 Reopen the apps, File Explorer folders and browser tabs that were open before
 a crash, power cut or unexpected restart.
 
-What's new in 3.0.1
+What's new in 3.0.2
 -------------------
+- Pages no longer jump when you click something in them. Windows scrolled a
+  control into view as soon as it took focus, which moved Settings and About by
+  hundreds of pixels on the first click, including Check for updates.
+- The mouse wheel scrolls everywhere on a page, not only over the gaps between
+  cards, and each notch moves a smooth 90 px instead of a whole card.
+- The Studio no longer polls the background app and redraws itself while it is
+  idle, so scrolling and clicks stay responsive.
+- Version 3.0.2.
+
+Also in 3.0.1
+-------------
 - Restore reopens the tabs it captured. If the browser was still running,
   restore used the browser's live session instead: a tab you had just closed
   came back, tabs opened after the snapshot counted as restored, and the
