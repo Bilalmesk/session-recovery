@@ -342,6 +342,38 @@ namespace SessionRecovery
 
     public static class SessionFileReader
     {
+        // Reads every closed-tab record (command 16) from a Chromium session
+        // file. Each record carries the tab id and the time the tab was closed
+        // in microseconds since the Windows epoch, so callers can tell whether
+        // a tab was closed before or after a given History row.
+        public static long[] ReadClosedTabTimes(byte[] data)
+        {
+            List<long> closed = new List<long>();
+            if (data == null || data.Length < 8) return closed.ToArray();
+            if (data[0] != (byte)'S' || data[1] != (byte)'N' || data[2] != (byte)'S' || data[3] != (byte)'S')
+                return closed.ToArray();
+
+            int pos = 8;
+            while (pos + 2 <= data.Length)
+            {
+                int size = data[pos] | (data[pos + 1] << 8);
+                pos += 2;
+                if (size < 1 || pos + size > data.Length) break;
+                int content = pos + 1;
+                int contentLength = size - 1;
+                byte command = data[pos];
+                pos += size;
+                if (command != 16 || contentLength < 12) continue;
+                try
+                {
+                    long micros = BitConverter.ToInt64(data, content + 4);
+                    if (micros > 0) closed.Add((long)(micros / 1000));
+                }
+                catch { }
+            }
+            return closed.ToArray();
+        }
+
         private sealed class Navigation
         {
             public int Index;
@@ -2162,6 +2194,12 @@ function Get-SRTitleKey {
 }
 
 function Get-SRChromiumHistoryTabs {
+    # Chromium keeps its live tab list in the session files, but the moment a
+    # tab is closed the file only records a "tab closed" event. Reading the
+    # session tree alone therefore loses the tabs a user closed shortly before
+    # a restore. History still has every visited URL, and each closed record
+    # carries a timestamp, so the tabs that were open at the capture moment can
+    # be rebuilt and the closed ones can be added back.
     param(
         [Parameter(Mandatory = $true)][string]$ProfileDirectory,
         [IntPtr]$WindowHandle = [IntPtr]::Zero,
@@ -2170,12 +2208,13 @@ function Get-SRChromiumHistoryTabs {
         [bool]$AllowApproximate = $true
     )
 
-    if (-not $AllowApproximate) {
-        return [pscustomobject]@{ tabs = @(); source = 'none'; file = $null; fileAt = $null; approximate = $false }
-    }
-    if (-not ('SessionRecovery.ChromiumHistory' -as [type])) {
-        return [pscustomobject]@{ tabs = @(); source = 'none'; file = $null; fileAt = $null; approximate = $false }
-    }
+    $empty = [pscustomobject]@{ tabs = @(); source = 'none'; file = $null; fileAt = $null; approximate = $false; windowOrder = @() }
+    if (-not $AllowApproximate) { return $empty }
+    if (-not ('SessionRecovery.ChromiumHistory' -as [type])) { return $empty }
+
+    $session = Get-SRChromiumSessionTabs -ProfileDirectory $ProfileDirectory
+    $liveTabs = @($session.tabs)
+    $windowOrder = @($session.windowOrder)
 
     $lookback = [Math]::Max(1, $LookbackHours)
     $since = (Get-Date).AddHours(-$lookback)
@@ -2184,110 +2223,214 @@ function Get-SRChromiumHistoryTabs {
         if ($started -gt $since) { $since = $started }
     }
 
-    $history = @([SessionRecovery.ChromiumHistory]::ReadRecent($ProfileDirectory, $since, 100))
-    if ($history.Count -eq 0) {
-        return [pscustomobject]@{ tabs = @(); source = 'none'; file = $null; fileAt = $null; approximate = $false }
-    }
+    $history = @([SessionRecovery.ChromiumHistory]::ReadRecent($ProfileDirectory, $since, 200))
 
-    $ui = $null
-    if ($WindowHandle -ne [IntPtr]::Zero -and ('SessionRecovery.BrowserUiAutomation' -as [type])) {
-        try {
-            $ui = [SessionRecovery.BrowserUiAutomation]::Read($WindowHandle, 1500)
-        } catch {
-            Write-SRLog -Level DEBUG -Message "UI Automation tab read failed: $($_.Exception.Message)"
+    # Closed-tab records, oldest first, as Unix milliseconds so they can be
+    # compared with History visit times.
+    $closedAt = New-Object System.Collections.Generic.List[long]
+    foreach ($value in @($session.closedAt)) {
+        $number = [int64]0
+        if ([int64]::TryParse([string]$value, [ref]$number) -and $number -gt 0) { $closedAt.Add($number) }
+    }
+    $closedSorted = @($closedAt.ToArray() | Sort-Object)
+    $closedUsed = New-Object 'System.Collections.Generic.HashSet[int]'
+
+    $liveUrls = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($tab in $liveTabs) { [void]$liveUrls.Add(([string]$tab.url).ToLowerInvariant()) }
+
+    # One entry per URL, oldest first. An entry is "open" when the live session
+    # still holds it, or when a tab-closed record proves it survived its last
+    # visit. Everything else was closed by the user.
+    $byUrl = [ordered]@{}
+    foreach ($entry in @($history | Sort-Object -Property LastVisit)) {
+        if ($null -eq $entry) { continue }
+        $url = [string]$entry.Url
+        if (-not (Test-SRRestorableUrl -Url $url)) { continue }
+        $key = $url.ToLowerInvariant()
+        $visited = [DateTime]::MinValue
+        try { $visited = [datetime]$entry.LastVisit } catch { }
+        $open = $liveUrls.Contains($key)
+        if (-not $open -and $closedSorted.Count -gt 0 -and $visited -ne [DateTime]::MinValue) {
+            $rowMs = ([datetimeoffset]$visited.ToUniversalTime()).ToUnixTimeMilliseconds()
+            for ($index = 0; $index -lt $closedSorted.Count; $index++) {
+                if ($closedUsed.Contains($index)) { continue }
+                if ($closedSorted[$index] -gt $rowMs) { $open = $true; [void]$closedUsed.Add($index); break }
+            }
+        }
+        if (-not $byUrl.Contains($key)) {
+            $byUrl[$key] = [pscustomobject]@{
+                matchUrl    = $key
+                url         = $url
+                title       = [string]$entry.Title
+                open        = $open
+                occurrences = 0
+                firstSeen   = $visited
+            }
+        }
+        $row = $byUrl[$key]
+        $row.occurrences = [int]$row.occurrences + 1
+        if ($open) { $row.open = $true }
+        if ([string]::IsNullOrWhiteSpace([string]$row.title) -and -not [string]::IsNullOrWhiteSpace([string]$entry.Title)) { $row.title = [string]$entry.Title }
+    }
+    foreach ($liveTab in $liveTabs) {
+        $key = ([string]$liveTab.url).ToLowerInvariant()
+        if (-not $byUrl.Contains($key)) {
+            $byUrl[$key] = [pscustomobject]@{
+                matchUrl    = $key
+                url         = [string]$liveTab.url
+                title       = [string]$liveTab.title
+                open        = $true
+                occurrences = 1
+                firstSeen   = [DateTime]::UtcNow
+            }
+        } else {
+            $byUrl[$key].open = $true
+            if ([string]::IsNullOrWhiteSpace([string]$byUrl[$key].title)) { $byUrl[$key].title = [string]$liveTab.title }
         }
     }
 
-    $uiTabs = @()
-    if ($null -ne $ui) { $uiTabs = @($ui.Tabs) }
     $result = New-Object System.Collections.Generic.List[object]
-    $used = New-Object 'System.Collections.Generic.HashSet[int]'
-    $seenUrls = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-
-    function Add-SRHistoryTab {
-        param($HistoryEntry, [string]$FallbackTitle)
-        if ($null -eq $HistoryEntry) { return $false }
-        $url = [string]$HistoryEntry.Url
-        if (-not (Test-SRRestorableUrl -Url $url)) { return $false }
-        if (-not $seenUrls.Add($url)) { return $false }
-        $title = [string]$HistoryEntry.Title
-        if ([string]::IsNullOrWhiteSpace($title)) { $title = $FallbackTitle }
+    foreach ($row in @($byUrl.Values)) {
         $result.Add([pscustomobject]@{
-            url      = $url
-            title    = $title
-            pinned   = $false
-            windowId = 0
+            url         = [string]$row.url
+            title       = [string]$row.title
+            pinned      = $false
+            windowId    = 0
+            matchUrl    = [string]$row.matchUrl
+            occurrences = [int]$row.occurrences
+            firstSeen   = $row.firstSeen
+            open        = [bool]$row.open
         })
-        return $true
-    }
-
-    for ($i = 0; $i -lt $uiTabs.Count; $i++) {
-        $uiTab = $uiTabs[$i]
-        $key = Get-SRTitleKey -Title ([string]$uiTab.Title)
-        $matchIndex = -1
-        if (-not [string]::IsNullOrWhiteSpace($key)) {
-            for ($j = 0; $j -lt $history.Count; $j++) {
-                if ($used.Contains($j)) { continue }
-                $historyKey = Get-SRTitleKey -Title ([string]$history[$j].Title)
-                if ([string]::IsNullOrWhiteSpace($historyKey)) { continue }
-                if ($historyKey -eq $key -or $historyKey.Contains($key) -or $key.Contains($historyKey)) {
-                    $matchIndex = $j
-                    break
-                }
-            }
-        }
-        if ($matchIndex -ge 0) {
-            [void]$used.Add($matchIndex)
-            [void](Add-SRHistoryTab -HistoryEntry $history[$matchIndex] -FallbackTitle ([string]$uiTab.Title))
-            continue
-        }
-
-        if ($uiTab.Selected -and $null -ne $ui -and (Test-SRRestorableUrl -Url ([string]$ui.CurrentUrl))) {
-            $current = [string]$ui.CurrentUrl
-            for ($j = 0; $j -lt $history.Count; $j++) {
-                if ($used.Contains($j)) { continue }
-                if ([string]::Equals([string]$history[$j].Url, $current, [StringComparison]::OrdinalIgnoreCase)) {
-                    [void]$used.Add($j)
-                    [void](Add-SRHistoryTab -HistoryEntry $history[$j] -FallbackTitle ([string]$uiTab.Title))
-                    break
-                }
-            }
-        }
-    }
-
-    $target = if ($uiTabs.Count -gt 0) { $uiTabs.Count } else { [Math]::Min(12, $history.Count) }
-    if ($target -lt 1) { $target = [Math]::Min(12, $history.Count) }
-    if ($target -gt 40) { $target = 40 }
-    for ($j = 0; $j -lt $history.Count -and $result.Count -lt $target; $j++) {
-        if ($used.Contains($j)) { continue }
-        [void]$used.Add($j)
-        [void](Add-SRHistoryTab -HistoryEntry $history[$j] -FallbackTitle '')
-    }
-
-    if ($result.Count -eq 0) {
-        for ($j = 0; $j -lt $history.Count -and $result.Count -lt 20; $j++) {
-            [void](Add-SRHistoryTab -HistoryEntry $history[$j] -FallbackTitle '')
-        }
-    }
-
-    if ($result.Count -eq 0) {
-        return [pscustomobject]@{ tabs = @(); source = 'none'; file = $null; fileAt = $null; approximate = $false }
     }
 
     $historyPath = Join-Path $ProfileDirectory 'History'
     $historyAt = $null
-    if (Test-Path -LiteralPath $historyPath) {
-        $historyAt = (Get-Item -LiteralPath $historyPath).LastWriteTime
-    }
-    $source = if ($uiTabs.Count -gt 0) { 'uia-history' } else { 'history-fallback' }
-    Write-SRLog -Level DEBUG -Message ("Chromium tab fallback for {0}: {1} tab(s) from {2}" -f $ProfileDirectory, $result.Count, $source)
+    if (Test-Path -LiteralPath $historyPath) { $historyAt = (Get-Item -LiteralPath $historyPath).LastWriteTime }
+    $source = if ($result.Count -gt 0) { 'history-rebuild' } else { 'none' }
+    Write-SRLog -Level DEBUG -Message ("Chromium tab rebuild for {0}: {1} url(s), {2} closed record(s)" -f $ProfileDirectory, $result.Count, $closedSorted.Count)
     return [pscustomobject]@{
         tabs        = $result.ToArray()
         source      = $source
         file        = $historyPath
         fileAt      = $historyAt
         approximate = $true
+        windowOrder = $windowOrder
     }
+}
+
+function Merge-SRClosedTabExtras {
+    # Adds History rows that are not in the captured snapshot (tabs that were
+    # closed shortly before the capture) to the snapshot tab list. Each closed
+    # record is spent on one occurrence, so reopening the same URL later never
+    # hides it, and a URL the snapshot still holds is never duplicated.
+    # Windows PowerShell 5.1 needs a plain loop and `Write-Output -InputObject`
+    # here: @() on a typed Generic.List throws, and an object assigned into a
+    # [Parameter()] variable fails.
+    param(
+        [object[]]$Tabs = @(),
+        [object[]]$Extra = @()
+    )
+    $capturedTabs = New-Object System.Collections.Generic.List[object]
+    $sameWindow = $true
+    $firstWindow = $null
+    foreach ($sourceTab in $Tabs) {
+        if ($null -eq $sourceTab) { continue }
+        $url = [string]$sourceTab.url
+        if ([string]::IsNullOrWhiteSpace($url)) { continue }
+        $windowId = 0
+        if ($null -ne $sourceTab.PSObject.Properties['windowId']) { $windowId = [int]$sourceTab.windowId }
+        if ($null -eq $firstWindow) { $firstWindow = $windowId } elseif ($windowId -ne $firstWindow) { $sameWindow = $false }
+        $title = ''
+        if ($null -ne $sourceTab.PSObject.Properties['title']) { $title = [string]$sourceTab.title }
+        $pinned = $false
+        if ($null -ne $sourceTab.PSObject.Properties['pinned']) { $pinned = [bool]$sourceTab.pinned }
+        $capturedTabs.Add([pscustomobject]@{
+            url         = $url
+            title       = $title
+            pinned      = $pinned
+            windowId    = $windowId
+            matchUrl    = $url.ToLowerInvariant()
+            occurrences = 1
+            firstSeen   = (Get-Date)
+        })
+    }
+    $unplaced = New-Object System.Collections.Generic.List[object]
+    foreach ($sourceTab in $Extra) {
+        if ($null -eq $sourceTab) { continue }
+        $url = [string]$sourceTab.url
+        if ([string]::IsNullOrWhiteSpace($url)) { continue }
+        $pinned = $false
+        $title = ''
+        if ($null -ne $sourceTab.PSObject.Properties['pinned']) { $pinned = [bool]$sourceTab.pinned }
+        if ($null -ne $sourceTab.PSObject.Properties['title']) { $title = [string]$sourceTab.title }
+        $unplaced.Add([pscustomobject]@{
+            url         = $url
+            title       = $title
+            pinned      = $pinned
+            windowId    = 0
+            matchUrl    = $url.ToLowerInvariant()
+            occurrences = 1
+            firstSeen   = [DateTime]::UtcNow
+        })
+    }
+
+    $result = New-Object System.Collections.Generic.List[object]
+    if ($unplaced.Count -gt 0 -and $capturedTabs.Count -gt 0) {
+        # Spend one occurrence per captured tab, then insert each remaining
+        # closed row after the captured tabs of its window.
+        $remaining = @{}
+        foreach ($tab in $capturedTabs.ToArray()) {
+            $key = [string]$tab.matchUrl
+            $remaining[$key] = if ($remaining.ContainsKey($key)) { [int]$remaining[$key] + 1 } else { 1 }
+        }
+        $nextWindow = 0
+        foreach ($tab in $capturedTabs.ToArray()) { $nextWindow = [Math]::Max($nextWindow, [int]$tab.windowId + 1) }
+        # Closed tabs normally belong to the same window as the tabs that
+        # survived it, so keep one window group unless the capture spans many.
+        $extraWindow = if ($sameWindow -and $null -ne $firstWindow) { [int]$firstWindow } else { $nextWindow }
+        foreach ($tab in $capturedTabs.ToArray()) { $result.Add($tab) }
+        foreach ($extraTab in $unplaced.ToArray()) {
+            $key = [string]$extraTab.matchUrl
+            if ($remaining.ContainsKey($key) -and [int]$remaining[$key] -gt 0) {
+                $remaining[$key] = [int]$remaining[$key] - 1
+                continue
+            }
+            $extraTab.windowId = $extraWindow
+            $result.Add($extraTab)
+        }
+    } elseif ($capturedTabs.Count -gt 0) {
+        foreach ($tab in $capturedTabs.ToArray()) { $result.Add($tab) }
+    } else {
+        foreach ($tab in $unplaced.ToArray()) { $result.Add($tab) }
+    }
+    Write-Output -InputObject ($result.ToArray())
+}
+
+function Get-SRChromiumSessionTabs {
+    # Reads only the live session tree: open tabs, their window order and the
+    # timestamps of closed-tab records. Never falls back to History.
+    param([Parameter(Mandatory = $true)][string]$ProfileDirectory)
+
+    $empty = [pscustomobject]@{ tabs = @(); closedAt = @(); windowOrder = @(); file = $null }
+    $sessionsDir = Join-Path $ProfileDirectory 'Sessions'
+    if (-not (Test-Path -LiteralPath $sessionsDir)) { return $empty }
+    $candidates = New-Object System.Collections.Generic.List[object]
+    foreach ($file in @(Get-ChildItem -LiteralPath $sessionsDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'Session_*' -or $_.Name -like 'Tabs_*' })) {
+        if ($file.Length -gt 0) { $candidates.Add($file) }
+    }
+    foreach ($file in @($candidates | Sort-Object -Property LastWriteTime -Descending)) {
+        try {
+            $bytes = Get-SRFileBytes -Path $file.FullName
+            $tabs = @([SessionRecovery.SessionFileReader]::Parse($bytes))
+            $closed = @([SessionRecovery.SessionFileReader]::ReadClosedTabTimes($bytes))
+            if ($tabs.Count -eq 0 -and $closed.Count -eq 0) { continue }
+            $windowOrder = @($tabs | ForEach-Object { [int]$_.WindowId } | Select-Object -Unique)
+            return [pscustomobject]@{ tabs = $tabs; closedAt = $closed; windowOrder = $windowOrder; file = $file.FullName }
+        } catch {
+            Write-SRLog -Level DEBUG -Message ("Could not parse session file {0}: {1}" -f $file.FullName, $_.Exception.Message)
+        }
+    }
+    return $empty
 }
 
 function Get-SRChromiumTabs {
@@ -2336,8 +2479,28 @@ function Get-SRChromiumTabs {
                 })
             }
             if ($clean.Count -gt 0) {
+                # The session tree only holds tabs that are open right now.
+                # Merge the tabs closed shortly before this moment back in, so
+                # a snapshot keeps what the user had open when it was taken.
+                $merged = @($clean.ToArray())
+                try {
+                    $closedAt = @([SessionRecovery.SessionFileReader]::ReadClosedTabTimes($bytes))
+                    if (@($closedAt).Count -gt 0) {
+                        $rebuild = Get-SRChromiumHistoryTabs -ProfileDirectory $ProfileDirectory `
+                            -WindowHandle $WindowHandle -BrowserStartTime $BrowserStartTime `
+                            -LookbackHours $HistoryLookbackHours -AllowApproximate $AllowApproximate
+                        if ($null -ne $rebuild -and @($rebuild.tabs).Count -gt 0) {
+                            $closedOnly = @($rebuild.tabs | Where-Object { -not [bool]$_.open })
+                            if ($closedOnly.Count -gt 0) {
+                                $merged = @(Merge-SRClosedTabExtras -Tabs $clean.ToArray() -Extra $closedOnly)
+                            }
+                        }
+                    }
+                } catch {
+                    Write-SRLog -Level DEBUG -Message ("Closed-tab merge failed: {0}" -f $_.Exception.Message)
+                }
                 return [pscustomobject]@{
-                    tabs        = $clean.ToArray()
+                    tabs        = @($merged)
                     source      = 'session-file'
                     file        = $file.FullName
                     fileAt      = $file.LastWriteTime
@@ -5609,34 +5772,49 @@ function Group-SRTabsByWindow {
 }
 
 function Get-SRBrowserProfileState {
-    param([Parameter(Mandatory = $true)]$Browser)
+    param(
+        [Parameter(Mandatory = $true)]$Browser,
+        # Restore must reopen the tabs captured in the snapshot. The browser's
+        # own live session describes the desktop at restore time, so a tab the
+        # user just closed would silently come back and every tab opened since
+        # the snapshot would be counted as captured. It is only consulted when
+        # the snapshot itself holds no tabs.
+        [switch]$PreferLiveTabs
+    )
 
     $profiles = New-Object System.Collections.Generic.List[object]
-    foreach ($profile in @($Browser.profiles)) {
+    $profileList = New-Object System.Collections.Generic.List[object]
+    foreach ($entry in @($Browser.profiles)) { $profileList.Add($entry) }
+    foreach ($profile in $profileList.ToArray()) {
         $current = $null
         $restoreOnStartup = $profile.restoreOnStartup
+        if ($PreferLiveTabs -and $profile.path -and (Test-Path -LiteralPath $profile.path)) {
+            if ($Browser.kind -eq 'chromium') {
+                $current = Get-SRChromiumTabs -ProfileDirectory $profile.path
+            } elseif ($Browser.kind -eq 'firefox') {
+                $current = Get-SRFirefoxTabs -ProfileDirectory $profile.path
+            }
+        }
         if ($Browser.kind -eq 'chromium' -and $profile.path -and (Test-Path -LiteralPath $profile.path)) {
-            $current = Get-SRChromiumTabs -ProfileDirectory $profile.path
             $preference = Get-SRChromiumRestoreOnStartup -ProfileDirectory $profile.path
             if ($null -ne $preference) { $restoreOnStartup = $preference }
         } elseif ($Browser.kind -eq 'firefox' -and $profile.path -and (Test-Path -LiteralPath $profile.path)) {
-            $current = Get-SRFirefoxTabs -ProfileDirectory $profile.path
             $preference = Get-SRFirefoxRestoreOnStartup -ProfileDirectory $profile.path
             if ($null -ne $preference) { $restoreOnStartup = $preference }
         }
 
-        $currentTabs = @()
-        if ($null -ne $current) { $currentTabs = @($current.tabs) }
+        $snapshotTabs = New-Object System.Collections.Generic.List[object]
+        foreach ($tab in @($profile.tabs)) { $snapshotTabs.Add($tab) }
 
-        # Prefer the browser's own current session file: it is newer than the
-        # snapshot and preserves duplicate tabs/window grouping. The snapshot
-        # is the fallback when the session file is missing or unreadable.
-        if ($currentTabs.Count -gt 0) {
-            $tabs = $currentTabs
-            $tabsSource = $current.source
-        } else {
-            $tabs = @($profile.tabs)
-            $tabsSource = $profile.tabsSource
+        $tabs = $snapshotTabs.ToArray()
+        $tabsSource = $profile.tabsSource
+        if ($null -ne $current) {
+            $liveTabs = New-Object System.Collections.Generic.List[object]
+            foreach ($tab in @($current.tabs)) { $liveTabs.Add($tab) }
+            if ($liveTabs.Count -gt 0) {
+                $tabs = $liveTabs.ToArray()
+                $tabsSource = $current.source
+            }
         }
 
         $profiles.Add([pscustomobject]@{
@@ -5646,6 +5824,7 @@ function Get-SRBrowserProfileState {
             restoreOnStartup = $restoreOnStartup
             tabs             = $tabs
             tabsSource       = $tabsSource
+            snapshotTabs     = $snapshotTabs.ToArray()
         })
     }
     return $profiles.ToArray()
@@ -5657,7 +5836,6 @@ function Restore-SRBrowser {
         [ValidateSet('Smart', 'Captured', 'Native', 'None')][string]$TabMode = 'Smart',
         [switch]$Force
     )
-
     $results = New-Object System.Collections.Generic.List[object]
     if ($TabMode -eq 'None') { return $results.ToArray() }
 
@@ -5668,7 +5846,15 @@ function Restore-SRBrowser {
     }
 
     $isRunning = Test-SRExeRunning -ExePath $exe
-    $profiles = @(Get-SRBrowserProfileState -Browser $Browser)
+    # Snapshot tabs are the source of truth for a restore. If the browser is
+    # still running, its live session only describes the desktop as it is now:
+    # tabs the user closed after the snapshot are gone from it and tabs opened
+    # since would be counted as restored. Read the live session only when the
+    # snapshot itself has no tabs, so the snapshot is never silently replaced
+    # by the current window.
+    $capturedCount = 0
+    foreach ($profile in @($Browser.profiles)) { $capturedCount += @($profile.tabs).Count }
+    $profiles = @(Get-SRBrowserProfileState -Browser $Browser -PreferLiveTabs:($capturedCount -eq 0))
 
     if ($Browser.kind -eq 'firefox') {
         $profile = $profiles | Select-Object -First 1

@@ -1700,8 +1700,80 @@ Describe '3.0 safety checkpoints, history and storage' {
     }
 }
 
-Describe '3.0 settings and diagnostics surface' {
-    It 'defaults the pre-restore safety snapshot on' {
+Describe 'Browser tab restore uses the captured snapshot' {
+    BeforeAll {
+        # Documents the bug: a restore read the browser's live session, so the
+        # tab closed just before the restore replaced the captured tabs.
+        function New-TestBrowserSnapshot {
+            param([string]$ProfilePath)
+            [pscustomobject]@{
+                name     = 'Brave'
+                kind     = 'chromium'
+                exe      = (Get-Process -Name explorer | Select-Object -First 1).Path
+                profiles = @(
+                    [pscustomobject]@{
+                        directory        = 'Default'
+                        displayName      = 'Work'
+                        path             = $ProfilePath
+                        restoreOnStartup = 5
+                        tabsSource       = 'session-file'
+                        tabs             = @(
+                            [pscustomobject]@{ url = 'https://a.example/one'; title = 'One'; pinned = $false; windowId = 11 },
+                            [pscustomobject]@{ url = 'https://a.example/two'; title = 'Two'; pinned = $false; windowId = 11 },
+                            [pscustomobject]@{ url = 'https://a.example/three'; title = 'Three'; pinned = $false; windowId = 11 }
+                        )
+                    }
+                )
+            }
+        }
+    }
+
+    It 'keeps every captured tab instead of the live session' {
+        $profilePath = Join-Path $env:SESSIONRECOVERY_HOME ('profile-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $profilePath -Force | Out-Null
+        $browser = New-TestBrowserSnapshot -ProfilePath $profilePath
+
+        $state = @(Get-SRBrowserProfileState -Browser $browser)
+        $state.Count | Should -Be 1
+        @($state[0].tabs).Count | Should -Be 3 -Because 'the snapshot is the source of truth for a restore'
+        @($state[0].snapshotTabs).Count | Should -Be 3
+    }
+}
+
+Describe 'Closed Chromium tabs are merged back into the capture' {
+    It 'adds a closed tab that the snapshot does not have' {
+        $captured = @(
+            [pscustomobject]@{ url = 'https://a.example/one'; title = 'One'; pinned = $false; windowId = 7 }
+        )
+        $closed = @(
+            [pscustomobject]@{ url = 'https://gofile.io/d/E9vVBvKI'; title = 'gofile'; windowId = 0 }
+        )
+        $merged = @(Merge-SRClosedTabExtras -Tabs $captured -Extra $closed)
+        $merged.Count | Should -Be 2
+        @($merged | ForEach-Object { $_.url }) | Should -Contain 'https://gofile.io/d/E9vVBvKI'
+        ($merged | Where-Object { $_.url -eq 'https://gofile.io/d/E9vVBvKI' }).windowId | Should -Be 7 -Because 'the closed tab belonged to the surviving window'
+    }
+
+    It 'does not duplicate a tab that is still captured' {
+        $captured = @(
+            [pscustomobject]@{ url = 'https://a.example/one'; title = 'One'; pinned = $false; windowId = 7 },
+            [pscustomobject]@{ url = 'https://a.example/two'; title = 'Two'; pinned = $false; windowId = 7 }
+        )
+        $closed = @(
+            [pscustomobject]@{ url = 'https://a.example/two'; title = 'Two'; windowId = 0 }
+        )
+        $merged = @(Merge-SRClosedTabExtras -Tabs $captured -Extra $closed)
+        $merged.Count | Should -Be 2
+    }
+
+    It 'returns an empty list when there is nothing to merge' {
+        @(Merge-SRClosedTabExtras -Tabs @() -Extra @()).Count | Should -Be 0
+        $only = @(Merge-SRClosedTabExtras -Tabs @() -Extra @([pscustomobject]@{ url = 'https://a.example/x'; title = 'X'; windowId = 0 }))
+        $only.Count | Should -Be 1
+    }
+}
+
+Describe '3.0 settings and diagnostics surface' {    It 'defaults the pre-restore safety snapshot on' {
         (Get-SRDefaultConfig).savePreRestoreSnapshot | Should -BeTrue
     }
 

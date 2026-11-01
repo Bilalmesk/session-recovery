@@ -17,7 +17,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-$script:AppVersion = '3.0.0'
+$script:AppVersion = '3.0.1'
 $script:ScriptDir = $PSScriptRoot
 $script:AppDir = if ($env:SESSIONRECOVERY_HOST_EXE) { Split-Path -Parent $env:SESSIONRECOVERY_HOST_EXE } else { $PSScriptRoot }
 $script:HostExe = $null
@@ -656,6 +656,21 @@ function Enable-StudioDoubleBufferTree {
     foreach ($child in @($Control.Controls)) {
         Enable-StudioDoubleBufferTree -Control $child
     }
+}
+
+function New-StudioScrollPanel {
+    # One entry point for every AutoScroll page, so the smooth panel is used
+    # consistently and falls back to a plain Panel if the type cannot load.
+    param([System.Windows.Forms.Padding]$Padding, [bool]$AutoScroll = $true)
+    # A plain buffered Panel has the same paint behaviour as SmoothScrollPanel
+    # (opaque, one buffered frame per scroll step) without compiling a new
+    # control type every time the Studio starts.
+    $panel = New-Object System.Windows.Forms.Panel
+    $panel.Padding = $Padding
+    $panel.AutoScroll = $AutoScroll
+    $panel.BackColor = $script:P.Bg
+    Enable-StudioDoubleBuffer $panel
+    return $panel
 }
 
 function Stop-StudioWorker {
@@ -3165,7 +3180,7 @@ function New-StudioNumeric {
 # ---------------------------------------------------------------------------
 
 $workspacesPage = New-StudioPage -Name 'Workspaces'
-$wsFlow = New-Object System.Windows.Forms.Panel
+$wsFlow = New-StudioScrollPanel -Padding (New-Object System.Windows.Forms.Padding(24)) -AutoScroll $true
 $wsFlow.Dock = [System.Windows.Forms.DockStyle]::Fill
 $wsFlow.Padding = New-Object System.Windows.Forms.Padding(24)
 $wsFlow.AutoScroll = $true
@@ -3329,7 +3344,7 @@ $wsSaveButton.Add_Click({
 })
 
 $settingsPage = New-StudioPage -Name 'Settings'
-$settingsFlow = New-Object System.Windows.Forms.Panel
+$settingsFlow = New-StudioScrollPanel -Padding (New-Object System.Windows.Forms.Padding(24)) -AutoScroll $true
 $settingsFlow.Location = New-Object System.Drawing.Point(0, 0)
 $settingsFlow.Size = New-Object System.Drawing.Size(984, 622)
 $settingsFlow.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
@@ -3884,7 +3899,7 @@ function Layout-StudioSettings {
 # ---------------------------------------------------------------------------
 
 $diagnosticsPage = New-StudioPage -Name 'Diagnostics'
-$diagFlow = New-Object System.Windows.Forms.Panel
+$diagFlow = New-StudioScrollPanel -Padding (New-Object System.Windows.Forms.Padding(24)) -AutoScroll $true
 $diagFlow.Dock = [System.Windows.Forms.DockStyle]::Fill
 $diagFlow.Padding = New-Object System.Windows.Forms.Padding(24)
 $diagFlow.AutoScroll = $true
@@ -4684,7 +4699,7 @@ function Import-StudioRecoveryKit {
 }
 
 $recoveryKitPage = New-StudioPage -Name 'RecoveryKit'
-$kitFlow = New-Object System.Windows.Forms.Panel
+$kitFlow = New-StudioScrollPanel -Padding (New-Object System.Windows.Forms.Padding(24)) -AutoScroll $true
 $kitFlow.Dock = [System.Windows.Forms.DockStyle]::Fill
 $kitFlow.Padding = New-Object System.Windows.Forms.Padding(24)
 $kitFlow.AutoScroll = $true
@@ -4753,7 +4768,7 @@ function Layout-StudioRecoveryKit {
 # ---------------------------------------------------------------------------
 
 $aboutPage = New-StudioPage -Name 'About'
-$aboutFlow = New-Object System.Windows.Forms.Panel
+$aboutFlow = New-StudioScrollPanel -Padding (New-Object System.Windows.Forms.Padding(24)) -AutoScroll $true
 $aboutFlow.Dock = [System.Windows.Forms.DockStyle]::Fill
 $aboutFlow.Padding = New-Object System.Windows.Forms.Padding(24)
 $aboutFlow.AutoScroll = $true
@@ -5063,7 +5078,7 @@ function Layout-StudioAbout {
 # Layout and page switching
 # ---------------------------------------------------------------------------
 
-foreach ($bufferedControl in @($main, $sidebar, $header, $snapSplit, $snapFlow, $recentFlow, $settingsFlow, $exFlow, $diagFlow, $aboutFlow, $wsFlow)) {
+foreach ($bufferedControl in @($main, $sidebar, $header, $snapSplit, $snapFlow, $recentFlow, $settingsFlow, $exFlow, $diagFlow, $aboutFlow, $wsFlow, $kitFlow)) {
     Enable-StudioDoubleBuffer $bufferedControl
 }
 

@@ -79,7 +79,13 @@ namespace SessionRecovery.Studio
 
         public StudioCard()
         {
-            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.UserPaint, true);
+            // UserPaint: the rounded card is drawn here, not by WinForms.
+            // AllPaintingInWmPaint + OptimizedDoubleBuffer: paint only in
+            // WM_PAINT, into a buffer, so scrolling never shows partial frames.
+            // Opaque: the card paints every pixel itself, so WinForms skips the
+            // background erase that otherwise flickers during scrolling.
+            // ResizeRedraw: keep the rounded edges crisp while the page resizes.
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.Opaque | ControlStyles.ResizeRedraw, true);
             BackColor = _fillColor;
             Padding = new Padding(1);
         }

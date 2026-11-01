@@ -13,7 +13,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string]$Version = '3.0.0',
+    [string]$Version = '3.0.1',
     [switch]$NoRestore
 )
 
@@ -75,8 +75,23 @@ Session Recovery {0}
 Reopen the apps, File Explorer folders and browser tabs that were open before
 a crash, power cut or unexpected restart.
 
-What's new in 3.0.0
+What's new in 3.0.1
 -------------------
+- Restore reopens the tabs it captured. If the browser was still running,
+  restore used the browser's live session instead: a tab you had just closed
+  came back, tabs opened after the snapshot counted as restored, and the
+  captured tabs were dropped. The snapshot is now always the source of truth;
+  the live session is only read when the snapshot has no tabs at all.
+- Tabs closed shortly before a snapshot are kept. Chromium only records a
+  "tab closed" event in its session file, so those tabs vanished from the next
+  capture. They are now rebuilt from local History and merged back in.
+- Smoother Studio scrolling: the scrollable pages paint into a buffer and no
+  longer erase themselves before every scroll step, which is what made pages
+  jump and feel sticky when clicking a control or using the wheel.
+- Version 3.0.1.
+
+Also in 3.0.0
+-------------
 - Safety snapshot before every restore: right before anything reopens, the
   current desktop is captured and pinned locally, so a restore is never a
   one-way door.
