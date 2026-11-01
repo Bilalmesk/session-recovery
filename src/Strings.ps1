@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
     Strings.ps1
     UI string tables for Session Recovery. English is the master table and
