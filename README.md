@@ -17,6 +17,10 @@
 
 Session Recovery snapshots your desktop every few minutes and offers to restore it after an unexpected shutdown. It ships with a native **Studio** app, needs no extra modules or browser extension, and sends no telemetry.
 
+```powershell
+winget install --id Bilalmesk.SessionRecovery
+```
+
 > [!IMPORTANT]
 > It reopens apps and tabs. It **cannot** recover unsaved documents, passwords or form data.
 
@@ -37,25 +41,40 @@ Session Recovery snapshots your desktop every few minutes and offers to restore 
 | 📊 **Recovery insights** | Local counts for snapshots, apps, sites, pins, notes and storage |
 | 🩺 **Recovery timeline** | Restarts, power loss and blue screens from the last 30 days, read from the local event log |
 | 🔍 **Compare snapshots** | Pick an older moment and see which apps, folders and tabs opened or closed since |
-| ⚙️ **Cross-PC snapshots** | Every snapshot records machine, displays, scale and language; restore explains what changed |
-| 💤 **Hibernate checkpoints** | Pins the last three snapshots taken just before sleep or hibernate, and offers **Hibernate with checkpoint** from the tray or `--hibernate` |
+| ⚙️ **Cross-PC snapshots** | Every snapshot records machine, displays, scale and language; restore explains what changed || 💤 **Hibernate checkpoints** | Pins the last three snapshots taken just before sleep or hibernate, and offers **Hibernate with checkpoint** from the tray or `--hibernate` |
 | ↩️ **Undo a restore** | Every restore first pins a safety snapshot of the current desktop, and **Undo last restore** brings it back in one click |
 | 🕘 **Restore history** | The Diagnostics page lists recent restores, their source and outcome, with an Undo button for each |
 | 🧹 **Storage health** | Finds unreadable snapshots, orphaned thumbnails and temp files, and cleans up while quarantining anything unreadable |
 | 🗂️ **Workspaces** | Save the current desktop as a named workspace, then reopen or delete it from the Studio or the tray |
 | 📦 **Export / import** | Back up snapshots as JSON or move them to another PC |
+| 📦 **winget** | `winget install --id Bilalmesk.SessionRecovery` installs the latest release; `winget upgrade` keeps it current |
 | 🖥️ **Native tray + Studio** | Dashboard, Snapshots, Workspaces, Exclusions, Recovery Kit, Settings, Diagnostics and About; 14 dark and light colour themes, no console windows |
 
 ## 📥 Install
 
-### Option A: MSI (recommended)
+### Option A: winget
+
+```powershell
+winget install --id Bilalmesk.SessionRecovery
+```
+
+This installs the latest release from the [winget community repository](https://github.com/microsoft/winget-pkgs/tree/master/manifests/b/Bilalmesk/SessionRecovery), per-user and without admin rights. To upgrade later:
+
+```powershell
+winget upgrade --id Bilalmesk.SessionRecovery
+```
+
+> [!TIP]
+> If winget cannot find the package, the local index may be stale. Run `winget source update` and try again.
+
+### Option B: MSI (recommended when winget is unavailable)
 
 Download `SessionRecovery-<version>.msi` from **Releases** and run it. It installs per-user (no UAC), keeps your data on upgrade, and offers a Custom Setup page for the install folder and desktop shortcut.
 
 > [!NOTE]
 > The MSI is not code-signed. If SmartScreen appears, verify the published SHA256, then choose **More info → Run anyway**.
 
-### Option B: PowerShell installer
+### Option C: PowerShell installer
 
 ```powershell
 # With scheduled tasks (one UAC prompt)
@@ -88,7 +107,14 @@ Re-running the installer replaces program files and preserves snapshots and most
 
 ### Updating
 
-**Studio → About → Check for updates** downloads the MSI, verifies its SHA256 and installs it. Snapshots and settings are preserved. You can also download the MSI and its `.sha256` file from **Releases** and run it manually.
+Choose whichever method installed the app:
+
+```powershell
+# Installed with winget
+winget upgrade --id Bilalmesk.SessionRecovery
+```
+
+**Studio → About → Application updates → Check for updates** downloads the MSI, verifies its SHA256 and installs it. Snapshots and settings are preserved. You can also download the MSI and its `.sha256` file from **Releases** and run it manually.
 
 ## 🔄 Restore
 
