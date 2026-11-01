@@ -3882,6 +3882,16 @@ function Get-SRSnapshotStateHash {
     foreach ($workspace in @($Snapshot.devWorkspaces)) {
         foreach ($folder in @($workspace.folders)) { $parts.Add('d:' + [string]$folder) }
     }
+    # Display layout matters too: docking or unplugging a monitor is a real
+    # change worth capturing, even when no window opened or closed.
+    $monitors = $null
+    try { $monitors = $Snapshot.PSObject.Properties['monitors'] } catch { }
+    if ($null -ne $monitors) {
+        foreach ($monitor in @($monitors.Value)) {
+            if ($null -eq $monitor) { continue }
+            $parts.Add('m:' + [string]$monitor.width + 'x' + [string]$monitor.height + '@' + [string]$monitor.x + ',' + [string]$monitor.y)
+        }
+    }
     $text = ($parts -join "`n")
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($text)
     $md5 = [System.Security.Cryptography.MD5]::Create()
@@ -4155,6 +4165,166 @@ function Get-SRJetBrainsLauncher {
         } catch { }
     }
     return $null
+}
+
+function Get-SRSystemProfile {
+    # Static facts about this PC, written into every snapshot so a restore
+    # opened on a different machine can explain what changed. Nothing here is
+    # identity or hardware serial data: only version, locale and screen sizes.
+    $scale = 100
+    try {
+        $dpi = 0
+        $dpiSetting = Get-ItemProperty -LiteralPath 'HKCU:\Control Panel\Desktop\WindowMetrics' -Name 'AppliedDPI' -ErrorAction Stop
+        $dpi = [int]$dpiSetting.AppliedDPI
+        if ($dpi -gt 0) { $scale = [int][Math]::Round(($dpi / 96.0) * 100, 0) }
+    } catch { }
+
+    $monitors = @()
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+        $monitors = @(
+            [System.Windows.Forms.Screen]::AllScreens |
+                ForEach-Object { '{0}x{1}' -f $_.Bounds.Width, $_.Bounds.Height } |
+                Sort-Object -Unique
+        )
+    } catch { }
+    $culture = ''
+    try { $culture = [System.Globalization.CultureInfo]::CurrentUICulture.Name } catch { }
+
+    return [pscustomobject]@{
+        machineName = [string]$env:COMPUTERNAME
+        osVersion   = [string][Environment]::OSVersion.Version
+        osBuild     = [System.Environment]::OSVersion.VersionString
+        scale       = $scale
+        culture     = $culture
+        monitors    = $monitors
+    }
+}
+
+function Compare-SRSystemProfile {
+    # Differences between the machine that captured a snapshot and this one.
+    # Returns an empty list when both profiles match or either is missing, so
+    # older snapshots never produce false warnings.
+    param(
+        [object]$FromSnapshot,
+        [object]$Current = (Get-SRSystemProfile)
+    )
+    $changes = New-Object System.Collections.Generic.List[object]
+    if ($null -eq $FromSnapshot -or $null -eq $Current) { return @() }
+
+    $currentMachine = [string]$Current.machineName
+    $snapshotMachine = ''
+    try { $snapshotMachine = [string]$FromSnapshot.machineName } catch { }
+    if (-not [string]::IsNullOrWhiteSpace($snapshotMachine) -and
+        -not [string]::IsNullOrWhiteSpace($currentMachine) -and
+        -not [string]::Equals($snapshotMachine, $currentMachine, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $changes.Add([pscustomobject]@{ Key = 'ProfileMachine'; Arg = $snapshotMachine })
+    }
+
+    $snapshotMonitors = @()
+    try { $snapshotMonitors = @($FromSnapshot.monitors | Where-Object { $_ }) } catch { }
+    $currentMonitors = @($Current.monitors | Where-Object { $_ })
+    if ($snapshotMonitors.Count -gt 0 -and $currentMonitors.Count -gt 0) {
+        $from = (@($snapshotMonitors | Sort-Object) -join ', ')
+        $to = (@($currentMonitors | Sort-Object) -join ', ')
+        if (-not [string]::Equals($from, $to, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $changes.Add([pscustomobject]@{ Key = 'ProfileMonitors'; Arg = ('{0} -> {1}' -f $from, $to) })
+        }
+    }
+
+    $snapshotScale = 0
+    try { $snapshotScale = [int]$FromSnapshot.scale } catch { }
+    if ($snapshotScale -gt 0 -and [int]$Current.scale -gt 0 -and $snapshotScale -ne [int]$Current.scale) {
+        $changes.Add([pscustomobject]@{ Key = 'ProfileScale'; Arg = ('{0}% -> {1}%' -f $snapshotScale, [int]$Current.scale) })
+    }
+
+    $snapshotCulture = ''
+    try { $snapshotCulture = [string]$FromSnapshot.culture } catch { }
+    if (-not [string]::IsNullOrWhiteSpace($snapshotCulture) -and
+        -not [string]::IsNullOrWhiteSpace([string]$Current.culture) -and
+        -not [string]::Equals($snapshotCulture, [string]$Current.culture, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $changes.Add([pscustomobject]@{ Key = 'ProfileCulture'; Arg = $snapshotCulture })
+    }
+
+    return $changes.ToArray()
+}
+
+function Get-SRRecoveryTimeline {
+    # Recent crash, restart and kernel-power events in one ordered list for
+    # the Studio. Reading the event log is read-only locally; nothing leaves
+    # the PC. Days without events are simply absent from the result.
+    param(
+        [int]$Days = 30,
+        [ValidateRange(1, 200)][int]$MaxEvents = 40,
+        [datetime]$Now = (Get-Date)
+    )
+    if ($Days -lt 1) { $Days = 1 }
+    $since = $Now.AddDays(-1 * $Days)
+    $entries = New-Object System.Collections.Generic.List[object]
+
+    # (Id, provider, kind key, description expression)
+    $eventMap = @(
+        @{ Id = 41;   Provider = 'Microsoft-Windows-Kernel-Power';          Kind = 'PowerLoss'; Priority = 0 },
+        @{ Id = 1001; Provider = 'Microsoft-Windows-WER-SystemErrorReporting'; Kind = 'BlueScreen'; Priority = 1 },
+        @{ Id = 6008; Provider = '';                                          Kind = 'Unexpected'; Priority = 2 },
+        @{ Id = 1074; Provider = '';                                          Kind = 'Initiated';  Priority = 3 },
+        @{ Id = 6006; Provider = '';                                          Kind = 'Clean';      Priority = 4 },
+        @{ Id = 6005; Provider = 'EventLog';                                  Kind = 'Boot';       Priority = 5 }
+    )
+
+    foreach ($definition in $eventMap) {
+        $query = @{ LogName = 'System'; Id = $definition.Id; StartTime = $since }
+        if (-not [string]::IsNullOrWhiteSpace($definition.Provider)) { $query['ProviderName'] = $definition.Provider }
+        $events = @()
+        try { $events = @(Get-WinEvent -FilterHashtable $query -ErrorAction SilentlyContinue) } catch { }
+        foreach ($event in $events) {
+            $arg = ''
+            if ($definition.Kind -eq 'BlueScreen') {
+                if ([string]$event.Message -match '0x[0-9a-fA-F]{8}') { $arg = $Matches[0] }
+            } elseif ($definition.Kind -eq 'Initiated') {
+                # Event 1074 messages are localized, so read the structured
+                # properties: 0 process path, 2 reason code, 6 user, 7 action.
+                try {
+                    $properties = @($event.Properties | ForEach-Object { [string]$_.Value })
+                    if ($properties.Count -gt 2) {
+                        $action = [int]$properties[2]
+                        if ($action -eq 2) { $arg = 'restart' }
+                        elseif ($action -eq 3) { $arg = 'poweroff' }
+                        elseif ($action -eq 4) { $arg = 'logoff' }
+                        elseif ($action -eq 5) { $arg = 'sleep' }
+                    }
+                    if ([string]::IsNullOrWhiteSpace($arg)) {
+                        if ($properties.Count -gt 0 -and $properties[0] -match '([^\\/]+\.exe)') { $arg = $Matches[1] }
+                        elseif ($properties.Count -gt 6 -and -not [string]::IsNullOrWhiteSpace($properties[6])) { $arg = $properties[6] }
+                    }
+                } catch { }
+                if ([string]::IsNullOrWhiteSpace($arg)) { $arg = 'Windows' }
+            }
+            $entries.Add([pscustomobject]@{
+                At       = [datetime]$event.TimeCreated
+                Kind     = $definition.Kind
+                Priority = $definition.Priority
+                Arg      = $arg
+                Id       = $definition.Id
+            })
+        }
+    }
+
+    # A crash and the "unexpected shutdown" notice Windows writes for it are
+    # one event. Keep the highest-priority record per timestamp minute.
+    $seen = @{}
+    $kept = New-Object System.Collections.Generic.List[object]
+    $ordered = @($entries | Sort-Object -Property Priority, At)
+    foreach ($entry in $ordered) {
+        $bucket = ('{0:yyyyMMddHHmm}' -f $entry.At)
+        if ($seen.ContainsKey($bucket)) { continue }
+        $seen[$bucket] = $true
+        $kept.Add($entry)
+    }
+
+    return @($kept |
+        Sort-Object -Property At -Descending |
+        Select-Object -First $MaxEvents)
 }
 
 function Get-SRLastShutdownReason {
@@ -4458,6 +4628,10 @@ function New-SRSnapshot {
     # Monitor layout at capture time, so restore can map windows from
     # monitors that no longer exist instead of only clamping them.
     $monitors = @(Get-SRMonitors)
+    # Machine facts (OS build, DPI scale, display sizes) so a restore opened on
+    # another PC can say what differs. Best effort: never fail a snapshot.
+    $systemProfile = $null
+    try { $systemProfile = Get-SRSystemProfile } catch { }
 
     # Kept for the thumbnail pass in Save-SRSnapshot; never serialized.
     $script:SRLastWindows = $windows
@@ -4481,6 +4655,7 @@ function New-SRSnapshot {
         devWorkspaces = $devWorkspaces
         remote        = $remote
         monitors      = $monitors
+        system        = $systemProfile
         stats         = [pscustomobject]@{
             windows  = $windows.Count
             apps     = $apps.Count

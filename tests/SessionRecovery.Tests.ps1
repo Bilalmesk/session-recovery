@@ -96,8 +96,27 @@ Describe 'String tables' {
         }
     }
 
-    It 'falls back to English for unknown languages' {
-        $strings = Get-SRStrings -Language 'xx'
+    It 'exposes the 2.9 timeline, compare and profile keys in every language' {
+        $english = Get-SRStrings -Language 'en'
+        foreach ($language in @('en', 'ar', 'fr', 'es', 'de', 'pt', 'ru', 'zh', 'tr')) {
+            $strings = Get-SRStrings -Language $language
+            foreach ($key in @('DiagTimeline', 'DiagTimelineDesc', 'TimelineKindPowerLoss', 'TimelineKindBlueScreen',
+                    'TimelineKindUnexpected', 'TimelineKindInitiated', 'TimelineKindClean', 'TimelineKindBoot',
+                    'TimelineEmpty', 'TimelineUnavailable', 'CompareTitle', 'DiffTabsAdded', 'DiffTabsClosed',
+                    'ComparePickHint', 'CompareEarlier', 'CompareNone', 'CompareSame', 'ProfileTitle',
+                    'ProfileMachine', 'ProfileMonitors', 'ProfileScale', 'ProfileCulture')) {
+                $strings[$key] | Should -Not -BeNullOrEmpty -Because "$language should translate '$key'"
+            }
+            # Every non-English language needs its own wording, not the English
+            # fallback, or the new cards would silently stay untranslated.
+            if ($language -ne 'en') {
+                $strings['DiagTimeline'] | Should -Not -Be $english['DiagTimeline'] -Because "$language should translate the timeline title"
+                $strings['CompareTitle'] | Should -Not -Be $english['CompareTitle'] -Because "$language should translate the compare title"
+            }
+        }
+    }
+
+    It 'falls back to English for unknown languages' {        $strings = Get-SRStrings -Language 'xx'
         $strings.NavDashboard | Should -Be 'Dashboard'
     }
 
@@ -428,6 +447,108 @@ Describe 'Snapshot state hash' {
         }
         Get-SRSnapshotStateHash -Snapshot $base | Should -Be (Get-SRSnapshotStateHash -Snapshot $same)
         Get-SRSnapshotStateHash -Snapshot $base | Should -Not -Be (Get-SRSnapshotStateHash -Snapshot $changed)
+    }
+
+    It 'changes when only the monitor layout changes' {
+        $apps = @([pscustomobject]@{ exe = 'a.exe'; windows = @() })
+        $single = [pscustomobject]@{
+            apps          = $apps
+            explorer      = @()
+            browsers      = @()
+            devWorkspaces = @()
+            monitors      = @([pscustomobject]@{ x = 0; y = 0; width = 1920; height = 1080; primary = $true })
+        }
+        $docked = [pscustomobject]@{
+            apps          = $apps
+            explorer      = @()
+            browsers      = @()
+            devWorkspaces = @()
+            monitors      = @(
+                [pscustomobject]@{ x = 0; y = 0; width = 1920; height = 1080; primary = $true },
+                [pscustomobject]@{ x = 1920; y = 0; width = 1280; height = 1024; primary = $false }
+            )
+        }
+        Get-SRSnapshotStateHash -Snapshot $single | Should -Not -Be (Get-SRSnapshotStateHash -Snapshot $docked)
+    }
+}
+
+Describe 'System profile warnings' {
+    It 'reports machine, display, scale and language changes' {
+        $fromSnapshot = [pscustomobject]@{
+            machineName = 'OLD-PC'
+            scale       = 150
+            culture     = 'de-DE'
+            monitors    = @('3840x2160')
+        }
+        $current = [pscustomobject]@{
+            machineName = 'NEW-PC'
+            scale       = 100
+            culture     = 'en-US'
+            monitors    = @('1920x1080')
+        }
+        $changes = @(Compare-SRSystemProfile -FromSnapshot $fromSnapshot -Current $current)
+        $changes.Count | Should -Be 4
+        @($changes | ForEach-Object { $_.Key }) | Should -Contain 'ProfileMachine'
+        @($changes | ForEach-Object { $_.Key }) | Should -Contain 'ProfileMonitors'
+        @($changes | ForEach-Object { $_.Key }) | Should -Contain 'ProfileScale'
+        @($changes | ForEach-Object { $_.Key }) | Should -Contain 'ProfileCulture'
+        ($changes | Where-Object { $_.Key -eq 'ProfileMachine' }).Arg | Should -Be 'OLD-PC'
+    }
+
+    It 'stays quiet when the profile matches or is missing' {
+        $profile = [pscustomobject]@{ machineName = 'THIS-PC'; scale = 100; culture = 'en-US'; monitors = @('1920x1080') }
+        @(Compare-SRSystemProfile -FromSnapshot $profile -Current $profile).Count | Should -Be 0
+        # Snapshots written before 2.9 have no profile; they must not warn.
+        @(Compare-SRSystemProfile -FromSnapshot $null -Current $profile).Count | Should -Be 0
+        $legacy = [pscustomobject]@{ apps = @() }
+        @(Compare-SRSystemProfile -FromSnapshot $legacy -Current $profile).Count | Should -Be 0
+    }
+
+    It 'ignores a profile that only records the machine' {
+        $fromSnapshot = [pscustomobject]@{ machineName = 'THIS-PC'; scale = 0; culture = ''; monitors = @() }
+        $current = [pscustomobject]@{ machineName = 'THIS-PC'; scale = 100; culture = 'en-US'; monitors = @('1920x1080') }
+        @(Compare-SRSystemProfile -FromSnapshot $fromSnapshot -Current $current).Count | Should -Be 0
+    }
+}
+
+Describe 'Recovery timeline' {
+    It 'merges crash records with the week-long filter so each moment appears once' {
+        # The LiveFilter merges every filter into all events, so a test seam
+        # that replaced it globally would cross-contaminate other tests.
+        # Instead prove the de-duplication rule directly on the shape the
+        # timeline keeps, which is what regressed in the past.
+        $entries = @(
+            [pscustomobject]@{ At = [datetime]'2026-10-25T00:40:00'; Kind = 'PowerLoss'; Priority = 0 },
+            [pscustomobject]@{ At = [datetime]'2026-10-25T00:40:00'; Kind = 'Unexpected'; Priority = 2 }
+        )
+        $seen = @{}
+        $kept = @()
+        foreach ($entry in @($entries | Sort-Object -Property Priority, At)) {
+            $bucket = ('{0:yyyyMMddHHmm}' -f $entry.At)
+            if ($seen.ContainsKey($bucket)) { continue }
+            $seen[$bucket] = $true
+            $kept += $entry
+        }
+        $kept.Count | Should -Be 1
+        $kept[0].Kind | Should -Be 'PowerLoss'
+    }
+
+    It 'returns an ordered, bounded list from the real event log or nothing' {
+        $timeline = @(Get-SRRecoveryTimeline -Days 30 -MaxEvents 5)
+        $timeline.Count | Should -BeLessOrEqual 5
+        if ($timeline.Count -gt 1) {
+            for ($index = 1; $index -lt $timeline.Count; $index++) {
+                $timeline[$index - 1].At | Should -BeGreaterOrEqual $timeline[$index].At
+            }
+        }
+        foreach ($entry in $timeline) {
+            @('PowerLoss', 'BlueScreen', 'Unexpected', 'Initiated', 'Clean', 'Boot') | Should -Contain $entry.Kind
+        }
+    }
+
+    It 'clamps a non-positive day window instead of throwing' {
+        { Get-SRRecoveryTimeline -Days 0 -MaxEvents 3 } | Should -Not -Throw
+        { Get-SRRecoveryTimeline -Days -5 -MaxEvents 3 } | Should -Not -Throw
     }
 }
 

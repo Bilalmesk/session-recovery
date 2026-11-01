@@ -13,7 +13,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string]$Version = '2.8.1',
+    [string]$Version = '2.9.0',
     [switch]$NoRestore
 )
 
@@ -75,8 +75,24 @@ Session Recovery {0}
 Reopen the apps, File Explorer folders and browser tabs that were open before
 a crash, power cut or unexpected restart.
 
-What's new in 2.8.1
+What's new in 2.9.0
 -------------------
+- Recovery timeline: the Diagnostics page lists restarts, power loss and blue
+  screens from the Windows event log over the last 30 days. It is read
+  locally and nothing is uploaded.
+- Compare snapshots: select a moment, pick an older snapshot and see which
+  apps, folders, tabs and dev workspaces opened or closed in between.
+- Cross-PC snapshots: every snapshot now records the machine name, display
+  sizes, display scale and system language. When a snapshot was captured on
+  another PC or a different monitor layout, the details pane lists what
+  changed before you restore.
+- Capture now detects docked or unplugged monitors as a real change, so a
+  display change is saved even when no window opened or closed.
+- Snapshot capture, restore filters and the restore window behaviour are
+  unchanged; the new cards and labels are translated into all nine languages.
+
+Also in 2.8.1
+-------------
 - Restore window scrollbars now follow the active theme. Light themes such as
   Sakura and Paper no longer get a dark scrollbar, and every dark theme keeps
   the dark scrollbar.

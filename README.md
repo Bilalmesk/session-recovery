@@ -6,7 +6,7 @@
 
 ![Windows 10/11](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?logo=windows&logoColor=white)
 ![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-5391FE?logo=powershell&logoColor=white)
-![Version](https://img.shields.io/badge/version-2.8.1-8B5CF6)
+![Version](https://img.shields.io/badge/version-2.9.0-8B5CF6)
 ![Local only](https://img.shields.io/badge/privacy-100%25%20local-22C55E)
 
 [Install](#-install) · [Restore](#-restore) · [Configure](#%EF%B8%8F-configure) · [Troubleshoot](#-troubleshooting) · [Uninstall](#-uninstall)
@@ -35,6 +35,9 @@ Session Recovery snapshots your desktop every few minutes and offers to restore 
 | 🕵️ **Privacy scan** | Finds sensitive apps and sites from names and tab URLs, never page content |
 | 🧳 **Recovery Kit** | Move snapshots, notes and exclusions between PCs in one `.srkit` file |
 | 📊 **Recovery insights** | Local counts for snapshots, apps, sites, pins, notes and storage |
+| 🩺 **Recovery timeline** | Restarts, power loss and blue screens from the last 30 days, read from the local event log |
+| 🔍 **Compare snapshots** | Pick an older moment and see which apps, folders and tabs opened or closed since |
+| ⚙️ **Cross-PC snapshots** | Every snapshot records machine, displays, scale and language; restore explains what changed |
 | 💤 **Hibernate checkpoints** | Pins the last three snapshots taken just before sleep or hibernate, and offers **Hibernate with checkpoint** from the tray or `--hibernate` |
 | 📦 **Export / import** | Back up snapshots as JSON or move them to another PC |
 | 🖥️ **Native tray + Studio** | Dashboard, Snapshots, Exclusions, Recovery Kit, Settings, Diagnostics and About; 14 dark and light colour themes, no console windows |
@@ -248,6 +251,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $d -ReportPath "$env:TEMP\sr
 
 Reports contain paths, URLs and log lines, so review them before sharing.
 
+The **Recovery timeline** card lists restarts, power loss and blue screens from the Windows event log over the last 30 days. It is read locally and nothing is uploaded; only the event types and timestamps are shown, never message contents.
+
+## 🔍 Compare snapshots
+
+Select any snapshot in **Snapshots** and pick an older moment under **Compare with an earlier snapshot**. The details pane then shows which apps, folders, tabs and dev workspaces were opened or closed in between.
+
+Each snapshot also records the PC facts that affect placement — machine name, display sizes, display scale and system language. When you restore a snapshot captured on another machine or with a different monitor layout, the details pane lists exactly what changed before you restore.
+
 ## 🔐 Privacy & data
 
 - Everything stays on your PC: no extension, no debugging port and no telemetry. The app makes no network requests unless you check for or download an update.
@@ -306,7 +317,7 @@ Get-ScheduledTask -TaskName 'SessionRecovery-*' -ErrorAction SilentlyContinue | 
 ## 👩‍💻 Development
 
 ```powershell
-# Build the MSI (needs .NET SDK 6+ and internet for WiX restore) → dist\SessionRecovery-2.8.1.msi
+# Build the MSI (needs .NET SDK 6+ and internet for WiX restore) → dist\SessionRecovery-2.9.0.msi
 powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\Build-MSI.ps1
 
 # Build the native host only

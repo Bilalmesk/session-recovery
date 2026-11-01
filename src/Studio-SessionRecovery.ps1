@@ -17,7 +17,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-$script:AppVersion = '2.8.1'
+$script:AppVersion = '2.9.0'
 $script:ScriptDir = $PSScriptRoot
 $script:AppDir = if ($env:SESSIONRECOVERY_HOST_EXE) { Split-Path -Parent $env:SESSIONRECOVERY_HOST_EXE } else { $PSScriptRoot }
 $script:HostExe = $null
@@ -1263,7 +1263,7 @@ $restoreSidebar.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [Syste
 $restoreSidebar.Add_Click({ Open-StudioRestore })
 $sidebar.Controls.Add($restoreSidebar)
 
-$sidebarStatusCard = New-StudioCard -X 14 -Y 0 -Width 208 -Height 156 -Fill $script:P.CardAlt -Border $script:P.BorderSoft -Radius 12
+$sidebarStatusCard = New-StudioCard -X 14 -Y 0 -Width 208 -Height 162 -Fill $script:P.CardAlt -Border $script:P.BorderSoft -Radius 12
 $sidebarStatusCard.CanvasColor = $script:P.Sidebar
 $sidebarStatusCard.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
 $sidebar.Controls.Add($sidebarStatusCard)
@@ -1278,12 +1278,13 @@ $sidebarStatusCard.Controls.Add($sidebarTitle)
 $sidebarStatus = New-StudioLabel -Text 'Checking...' -X 14 -Y 60 -Width 200 -Height 18 -Font $script:FontSemibold -Color $script:P.Text
 $sidebarStatusCard.Controls.Add($sidebarStatus)
 $script:Ui.SidebarStatus = $sidebarStatus
-# French, Spanish, Portuguese and Russian need two lines at this width.
-$sidebarDetail = New-StudioLabel -Text '' -X 14 -Y 78 -Width 180 -Height 30 -Font $script:FontBodySmall -Color $script:P.Muted
+# French, Spanish, Portuguese and Russian need two lines at this width, and
+# Russian also wraps the status line, so give the detail box room for three.
+$sidebarDetail = New-StudioLabel -Text '' -X 14 -Y 78 -Width 180 -Height 34 -Font $script:FontBodySmall -Color $script:P.Muted
 $sidebarStatusCard.Controls.Add($sidebarDetail)
 $script:Ui.SidebarDetail = $sidebarDetail
 
-$trayButton = New-StudioButton -Text 'Start background app' -X 14 -Y 114 -Width 180 -Height 30 -Glyph ''
+$trayButton = New-StudioButton -Text 'Start background app' -X 14 -Y 116 -Width 180 -Height 30 -Glyph ''
 $trayButton.Visible = $true
 $trayButton.Add_Click({ Start-StudioBackground })
 $sidebarStatusCard.Controls.Add($trayButton)
@@ -1871,6 +1872,130 @@ $detailText.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windo
 $detailCard.Controls.Add($detailText)
 $script:Ui.DetailText = $detailText
 
+# Compare: pick an older moment and append a side-by-side diff to the detail
+# text. The picker lives in its own band between the summary and the text so
+# it can never overlap; when it is hidden the text simply starts higher.
+$detailCompareLabel = New-StudioLabel -Text (T 'CompareEarlier' 'Compare with an earlier snapshot') -X 18 -Y 138 -Width 340 -Height 16 -Font $script:FontMono -Color $script:P.Subtle
+$detailCompareLabel.Visible = $false
+$detailCard.Controls.Add($detailCompareLabel)
+$detailCompare = New-StudioCombo -X 18 -Y 156 -Width 340
+$detailCompare.Visible = $false
+$detailCard.Controls.Add($detailCompare)
+$script:Ui.DetailCompare = $detailCompare
+$script:Ui.DetailCompareLabel = $detailCompareLabel
+# The label is a bare decorative caption, not a boxed field, so it sits
+# flush with the summary above it instead of clearing a caption band.
+$detailCompareLabel.Tag = 'studio-glyph'
+
+function Set-StudioDetailLayout {
+    # One place decides the vertical rhythm of the snapshot detail card:
+    # summary, optional compare band, text, then the action row. Every caller
+    # (selection, resize, thumbnails) goes through it so nothing overlaps.
+    if (-not $script:Ui.DetailCard -or -not $script:Ui.DetailText) { return }
+    $card = $script:Ui.DetailCard
+    $thumbsExtra = 0
+    try { $thumbsExtra = [int]$script:DetailThumbsHeight } catch { }
+    $top = 138 + $thumbsExtra
+    if ($script:Ui.DetailCompare -and $script:Ui.DetailCompare.Visible) {
+        $script:Ui.DetailCompareLabel.Top = $top
+        $script:Ui.DetailCompareLabel.Left = 18
+        $script:Ui.DetailCompareLabel.Width = $card.ClientSize.Width - 36
+        $script:Ui.DetailCompare.Top = $top + 18
+        $script:Ui.DetailCompare.Left = 18
+        $script:Ui.DetailCompare.Width = $card.ClientSize.Width - 36
+        $top += 50
+    } else {
+        $script:Ui.DetailCompareLabel.Top = $top
+        $script:Ui.DetailCompare.Top = $top + 18
+        $script:Ui.DetailCompare.Left = 18
+        $script:Ui.DetailCompare.Width = $card.ClientSize.Width - 36
+    }
+    if ($script:Ui.DetailText.Top -ne $top) { $script:Ui.DetailText.Top = $top }
+    $script:Ui.DetailText.Width = $card.ClientSize.Width - 36
+    $script:Ui.DetailText.Height = [Math]::Max(120, $card.ClientSize.Height - $top - 62)
+}
+
+function Format-StudioCompareText {
+    param([object]$Diff)
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add((T 'CompareTitle' 'WHAT CHANGED BETWEEN THESE SNAPSHOTS'))
+    $added = @($Diff.AppsAdded)
+    $removed = @($Diff.AppsRemoved)
+    $foldersAdded = @($Diff.FoldersAdded)
+    $foldersRemoved = @($Diff.FoldersRemoved)
+    $tabsAdded = @($Diff.TabsAdded)
+    $tabsRemoved = @($Diff.TabsRemoved)
+    $devAdded = @($Diff.WorkspacesAdded)
+    $devRemoved = @($Diff.WorkspacesRemoved)
+    $total = $added.Count + $removed.Count + $foldersAdded.Count + $foldersRemoved.Count + $tabsAdded.Count + $tabsRemoved.Count + $devAdded.Count + $devRemoved.Count
+    if ($total -eq 0) {
+        $lines.Add('  ' + (T 'CompareNone' 'No differences in apps, folders, tabs or workspaces.'))
+        return $lines
+    }
+    if ($added.Count -gt 0) { $lines.Add(('+ ' + ((T 'DiffNewApps' 'New: {0}') -f ($added -join ', ')))) }
+    if ($removed.Count -gt 0) { $lines.Add(('- ' + ((T 'DiffClosedApps' 'Closed: {0}') -f ($removed -join ', ')))) }
+    if ($foldersAdded.Count -gt 0) { $lines.Add(('+ ' + ((T 'DetailFolders' 'FOLDERS') + ': ' + ($foldersAdded -join ', ')))) }
+    if ($foldersRemoved.Count -gt 0) { $lines.Add(('- ' + ((T 'DetailFolders' 'FOLDERS') + ': ' + ($foldersRemoved -join ', ')))) }
+    if ($tabsAdded.Count -gt 0) { $lines.Add(('+ ' + ((T 'DiffTabsAdded' 'Tabs opened: {0}') -f $tabsAdded.Count))) }
+    if ($tabsRemoved.Count -gt 0) { $lines.Add(('- ' + ((T 'DiffTabsClosed' 'Tabs closed: {0}') -f $tabsRemoved.Count))) }
+    if ($devAdded.Count -gt 0) { $lines.Add(('+ ' + ((T 'RstDev' 'DEV WORKSPACES') + ': ' + ($devAdded -join ', ')))) }
+    if ($devRemoved.Count -gt 0) { $lines.Add(('- ' + ((T 'RstDev' 'DEV WORKSPACES') + ': ' + ($devRemoved -join ', ')))) }
+    return $lines
+}
+
+function Update-StudioSnapshotCompare {
+    # Rebuilds the picker with older snapshots and appends the chosen diff to
+    # the detail text. The picker keeps its selection across rebuilds.
+    $combo = $script:Ui.DetailCompare
+    if (-not $combo) { return }
+    $entry = Get-StudioSelectedSnapshotEntry
+    if ($null -eq $entry) {
+        $combo.Visible = $false
+        $script:Ui.DetailCompareLabel.Visible = $false
+        $combo.Items.Clear()
+        return
+    }
+    $previousKey = [string]$script:SelectedComparePath
+    $older = @($script:Snapshots | Where-Object { $_.CapturedAt -lt $entry.CapturedAt } | Select-Object -First 24)
+    $script:CompareUpdating = $true
+    $combo.BeginUpdate()
+    try {
+        $combo.Items.Clear()
+        foreach ($candidate in $older) {
+            $label = '{0}  •  {1}' -f (Format-StudioDate -Date $candidate.CapturedAt -Format 'MMM d  HH:mm'), (Format-StudioAge -CapturedAt $candidate.CapturedAt)
+            [void]$combo.Items.Add($label)
+        }
+        $restoreIndex = -1
+        if ($previousKey) {
+            for ($index = 0; $index -lt $older.Count; $index++) {
+                if ([string]$older[$index].Path -eq $previousKey) { $restoreIndex = $index; break }
+            }
+        }
+        $combo.SelectedIndex = $restoreIndex
+    } finally {
+        $combo.EndUpdate()
+        $script:CompareUpdating = $false
+    }
+    $hasChoice = ($older.Count -gt 0 -and $combo.SelectedIndex -ge 0)
+    $combo.Visible = ($older.Count -gt 0)
+    $script:Ui.DetailCompareLabel.Visible = ($older.Count -gt 0)
+    Set-StudioDetailLayout
+    if (-not $hasChoice) { return }
+    $chosen = $older[$combo.SelectedIndex]
+    $script:SelectedComparePath = [string]$chosen.Path
+    try {
+        $diff = Compare-SRSnapshot -Reference $chosen.Snapshot -Difference $entry.Snapshot
+        $extra = Format-StudioCompareText -Diff $diff
+        $script:Ui.DetailText.Text = ($script:Ui.DetailText.Text.TrimEnd() + "`r`n`r`n" + ($extra -join "`r`n"))
+    } catch { }
+}
+
+$detailCompare.Add_SelectedIndexChanged({
+    if ($script:CompareUpdating) { return }
+    if ($script:StudioLoading) { return }
+    Update-StudioSnapshotCompare
+})
+
 $detailRestore = New-StudioButton -Text (T 'BtnRestoreSelected' 'Restore selected') -X 18 -Y 500 -Width 174 -Height 36 -Primary -Glyph ''
 
 $detailRestore.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
@@ -1924,11 +2049,7 @@ $detailCard.Add_Resize({
     $script:Ui.DetailTitle.Width = $card.ClientSize.Width - 36
     $script:Ui.DetailMeta.Width = $card.ClientSize.Width - 36
     $script:Ui.DetailSummary.Width = $card.ClientSize.Width - 36
-    $script:Ui.DetailText.Width = $card.ClientSize.Width - 36
-    $thumbsExtra = 0
-    try { $thumbsExtra = [int]$script:DetailThumbsHeight } catch { }
-    if ($script:Ui.DetailText.Top -lt (138 + $thumbsExtra)) { $script:Ui.DetailText.Top = 138 + $thumbsExtra + 6 }
-    $script:Ui.DetailText.Height = [Math]::Max(120, $card.ClientSize.Height - $script:Ui.DetailText.Top - 62)
+    Set-StudioDetailLayout
     $script:Ui.DetailPin.Left = $card.ClientSize.Width - 18 - $script:Ui.DetailPin.Width
     $script:Ui.DetailNote.Left = $script:Ui.DetailPin.Left - 8 - $script:Ui.DetailNote.Width
     $script:Ui.DetailRestore.Top = $card.ClientSize.Height - 54
@@ -2048,13 +2169,9 @@ function Update-StudioSnapshotDetails {
     if ($null -eq $entry) {
         if ($script:Ui.DetailThumbs) { $script:Ui.DetailThumbs.Controls.Clear(); $script:Ui.DetailThumbs.Height = 0 }
         $script:DetailThumbsHeight = 0
-        if ($script:Ui.DetailText) { $script:Ui.DetailText.Top = 138 }
-        # Keep the text box inside the card: a thumbnail strip raises the top,
-        # so the height must shrink with it (the resize handler only sees
-        # card-size changes, not content changes).
-        if ($script:Ui.DetailText -and $script:Ui.DetailCard) {
-            $script:Ui.DetailText.Height = [Math]::Max(120, $script:Ui.DetailCard.ClientSize.Height - $script:Ui.DetailText.Top - 62)
-        }
+        # One layout pass keeps the text box inside the card whether or not a
+        # thumbnail strip or compare picker is showing.
+        Set-StudioDetailLayout
         $script:Ui.DetailBadge.Text = (T 'BadgeNoSnapshot' 'NO SNAPSHOT')
         $script:Ui.DetailBadge.FillColor = $script:P.CardAlt
         $script:Ui.DetailBadge.TextColor = $script:P.Muted
@@ -2070,6 +2187,11 @@ function Update-StudioSnapshotDetails {
             $script:Ui.DetailPin.Text = (T 'BtnPin' 'Pin')
         }
         if ($script:Ui.DetailNote) { $script:Ui.DetailNote.Enabled = $false }
+        if ($script:Ui.DetailCompare) {
+            $script:Ui.DetailCompare.Visible = $false
+            $script:Ui.DetailCompareLabel.Visible = $false
+            Set-StudioDetailLayout
+        }
         if ($script:Ui.SnapExport) { $script:Ui.SnapExport.Enabled = $false }
         return
     }
@@ -2116,12 +2238,7 @@ function Update-StudioSnapshotDetails {
     }
     $script:DetailThumbsHeight = $thumbHeight
     if ($script:Ui.DetailText) {
-        $script:Ui.DetailText.Top = 138 + $thumbHeight + 6
-        if ($script:Ui.DetailCard) {
-            # Shrink with the thumbnail strip so the text never runs under
-            # the Restore/Open/Delete buttons at the bottom of the card.
-            $script:Ui.DetailText.Height = [Math]::Max(120, $script:Ui.DetailCard.ClientSize.Height - $script:Ui.DetailText.Top - 62)
-        }
+        Set-StudioDetailLayout
     }
 
     $bytes = Get-StudioSnapshotBytes -Entry $entry
@@ -2150,6 +2267,30 @@ function Update-StudioSnapshotDetails {
     if ($script:Ui.SnapExport) { $script:Ui.SnapExport.Enabled = $true }
 
     $lines = New-Object System.Collections.Generic.List[string]
+    # Snapshots carry the facts of the PC that captured them. A restore from
+    # another machine explains up front what will be mapped rather than
+    # leaving window placement or display scale a surprise.
+    try {
+        $profileProperty = $snapshot.PSObject.Properties['system']
+        if ($null -ne $profileProperty) {
+            $changes = @(Compare-SRSystemProfile -FromSnapshot $profileProperty.Value)
+            if ($changes.Count -gt 0) {
+                $lines.Add((T 'ProfileTitle' 'This snapshot comes from another PC'))
+                foreach ($change in $changes) {
+                    $text = switch ([string]$change.Key) {
+                        'ProfileMachine' { T 'ProfileMachine' 'Captured on {0}' }
+                        'ProfileMonitors' { T 'ProfileMonitors' 'Displays changed: {0}' }
+                        'ProfileScale' { T 'ProfileScale' 'Display scale changed: {0}' }
+                        'ProfileCulture' { T 'ProfileCulture' 'System language at capture: {0}' }
+                        default { '{0}' }
+                    }
+                    $lines.Add('  ' + ($text -f [string]$change.Arg))
+                }
+                $lines.Add('')
+            }
+        }
+    } catch { }
+
     try {
         $noteTable = ConvertTo-SRNoteTable -Value $script:Config.snapshotNotes
         $noteLeaf = Split-Path -Leaf $entry.Path
@@ -2279,6 +2420,12 @@ function Update-StudioSnapshotDetails {
     $script:Ui.DetailText.Text = ($lines -join "`r`n")
     $script:Ui.DetailText.SelectionStart = 0
     $script:Ui.DetailText.SelectionLength = 0
+
+    # Reset the compare selection for the new moment, then append its diff.
+    if ($script:Ui.DetailCompare) {
+        $script:SelectedComparePath = ''
+        Update-StudioSnapshotCompare
+    }
 }
 
 function Select-StudioSnapshotRow {
@@ -3622,6 +3769,48 @@ function Update-StudioInsights {
     }
 }
 
+$diagTimelineCard = New-StudioSettingsCard -Title (T 'DiagTimeline' 'Recovery timeline') -Description (T 'DiagTimelineDesc' 'Restarts, power loss and blue screens from the Windows event log over the last 30 days. Read locally, never uploaded.') -Height 300 -WrapDescription
+$diagFlow.Controls.Add($diagTimelineCard)
+$diagTimelineLabel = New-StudioLabel -Text '' -X 20 -Y 80 -Width 760 -Height 200 -Font $script:FontBodySmall -Color $script:P.Text -AutoSize $false
+$diagTimelineLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+$diagTimelineCard.Controls.Add($diagTimelineLabel)
+$script:Ui.DiagTimeline = $diagTimelineLabel
+
+function Format-StudioTimelineText {
+    param([object[]]$Entries)
+    if ($null -eq $Entries -or $Entries.Count -eq 0) { return (T 'TimelineEmpty' 'No restart events in the last 30 days.') }
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($entry in @($Entries | Select-Object -First 7)) {
+        $typeLine = switch ([string]$entry.Kind) {
+            'PowerLoss' { T 'TimelineKindPowerLoss' 'Power loss or forced restart' }
+            'BlueScreen' { T 'TimelineKindBlueScreen' 'Blue screen' }
+            'Unexpected' { T 'TimelineKindUnexpected' 'Unexpected shutdown' }
+            'Initiated' { (T 'TimelineKindInitiated' 'Shut down or restarted ({0})') -f [string]$entry.Arg }
+            'Clean' { T 'TimelineKindClean' 'Clean shutdown' }
+            'Boot' { T 'TimelineKindBoot' 'Windows started' }
+            default { [string]$entry.Kind }
+        }
+        if ([string]$entry.Kind -eq 'BlueScreen' -and -not [string]::IsNullOrWhiteSpace([string]$entry.Arg)) {
+            $typeLine = ('{0} ({1})' -f $typeLine, [string]$entry.Arg)
+        }
+        $when = ([datetime]$entry.At).ToString('yyyy-MM-dd  HH:mm', [System.Globalization.CultureInfo]::InvariantCulture)
+        $lines.Add(('{0}    {1}' -f $when, $typeLine))
+    }
+    return ($lines -join "`r`n")
+}
+
+function Update-StudioTimeline {
+    if (-not $script:Ui.DiagTimeline) { return }
+    try {
+        $entries = @(Get-SRRecoveryTimeline -Days 30 -MaxEvents 40)
+        $script:Ui.DiagTimeline.Text = Format-StudioTimelineText -Entries $entries
+        $script:Ui.DiagTimeline.ForeColor = $script:P.Text
+    } catch {
+        $script:Ui.DiagTimeline.Text = (T 'TimelineUnavailable' 'The Windows event log could not be read. Restart history is unavailable.')
+        $script:Ui.DiagTimeline.ForeColor = $script:P.Muted
+    }
+}
+
 $diagBrowserCard = New-StudioSettingsCard -Title (T 'DiagBrowsers' 'Detected browsers') -Description (T 'DiagBrowsersDesc' 'Supported browsers found on this PC.') -Height 152
 $diagFlow.Controls.Add($diagBrowserCard)
 $diagBrowserLabel = New-StudioLabel -Text (T 'CheckingWord' 'Checking...') -X 20 -Y 70 -Width 760 -Height 64 -Font $script:FontBodySmall -Color $script:P.Muted
@@ -3833,6 +4022,8 @@ function Render-StudioDiagnostics {
             $script:Ui.DiagBrowserLabel.Text = ($browsers | ForEach-Object { '{0}  —  {1}' -f $_.Name, $_.Exe }) -join "`r`n"
         }
 
+        Update-StudioTimeline
+
         $logPath = [string]$diag.LogPath
         if (Test-Path -LiteralPath $logPath) {
             $log = @(Get-Content -LiteralPath $logPath -Tail 160 -ErrorAction SilentlyContinue)
@@ -3975,7 +4166,7 @@ function Complete-StudioDiagnosticsWorker {
 
 function Layout-StudioDiagnostics {
     if (-not $script:Ui.DiagFlow) { return }
-    $width = Set-StudioVerticalStack -Panel $script:Ui.DiagFlow -Cards @($diagHealthCard, $diagChecksCard, $diagInsightsCard, $diagBrowserCard, $diagLogCard) -Padding 24 -BottomPadding 24 -MinWidth 620
+    $width = Set-StudioVerticalStack -Panel $script:Ui.DiagFlow -Cards @($diagHealthCard, $diagChecksCard, $diagInsightsCard, $diagTimelineCard, $diagBrowserCard, $diagLogCard) -Padding 24 -BottomPadding 24 -MinWidth 620
     # Ring at the right edge, with the Run checks button beneath it. The
     # headline and description may use the full width beside the ring, so
     # every translated headline still fits on one line. The detail summary
@@ -4014,6 +4205,7 @@ function Layout-StudioDiagnostics {
     $diagTopSites.Left = $diagTopSitesTitle.Left
     $diagTopSites.Width = $halfWidth
     $diagCheckFlow.Width = [Math]::Max(200, $width - 40)
+    $diagTimelineLabel.Width = [Math]::Max(200, $width - 40)
     $diagBrowserLabel.Width = [Math]::Max(200, $width - 40)
     $diagLogText.Width = [Math]::Max(200, $width - 40)
     $diagLogText.Height = [Math]::Max(100, $diagLogCard.Height - 130)
@@ -4497,7 +4689,7 @@ function Layout-StudioSidebar {
     $height = $sidebar.ClientSize.Height
     if ($height -le 100) { return }
     $restoreSidebar.Top = $height - 250
-    $sidebarStatusCard.Top = $height - 198
+    $sidebarStatusCard.Top = $height - 204
     $sidebarVersion.Top = $height - 28
 }
 
