@@ -646,6 +646,29 @@ $snapshotItem = New-Object System.Windows.Forms.ToolStripMenuItem((T 'TraySnapsh
 [void]$snapshotItem.Add_Click({ Invoke-SRTraySnapshot -Manual })
 [void]$script:menu.Items.Add($snapshotItem)
 
+# Undo the last restore: reopen the desktop captured right before it.
+$undoItem = New-Object System.Windows.Forms.ToolStripMenuItem((T 'TrayUndoLastRestore' 'Undo last restore'))
+$script:undoMenuItem = $undoItem
+[void]$undoItem.Add_Click({
+    $checkpoint = $null
+    try { $checkpoint = Get-SRRestoreCheckpoint } catch { }
+    if ($null -eq $checkpoint) {
+        Show-SRTrayBalloon -Text (T 'UndoNoCheckpoint' 'No safety snapshot is available yet.') -Icon Warning
+        return
+    }
+    $answer = [System.Windows.Forms.MessageBox]::Show(
+        (T 'UndoConfirmText' 'Reopen the desktop that was captured right before your last restore?'),
+        (T 'UndoConfirmTitle' 'Undo last restore'), [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+    if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+    try {
+        [void](Start-SRUndoLastRestore)
+        Show-SRTrayBalloon -Text (T 'UndoStarted' 'Restoring the desktop from before your last restore...') -Icon Information
+    } catch {
+        Show-SRTrayBalloon -Text ((T 'UndoFailed' 'Could not undo the last restore: {0}') -f $_.Exception.Message) -Icon Error
+    }
+})
+[void]$script:menu.Items.Add($undoItem)
+
 # Named workspaces: manually saved sessions that restore in one click.
 $workspaceMenu = New-Object System.Windows.Forms.ToolStripMenuItem((T 'TrayWorkspaces' 'Workspaces'))
 [void]$workspaceMenu.Add_DropDownOpening({
@@ -749,6 +772,17 @@ $exitItem = New-Object System.Windows.Forms.ToolStripMenuItem((T 'TrayExit' 'Exi
 [void]$script:menu.Add_Opening({
     Update-SRTraySettings
     Update-SRTrayStatus
+    try {
+        $checkpoint = Get-SRRestoreCheckpoint
+        $script:undoMenuItem.Enabled = ($null -ne $checkpoint)
+        if ($null -ne $checkpoint) {
+            $when = ''
+            try { $when = '  (' + ([datetime]::Parse([string]$checkpoint.At)).ToString('t') + ')' } catch { }
+            $script:undoMenuItem.Text = (T 'TrayUndoLastRestore' 'Undo last restore') + $when
+        } else {
+            $script:undoMenuItem.Text = (T 'TrayUndoLastRestore' 'Undo last restore')
+        }
+    } catch { }
 })
 $script:notify.Add_MouseClick({
     param($sender, $e)
@@ -959,6 +993,23 @@ function Invoke-SRTrayControl {
                 $workspace = @(Get-SRWorkspaces) | Where-Object { $_.Name -eq $name } | Select-Object -First 1
                 if ($workspace) {
                     Start-SRStudio -Mode ('--restore-manual -SnapshotPath "' + ([string]$workspace.Path).Replace('"', '""') + '"')
+                }
+            }
+            'workspace-delete' {
+                if ([string]::IsNullOrWhiteSpace($name)) { break }
+                try {
+                    [void](Remove-SRWorkspace -Name $name)
+                    Show-SRTrayBalloon -Text ((T 'WsDeletedToast' 'Workspace "{0}" deleted.') -f $name) -Icon Information
+                } catch {
+                    Show-SRTrayBalloon -Text ((T 'WsDeleteFailed' 'Could not delete workspace: {0}') -f $_.Exception.Message) -Icon Error
+                }
+            }
+            'undo-restore' {
+                try {
+                    [void](Start-SRUndoLastRestore)
+                    Show-SRTrayBalloon -Text (T 'UndoStarted' 'Restoring the desktop from before your last restore...') -Icon Information
+                } catch {
+                    Show-SRTrayBalloon -Text ((T 'UndoFailed' 'Could not undo the last restore: {0}') -f $_.Exception.Message) -Icon Error
                 }
             }
         }

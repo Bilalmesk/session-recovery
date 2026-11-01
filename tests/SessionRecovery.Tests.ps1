@@ -116,6 +116,36 @@ Describe 'String tables' {
         }
     }
 
+    It 'exposes the 3.0 safety checkpoint, history, storage and workspace keys in every language' {
+        $english = Get-SRStrings -Language 'en'
+        $keys = @('NavWorkspaces', 'SubWorkspaces', 'WsSaveTitle', 'WsSaveDesc', 'WsNameLabel', 'WsSaveButton',
+            'WsSaveHint', 'WsListTitle', 'WsListDesc', 'WsEmpty', 'WsSavedToast', 'WsSaveFailed', 'WsDeleteTitle',
+            'WsDeleteText', 'WsDeletedToast', 'WsDeleteFailed', 'WsRestoreStarted', 'WsMeta', 'WsCaptured',
+            'WsOverwriteTitle', 'WsOverwriteText', 'WsEmptyName', 'WsCount', 'UndoLastRestore', 'UndoNoCheckpoint',
+            'UndoConfirmTitle', 'UndoConfirmText', 'UndoStarted', 'UndoFailed', 'SetPreRestore', 'SetPreRestoreHint',
+            'DiagRestoreHistory', 'DiagRestoreHistoryDesc', 'RestoreHistoryEmpty', 'RestoreHistoryLine',
+            'RestoreHistoryUndo', 'RestoreHistoryNoCheckpoint', 'RestoreHistorySourceManual',
+            'RestoreHistorySourceWorkspace', 'RestoreHistorySourceCommand', 'RestoreHistorySourceUndo',
+            'RestoreHistorySourceAuto', 'DiagStorageHealth', 'DiagStorageDesc', 'StorageHealthy', 'StorageIssues',
+            'StorageUnreadable', 'StorageOrphanThumbs', 'StorageTemp', 'StorageCleanup', 'StorageCleanupTitle',
+            'StorageCleanupText', 'StorageCleaned', 'StorageCleanupFailed', 'StorageNothingToClean',
+            'StorageQuarantineHint', 'StorageSummary', 'StorageRetentionApplied', 'TrayUndoLastRestore')
+        foreach ($language in @('en', 'ar', 'fr', 'es', 'de', 'pt', 'ru', 'zh', 'tr')) {
+            $strings = Get-SRStrings -Language $language
+            foreach ($key in $keys) {
+                $strings[$key] | Should -Not -BeNullOrEmpty -Because "$language should translate '$key'"
+            }
+            foreach ($key in @('WsSavedToast', 'WsDeleteText', 'WsOverwriteText', 'RestoreHistoryLine', 'StorageIssues', 'StorageCleaned', 'WsMeta', 'WsCaptured', 'StorageSummary')) {
+                $strings[$key] | Should -Match '\{0\}' -Because "$language must keep the '$key' placeholder"
+            }
+            if ($language -ne 'en') {
+                $strings['NavWorkspaces'] | Should -Not -Be $english['NavWorkspaces'] -Because "$language should translate the workspaces page name"
+                $strings['UndoLastRestore'] | Should -Not -Be $english['UndoLastRestore'] -Because "$language should translate the undo action"
+                $strings['DiagStorageHealth'] | Should -Not -Be $english['DiagStorageHealth'] -Because "$language should translate the storage health card"
+            }
+        }
+    }
+
     It 'falls back to English for unknown languages' {        $strings = Get-SRStrings -Language 'xx'
         $strings.NavDashboard | Should -Be 'Dashboard'
     }
@@ -332,6 +362,13 @@ Describe 'Snapshot storage round-trip' {
         $config.encryptSnapshots = $false
         $config.compressSnapshots = $false
         Save-SRConfig -Config $config
+        # This test is about change detection only: a snapshot left by an
+        # earlier test (encrypted or gzip) would make the comparison differ,
+        # so start from an empty store.
+        $snapshotDir = Get-SRSnapshotDirectory
+        if (Test-Path -LiteralPath $snapshotDir) {
+            @(Get-ChildItem -LiteralPath $snapshotDir -Filter 'session-*' -File -ErrorAction SilentlyContinue) | Remove-Item -Force -ErrorAction SilentlyContinue
+        }
         [void](Save-SRSnapshot -Force)
         $skipped = Save-SRSnapshot
         $skipped | Should -BeNullOrEmpty -Because 'nothing changed between the two captures'
@@ -1467,5 +1504,212 @@ Describe 'Hibernate checkpoints' {
         $before = @(Get-SRSnapshotFiles).Count
         Invoke-SRHibernate -WhatIf | Should -BeNullOrEmpty
         @(Get-SRSnapshotFiles).Count | Should -Be $before
+    }
+}
+
+# ---------------------------------------------------------------------------
+# 3.0: safety checkpoints, restore history, storage health, workspaces
+# ---------------------------------------------------------------------------
+
+Describe '3.0 safety checkpoints, history and storage' {
+    BeforeAll {
+        function New-TestSafetyFile {
+            param(
+                [Parameter(Mandatory = $true)][string]$Name,
+                [Parameter(Mandatory = $true)][datetime]$CapturedAt,
+                [string]$Reason = 'scheduled',
+                [string]$Content = '{}'
+            )
+            $dir = Get-SRSnapshotDirectory
+            if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+            $snapshot = [ordered]@{
+                capturedAt = $CapturedAt.ToString('o')
+                apps       = @()
+                explorer   = @()
+                browsers   = @()
+                reason     = $Reason
+            }
+            $path = Join-Path $dir $Name
+            $json = if ($Content -eq '{}') { $snapshot | ConvertTo-Json -Depth 5 } else { $Content }
+            [System.IO.File]::WriteAllText($path, $json, (New-Object System.Text.UTF8Encoding($false)))
+            (Get-Item -LiteralPath $path).LastWriteTime = $CapturedAt
+            return $path
+        }
+
+        function Reset-TestSafetyState {
+            $config = Get-SRConfig
+            $config.pinnedSnapshots = @()
+            $config.snapshotNotes = @{}
+            $config.savePreRestoreSnapshot = $true
+            $config.encryptSnapshots = $false
+            $config.compressSnapshots = $false
+            $config.captureThumbnails = $false
+            $config.autoExportFolder = ''
+            $config.keepSnapshots = 48
+            $config.keepSnapshotDays = 0
+            Save-SRConfig -Config $config
+            $dir = Get-SRSnapshotDirectory
+            if (Test-Path -LiteralPath $dir) {
+                @(Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue) | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            foreach ($sideCar in @((Get-SRRestoreCheckpointPath), (Get-SRRestoreHistoryPath))) {
+                if (Test-Path -LiteralPath $sideCar) { Remove-Item -LiteralPath $sideCar -Force -ErrorAction SilentlyContinue }
+            }
+            $workspaceDir = Join-Path (Get-SRRoot) 'workspaces'
+            if (Test-Path -LiteralPath $workspaceDir) { Remove-Item -LiteralPath $workspaceDir -Recurse -Force -ErrorAction SilentlyContinue }
+            $quarantineDir = Join-Path (Get-SRRoot) 'quarantine'
+            if (Test-Path -LiteralPath $quarantineDir) { Remove-Item -LiteralPath $quarantineDir -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+    }
+
+    BeforeEach { Reset-TestSafetyState }
+
+    AfterAll {
+        try { Reset-TestSafetyState } catch { }
+    }
+
+    It 'writes a checkpoint, pins it and replaces the previous checkpoint' {
+        $first = New-SRRestoreCheckpoint -Source 'manual'
+        $first | Should -Not -BeNullOrEmpty
+        (Read-SRSnapshotFile -Path $first.Path).reason | Should -Be 'pre-restore'
+        @((Get-SRConfig).pinnedSnapshots) -contains $first.SnapshotName | Should -BeTrue
+
+        $second = New-SRRestoreCheckpoint -Source 'workspace'
+        $second | Should -Not -BeNullOrEmpty
+        $second.Path | Should -Not -Be $first.Path
+        $current = Get-SRRestoreCheckpoint
+        $current.Path | Should -Be $second.Path
+        $current.Source | Should -Be 'workspace'
+        @((Get-SRConfig).pinnedSnapshots) -contains $second.SnapshotName | Should -BeTrue
+        @((Get-SRConfig).pinnedSnapshots) -contains $first.SnapshotName | Should -BeFalse -Because 'only the newest safety snapshot stays pinned'
+    }
+
+    It 'honors the savePreRestoreSnapshot setting' {
+        $config = Get-SRConfig
+        $config.savePreRestoreSnapshot = $false
+        Save-SRConfig -Config $config
+        New-SRRestoreCheckpoint | Should -BeNullOrEmpty
+        Get-SRRestoreCheckpoint | Should -BeNullOrEmpty
+        @(Get-SRSnapshotFiles).Count | Should -Be 0
+    }
+
+    It 'discovers the checkpoint from the reason field when the marker is missing' {
+        [void](New-TestSafetyFile -Name 'session-20260101-090000-000.json' -CapturedAt (Get-Date).AddHours(-2) -Reason 'pre-restore')
+        [void](New-TestSafetyFile -Name 'session-20260101-100000-000.json' -CapturedAt (Get-Date).AddHours(-1) -Reason 'scheduled')
+        Test-Path -LiteralPath (Get-SRRestoreCheckpointPath) | Should -BeFalse
+        $found = Get-SRRestoreCheckpoint
+        $found | Should -Not -BeNullOrEmpty
+        $found.SnapshotName | Should -Be 'session-20260101-090000-000.json'
+    }
+
+    It 'records restore history newest first and caps it at twenty entries' {
+        for ($index = 0; $index -lt 25; $index++) {
+            [void](Add-SRRestoreHistory -SnapshotPath ('C:\snapshots\session-{0}.json' -f $index) -Source 'manual' -Started $index -Failed 0 -CheckpointPath 'C:\snapshots\check.json')
+        }
+        $history = @(Get-SRRestoreHistory -Limit 0)
+        $history.Count | Should -Be 20
+        $history[0].SnapshotName | Should -Be 'session-24.json'
+        $history[0].Source | Should -Be 'manual'
+        $history[0].Started | Should -Be 24
+        $history[19].SnapshotName | Should -Be 'session-5.json'
+        (Get-SRRestoreHistory -Limit 3).Count | Should -Be 3
+    }
+
+    It 'keeps restore history readable when the file is corrupt' {
+        $path = Get-SRRestoreHistoryPath
+        Set-Content -LiteralPath $path -Value 'not json at all'
+        @(Get-SRRestoreHistory).Count | Should -Be 0
+        $entry = Add-SRRestoreHistory -Source 'automatic' -Started 2 -Failed 1 -Status 'failed'
+        $entry.Status | Should -Be 'failed'
+        $history = @(Get-SRRestoreHistory -Limit 1)
+        $history.Count | Should -Be 1
+        $history[0].Failed | Should -Be 1
+    }
+
+    It 'reports a clean store as healthy' {
+        [void](New-TestSafetyFile -Name 'session-20260102-090000-000.json' -CapturedAt (Get-Date).AddMinutes(-1))
+        $health = Get-SRStorageHealth
+        $health.Healthy | Should -BeTrue
+        $health.SnapshotCount | Should -Be 1
+        $health.UnreadableCount | Should -Be 0
+        $health.OrphanedCount | Should -Be 0
+        $health.TempCount | Should -Be 0
+    }
+
+    It 'finds unreadable snapshots, orphaned thumbnails and temp files' {
+        $snapshotDir = Get-SRSnapshotDirectory
+        [void](New-TestSafetyFile -Name 'session-20260102-090000-000.json' -CapturedAt (Get-Date).AddMinutes(-3))
+        Set-Content -LiteralPath (Join-Path $snapshotDir 'session-20260102-100000-000.json') -Value 'this is not json'
+        New-Item -ItemType Directory -Path (Join-Path $snapshotDir 'thumbs\20260101-000000-000') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $snapshotDir 'thumbs\20260101-000000-000\01.jpg') -Value 'x'
+        Set-Content -LiteralPath (Join-Path $snapshotDir '.session-20260102-110000-000.json.tmp') -Value 'leftover'
+
+        $health = Get-SRStorageHealth
+        $health.Healthy | Should -BeFalse
+        $health.UnreadableCount | Should -Be 1
+        $health.OrphanedCount | Should -Be 1
+        $health.TempCount | Should -Be 1
+        $health.ReclaimableBytes | Should -BeGreaterThan 0
+    }
+
+    It 'quarantines unreadable files and removes junk during cleanup' {
+        $snapshotDir = Get-SRSnapshotDirectory
+        [void](New-TestSafetyFile -Name 'session-20260102-090000-000.json' -CapturedAt (Get-Date).AddMinutes(-3))
+        $badPath = Join-Path $snapshotDir 'session-20260102-100000-000.json'
+        Set-Content -LiteralPath $badPath -Value 'this is not json'
+        New-Item -ItemType Directory -Path (Join-Path $snapshotDir 'thumbs\20260101-000000-000') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $snapshotDir '.session-20260102-110000-000.json.tmp') -Value 'leftover'
+        $config = Get-SRConfig
+        $config.savePreRestoreSnapshot = $true
+        Save-SRConfig -Config $config
+
+        $result = Invoke-SRStorageCleanup
+        $result.QuarantinedCount | Should -Be 1
+        $result.RemovedCount | Should -Be 2
+        Test-Path -LiteralPath $badPath | Should -BeFalse
+        @(Get-ChildItem -LiteralPath (Join-Path (Get-SRRoot) 'quarantine') -Recurse -File -ErrorAction SilentlyContinue).Count | Should -Be 1
+        $result.Health.UnreadableCount | Should -Be 0
+        $result.Health.OrphanedCount | Should -Be 0
+        $result.Health.TempCount | Should -Be 0
+    }
+
+    It 'saves, lists and deletes workspaces' {
+        [void](New-TestSafetyFile -Name 'session-20260102-090000-000.json' -CapturedAt (Get-Date).AddMinutes(-2))
+        $path = Save-SRWorkspace -Name 'Work setup'
+        Test-Path -LiteralPath $path | Should -BeTrue
+
+        $listed = @(Get-SRWorkspaces)
+        $listed.Count | Should -Be 1
+        $listed[0].Name | Should -Be 'Work setup'
+        $listed[0].CapturedAt | Should -Not -BeNullOrEmpty
+        $listed[0].Size | Should -BeGreaterThan 0
+
+        Remove-SRWorkspace -Name 'work setup' | Should -BeTrue
+        @(Get-SRWorkspaces).Count | Should -Be 0
+        { Remove-SRWorkspace -Name 'missing' } | Should -Throw
+    }
+
+    It 'refuses to save a workspace without a snapshot' {
+        { Save-SRWorkspace -Name 'Empty' } | Should -Throw
+        { Save-SRWorkspace -Name '   ' } | Should -Throw
+    }
+
+    It 'refuses to undo without a safety snapshot' {
+        { Start-SRUndoLastRestore } | Should -Throw
+    }
+}
+
+Describe '3.0 settings and diagnostics surface' {
+    It 'defaults the pre-restore safety snapshot on' {
+        (Get-SRDefaultConfig).savePreRestoreSnapshot | Should -BeTrue
+    }
+
+    It 'reports restore history, storage health and the setting in diagnostics' {
+        $diag = Get-SRDiagnostics
+        $diag.PSObject.Properties['RestoreHistory'] | Should -Not -BeNullOrEmpty
+        $diag.PSObject.Properties['StorageHealth'] | Should -Not -BeNullOrEmpty
+        $diag.StorageHealth.PSObject.Properties['Healthy'] | Should -Not -BeNullOrEmpty
+        $diag.Settings.PSObject.Properties['SavePreRestoreSnapshot'] | Should -Not -BeNullOrEmpty
     }
 }

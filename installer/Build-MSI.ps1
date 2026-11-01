@@ -13,7 +13,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string]$Version = '2.9.0',
+    [string]$Version = '3.0.0',
     [switch]$NoRestore
 )
 
@@ -75,8 +75,31 @@ Session Recovery {0}
 Reopen the apps, File Explorer folders and browser tabs that were open before
 a crash, power cut or unexpected restart.
 
-What's new in 2.9.0
+What's new in 3.0.0
 -------------------
+- Safety snapshot before every restore: right before anything reopens, the
+  current desktop is captured and pinned locally, so a restore is never a
+  one-way door.
+- Undo last restore: one click in the Studio quick actions or the tray menu
+  puts the desktop from just before the last restore back. An undo can itself
+  be undone.
+- Restore history: the Diagnostics page lists the recent restores with the
+  time, source (manual, workspace, command line, automatic or undo), how many
+  items opened, and an Undo button for each entry whose safety snapshot is
+  still on disk.
+- Storage health: a new Diagnostics card finds unreadable snapshots, orphaned
+  thumbnail folders and leftover temporary files, shows how much space can be
+  reclaimed, and cleans up in one click. Unreadable files are moved to a
+  quarantine folder instead of being deleted.
+- Workspaces page: save the current desktop as a named workspace, then list,
+  restore or delete workspaces from the Studio. The existing tray workspaces
+  share the same storage.
+- New Settings toggle to turn the pre-restore safety snapshot off.
+- New command-line commands: undo-restore, workspace-delete, storage-health
+  and storage-cleanup. Every new label is translated into all nine languages.
+
+Also in 2.9.0
+-------------
 - Recovery timeline: the Diagnostics page lists restarts, power loss and blue
   screens from the Windows event log over the last 30 days. It is read
   locally and nothing is uploaded.
@@ -88,8 +111,6 @@ What's new in 2.9.0
   changed before you restore.
 - Capture now detects docked or unplugged monitors as a real change, so a
   display change is saved even when no window opened or closed.
-- Snapshot capture, restore filters and the restore window behaviour are
-  unchanged; the new cards and labels are translated into all nine languages.
 
 Also in 2.8.1
 -------------

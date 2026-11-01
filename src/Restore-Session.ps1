@@ -129,6 +129,32 @@ function Format-RSSnapshotLabel {
     return ('{0}  -  {1}' -f $Entry.CapturedAt.ToString('g'), $meta)
 }
 
+function Get-RSRestoreSource {
+    param($Entry, [bool]$IsManual)
+    try {
+        $reasonProperty = $Entry.Snapshot.PSObject.Properties['reason']
+        if ($null -ne $reasonProperty -and [string]$reasonProperty.Value -eq 'pre-restore') { return 'undo' }
+    } catch { }
+    if ([string]$Entry.Path -like '*\workspaces\*') { return 'workspace' }
+    if ($IsManual) { return 'manual' }
+    return 'automatic'
+}
+
+function Save-RSRestoreHistory {
+    param($Entry, $Checkpoint, [object[]]$Results, [string]$Source, [string]$Status = 'completed')
+    $started = 0
+    $failed = 0
+    foreach ($result in @($Results)) {
+        if ($null -eq $result) { continue }
+        if ([bool]$result.Started) { $started++ } else { $failed++ }
+    }
+    $checkpointPath = ''
+    if ($null -ne $Checkpoint) { $checkpointPath = [string]$Checkpoint.Path }
+    $snapshotAt = ''
+    try { $snapshotAt = ([datetime]$Entry.CapturedAt).ToString('o') } catch { }
+    [void](Add-SRRestoreHistory -SnapshotPath ([string]$Entry.Path) -SnapshotAt $snapshotAt -Source $Source -Started $started -Failed $failed -CheckpointPath $checkpointPath -Status $Status)
+}
+
 function Get-RSPlanStats {
     param($Plan)
     $tabs = 0
@@ -596,6 +622,11 @@ if ($NoUI -or -not [Environment]::UserInteractive) {
         }
     }
     Write-SRLog -Message ('Non-interactive restore started from {0} (tab mode {1}).' -f $entry.Path, $TabMode)
+    $restoreSource = Get-RSRestoreSource -Entry $entry -IsManual ([bool]$Manual)
+    $safetyCheckpoint = New-SRRestoreCheckpoint -Source $restoreSource
+    if ($null -eq $safetyCheckpoint) {
+        Write-SRLog -Level WARN -Message 'No safety snapshot was saved before this restore.'
+    }
     try {
         $results = Invoke-SRRestore -Plan $planAll -Force:$Force
         foreach ($result in @($results)) {
@@ -603,7 +634,9 @@ if ($NoUI -or -not [Environment]::UserInteractive) {
             Write-SRLog -Level $level -Message ([string]$result.Message)
             Write-Output ([string]$result.Message)
         }
+        Save-RSRestoreHistory -Entry $entry -Checkpoint $safetyCheckpoint -Results @($results) -Source $restoreSource
     } catch {
+        Save-RSRestoreHistory -Entry $entry -Checkpoint $safetyCheckpoint -Results @() -Source $restoreSource -Status 'failed'
         Write-SRLog -Level ERROR -Message "Non-interactive restore failed: $($_.Exception.Message)"
         Write-Error "Restore failed: $($_.Exception.Message)"
         exit 1
@@ -673,7 +706,7 @@ $script:FontTitle = New-Object System.Drawing.Font('Segoe UI Semibold', 19)
 $script:FontMono = New-Object System.Drawing.Font('Consolas', 8.25)
 $script:FontMonoSmall = New-Object System.Drawing.Font('Consolas', 7.5)
 
-$script:AppVersion = '2.9.0'
+$script:AppVersion = '3.0.0'
 $hostCandidates = @()
 if ($env:SESSIONRECOVERY_HOST_EXE) { $hostCandidates += $env:SESSIONRECOVERY_HOST_EXE }
 $hostCandidates += (Join-Path $PSScriptRoot 'SessionRecovery.exe')
@@ -1671,6 +1704,14 @@ $restoreButton.Add_Click({
     $progressBar.Visible = $true
     [System.Windows.Forms.Application]::DoEvents()
 
+    # Capture the current desktop before anything is reopened. If the restore
+    # is not what the user wanted, Undo last restore returns to this moment.
+    $restoreSource = Get-RSRestoreSource -Entry $entry -IsManual $true
+    $safetyCheckpoint = New-SRRestoreCheckpoint -Source $restoreSource
+    if ($null -eq $safetyCheckpoint) {
+        Write-SRLog -Level WARN -Message 'No safety snapshot was saved before this restore.'
+    }
+
     $progressCallback = {
         param([int]$Step, [int]$StepTotal, [string]$Label)
         $statusLabel.Text = ((T 'RstRestoringItem' 'Restoring {0} of {1}: {2}') -f $Step, $StepTotal, $Label)
@@ -1689,8 +1730,10 @@ $restoreButton.Add_Click({
             $level = if ($result.Started) { 'INFO' } else { 'WARN' }
             Write-SRLog -Level $level -Message ([string]$result.Message)
         }
+        Save-RSRestoreHistory -Entry $entry -Checkpoint $safetyCheckpoint -Results $results -Source $restoreSource
     } catch {
         $failure = $_.Exception.Message
+        Save-RSRestoreHistory -Entry $entry -Checkpoint $safetyCheckpoint -Results $results -Source $restoreSource -Status 'failed'
         Write-SRLog -Level ERROR -Message "Interactive restore failed: $failure"
     } finally {
         $script:rsRestoring = $false

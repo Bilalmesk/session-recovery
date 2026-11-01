@@ -6,7 +6,7 @@
 
 ![Windows 10/11](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?logo=windows&logoColor=white)
 ![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-5391FE?logo=powershell&logoColor=white)
-![Version](https://img.shields.io/badge/version-2.9.0-8B5CF6)
+![Version](https://img.shields.io/badge/version-3.0.0-8B5CF6)
 ![Local only](https://img.shields.io/badge/privacy-100%25%20local-22C55E)
 
 [Install](#-install) · [Restore](#-restore) · [Configure](#%EF%B8%8F-configure) · [Troubleshoot](#-troubleshooting) · [Uninstall](#-uninstall)
@@ -39,8 +39,12 @@ Session Recovery snapshots your desktop every few minutes and offers to restore 
 | 🔍 **Compare snapshots** | Pick an older moment and see which apps, folders and tabs opened or closed since |
 | ⚙️ **Cross-PC snapshots** | Every snapshot records machine, displays, scale and language; restore explains what changed |
 | 💤 **Hibernate checkpoints** | Pins the last three snapshots taken just before sleep or hibernate, and offers **Hibernate with checkpoint** from the tray or `--hibernate` |
+| ↩️ **Undo a restore** | Every restore first pins a safety snapshot of the current desktop, and **Undo last restore** brings it back in one click |
+| 🕘 **Restore history** | The Diagnostics page lists recent restores, their source and outcome, with an Undo button for each |
+| 🧹 **Storage health** | Finds unreadable snapshots, orphaned thumbnails and temp files, and cleans up while quarantining anything unreadable |
+| 🗂️ **Workspaces** | Save the current desktop as a named workspace, then reopen or delete it from the Studio or the tray |
 | 📦 **Export / import** | Back up snapshots as JSON or move them to another PC |
-| 🖥️ **Native tray + Studio** | Dashboard, Snapshots, Exclusions, Recovery Kit, Settings, Diagnostics and About; 14 dark and light colour themes, no console windows |
+| 🖥️ **Native tray + Studio** | Dashboard, Snapshots, Workspaces, Exclusions, Recovery Kit, Settings, Diagnostics and About; 14 dark and light colour themes, no console windows |
 
 ## 📥 Install
 
@@ -120,6 +124,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $rs -NoUI -IncludeApps 'Open
 powershell -NoProfile -ExecutionPolicy Bypass -File $rs -NoUI -ExcludeApps 'Game*' -ExcludeFolders 'D:\Private\*'
 ```
 
+The automation wrapper adds status, workspaces and storage commands:
+
+```powershell
+$ctl = "$app\Control-SessionRecovery.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File $ctl -Command status
+powershell -NoProfile -ExecutionPolicy Bypass -File $ctl -Command undo-restore
+powershell -NoProfile -ExecutionPolicy Bypass -File $ctl -Command workspaces
+powershell -NoProfile -ExecutionPolicy Bypass -File $ctl -Command workspace-delete -Name Work
+powershell -NoProfile -ExecutionPolicy Bypass -File $ctl -Command storage-health
+powershell -NoProfile -ExecutionPolicy Bypass -File $ctl -Command storage-cleanup
+```
+
 | Parameter | Meaning |
 |---|---|
 | `-Manual` | Show the restore window with all snapshots |
@@ -138,7 +154,7 @@ Filters apply to `-NoUI` and `-DryRun` only. Pass multiple patterns as one comma
 
 ## 🧭 Tray app
 
-Left-click opens the Studio. Right-click for restore, snapshot now, pause, **pause for 1 hour**, **Hibernate with checkpoint**, folders, settings, diagnostics and exit. If Windows hides the icon, drag it out of the `^` overflow onto the taskbar.
+Left-click opens the Studio. Right-click for restore, snapshot now, **undo last restore**, pause, **pause for 1 hour**, **Hibernate with checkpoint**, workspaces, folders, settings, diagnostics and exit. If Windows hides the icon, drag it out of the `^` overflow onto the taskbar.
 
 **Hibernate with checkpoint** saves a pinned recovery snapshot first and only then asks Windows to hibernate. The same thing happens automatically on suspend, display-off or lid-close while the guard is on. The latest three checkpoints stay pinned; older ones return to normal retention. This is a fast workspace checkpoint, not a memory image: apps still relaunch from disk and unsaved work is not recovered.
 
@@ -317,7 +333,7 @@ Get-ScheduledTask -TaskName 'SessionRecovery-*' -ErrorAction SilentlyContinue | 
 ## 👩‍💻 Development
 
 ```powershell
-# Build the MSI (needs .NET SDK 6+ and internet for WiX restore) → dist\SessionRecovery-2.9.0.msi
+# Build the MSI (needs .NET SDK 6+ and internet for WiX restore) → dist\SessionRecovery-3.0.0.msi
 powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\Build-MSI.ps1
 
 # Build the native host only

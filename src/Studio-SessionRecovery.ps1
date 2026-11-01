@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 <#
     Studio-SessionRecovery.ps1
     Session Recovery 2.2 control center.
@@ -9,7 +9,7 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('Dashboard', 'Snapshots', 'Exclusions', 'RecoveryKit', 'Settings', 'Diagnostics', 'About')]
+    [ValidateSet('Dashboard', 'Snapshots', 'Workspaces', 'Exclusions', 'RecoveryKit', 'Settings', 'Diagnostics', 'About')]
     [string]$Page = 'Dashboard',
     [string]$RenderDir = ''
 )
@@ -17,13 +17,14 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-$script:AppVersion = '2.9.0'
+$script:AppVersion = '3.0.0'
 $script:ScriptDir = $PSScriptRoot
 $script:AppDir = if ($env:SESSIONRECOVERY_HOST_EXE) { Split-Path -Parent $env:SESSIONRECOVERY_HOST_EXE } else { $PSScriptRoot }
 $script:HostExe = $null
 $script:IconPath = $null
 $script:Config = $null
 $script:Snapshots = @()
+$script:Workspaces = @()
 $script:SelectedSnapshotPath = $null
 $script:Pages = [ordered]@{}
 $script:NavButtons = @{}
@@ -1160,6 +1161,7 @@ function Refresh-StudioData {
     switch ($script:CurrentPage) {
         'Dashboard' { if ($script:PageLoaded.ContainsKey('Dashboard')) { Refresh-StudioDashboard } }
         'Snapshots' { if ($script:PageLoaded.ContainsKey('Snapshots')) { Refresh-StudioSnapshotRows } }
+        'Workspaces' { if ($script:PageLoaded.ContainsKey('Workspaces')) { Refresh-StudioWorkspaces } }
         'Exclusions' { if ($script:PageLoaded.ContainsKey('Exclusions')) { Refresh-StudioExclusions } }
         'RecoveryKit' { if ($script:PageLoaded.ContainsKey('RecoveryKit')) { Update-StudioKitSummary } }
         'Diagnostics' { if ($script:PageLoaded.ContainsKey('Diagnostics')) { Start-StudioDiagnosticsRefresh -Force } }
@@ -1227,6 +1229,7 @@ $sidebar.Controls.Add($brandSub)
 $navDefs = @(
     @{ Key = 'Dashboard'; Label = 'Dashboard'; Glyph = [char]0xE80F },
     @{ Key = 'Snapshots'; Label = 'Snapshots'; Glyph = [char]0xE81C },
+    @{ Key = 'Workspaces'; Label = 'Workspaces'; Glyph = [char]0xE8F1 },
     @{ Key = 'Exclusions'; Label = 'Exclusions'; Glyph = [char]0xE8B7 },
     @{ Key = 'RecoveryKit'; Label = 'Recovery Kit'; Glyph = [char]0xE7B8 },
     @{ Key = 'Settings'; Label = 'Settings'; Glyph = [char]0xE713 },
@@ -1517,7 +1520,7 @@ $quickCard.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Window
 $dashboard.Controls.Add($quickCard)
 $quickHeading = New-StudioLabel -Text (T 'QuickActions' 'QUICK ACTIONS') -X 18 -Y 15 -Width 200 -Height 18 -Font $script:FontMono -Color $script:P.Subtle
 $quickCard.Controls.Add($quickHeading)
-$quickCapture = New-StudioButton -Text 'Capture now' -X 16 -Y 44 -Width 268 -Height 34 -Primary -Glyph ([string][char]0xE710)
+$quickCapture = New-StudioButton -Text 'Capture now' -X 16 -Y 44 -Width 268 -Height 34 -Primary -Glyph ''
 $quickCapture.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
 $quickCapture.Add_Click({ Invoke-StudioCapture })
 $quickCard.Controls.Add($quickCapture)
@@ -1530,11 +1533,33 @@ $quickRestore.Add_Click({
 })
 $quickCard.Controls.Add($quickRestore)
 $script:Ui.QuickRestore = $quickRestore
-$quickFolder = New-StudioButton -Text (T 'BtnOpenSnapshotsFolder' 'Open snapshots folder') -X 16 -Y 128 -Width 268 -Height 34 -Glyph ([string][char]0xE838)
+$quickUndo = New-StudioButton -Text (T 'UndoLastRestore' 'Undo last restore') -X 16 -Y 170 -Width 268 -Height 34 -Glyph ''
+$quickUndo.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+$quickUndo.Add_Click({
+    $checkpoint = $null
+    try { $checkpoint = Get-SRRestoreCheckpoint } catch { }
+    if ($null -eq $checkpoint) {
+        Show-StudioToast (T 'UndoNoCheckpoint' 'No safety snapshot is available yet.') $script:P.Amber
+        return
+    }
+    $answer = [System.Windows.Forms.MessageBox]::Show(
+        (T 'UndoConfirmText' 'Reopen the desktop that was captured right before your last restore?'),
+        (T 'UndoConfirmTitle' 'Undo last restore'), [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+    if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+    try {
+        [void](Start-SRUndoLastRestore)
+        Show-StudioToast (T 'UndoStarted' 'Restoring the desktop from before your last restore...') $script:P.Green
+    } catch {
+        Show-StudioToast ((T 'UndoFailed' 'Could not undo the last restore: {0}') -f $_.Exception.Message) $script:P.Red
+    }
+})
+$quickCard.Controls.Add($quickUndo)
+$script:Ui.QuickUndo = $quickUndo
+$quickFolder = New-StudioButton -Text (T 'BtnOpenSnapshotsFolder' 'Open snapshots folder') -X 16 -Y 212 -Width 268 -Height 34 -Glyph ([string][char]0xE838)
 $quickFolder.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
 $quickFolder.Add_Click({ Open-StudioPath (Get-SRSnapshotDirectory) })
 $quickCard.Controls.Add($quickFolder)
-$quickDiagnostics = New-StudioButton -Text (T 'BtnRunDiagnostics' 'Run diagnostics') -X 16 -Y 170 -Width 268 -Height 34 -Glyph ([string][char]0xE9D9)
+$quickDiagnostics = New-StudioButton -Text (T 'BtnRunDiagnostics' 'Run diagnostics') -X 16 -Y 254 -Width 268 -Height 34 -Glyph ([string][char]0xE9D9)
 $quickDiagnostics.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
 $quickDiagnostics.Add_Click({ Show-StudioPage -Name 'Diagnostics' })
 $quickCard.Controls.Add($quickDiagnostics)
@@ -2972,6 +2997,11 @@ function Complete-StudioPrivacyScanWorker {
     }
 }
 
+
+# ---------------------------------------------------------------------------
+# Exclusions
+# ---------------------------------------------------------------------------
+
 $script:ExclusionPlaceholders = @{
     excludeApps    = (T 'ExclAppPlaceholder' 'e.g. steam.exe or *game*')
     excludeFolders = (T 'ExclFolderPlaceholder' 'e.g. C:\Projects\Private')
@@ -3128,6 +3158,176 @@ function New-StudioNumeric {
     return $numeric
 }
 
+
+
+# ---------------------------------------------------------------------------
+# Workspaces
+# ---------------------------------------------------------------------------
+
+$workspacesPage = New-StudioPage -Name 'Workspaces'
+$wsFlow = New-Object System.Windows.Forms.Panel
+$wsFlow.Dock = [System.Windows.Forms.DockStyle]::Fill
+$wsFlow.Padding = New-Object System.Windows.Forms.Padding(24)
+$wsFlow.AutoScroll = $true
+$wsFlow.BackColor = $script:P.Bg
+$workspacesPage.Controls.Add($wsFlow)
+$script:Ui.WorkspacesFlow = $wsFlow
+
+$wsSaveCard = New-StudioSettingsCard -Title (T 'WsSaveTitle' 'Save this desktop as a workspace') -Description (T 'WsSaveDesc' 'A named snapshot you can reopen any time, even after newer snapshots replace the timeline.') -Height 178 -WrapDescription
+$wsFlow.Controls.Add($wsSaveCard)
+
+$wsNameLabel = New-StudioLabel -Text (T 'WsNameLabel' 'WORKSPACE NAME') -X 20 -Y 78 -Width 320 -Height 16 -Font $script:FontMono -Color $script:P.Subtle
+$wsSaveCard.Controls.Add($wsNameLabel)
+# A wide name box and button share the row. Russian and German button labels
+# are much longer than English, so the button gets the larger share.
+$wsNameBox = New-StudioTextBox -X 20 -Y 98 -Width 300 -Height 28
+$wsNameBox.MaxLength = 80
+$wsSaveCard.Controls.Add($wsNameBox)
+$script:Ui.WsNameBox = $wsNameBox
+$wsSaveButton = New-StudioButton -Text (T 'WsSaveButton' 'Save current desktop') -X 336 -Y 96 -Width 340 -Height 32 -Primary -Glyph ''
+$wsSaveCard.Controls.Add($wsSaveButton)
+$script:Ui.WsSaveButton = $wsSaveButton
+$wsSaveHint = New-StudioLabel -Text (T 'WsSaveHint' 'Workspaces stay in your local Session Recovery folder. Nothing is uploaded.') -X 20 -Y 138 -Width 700 -Height 32 -Font $script:FontBodySmall -Color $script:P.Subtle
+$wsSaveCard.Controls.Add($wsSaveHint)
+
+$wsListCard = New-StudioSettingsCard -Title (T 'WsListTitle' 'Saved workspaces') -Description (T 'WsListDesc' 'Restore a saved desktop, or remove workspaces you no longer need.') -Height 200 -WrapDescription
+$wsFlow.Controls.Add($wsListCard)
+
+$wsListFlow = New-Object System.Windows.Forms.FlowLayoutPanel
+$wsListFlow.Location = New-Object System.Drawing.Point(20, 76)
+$wsListFlow.Size = New-Object System.Drawing.Size(700, 110)
+$wsListFlow.FlowDirection = [System.Windows.Forms.FlowDirection]::TopDown
+$wsListFlow.WrapContents = $false
+$wsListFlow.AutoScroll = $false
+$wsListFlow.BackColor = $script:P.Card
+$wsListCard.Controls.Add($wsListFlow)
+$script:Ui.WsListFlow = $wsListFlow
+
+$wsEmpty = New-StudioLabel -Text (T 'WsEmpty' 'No workspaces yet. Name this desktop above to save it for one-click restore.') -X 20 -Y 84 -Width 700 -Height 40 -Font $script:FontBody -Color $script:P.Muted
+$wsListCard.Controls.Add($wsEmpty)
+$script:Ui.WsEmpty = $wsEmpty
+
+function Layout-StudioWorkspaces {
+    if (-not $script:Ui.WorkspacesFlow) { return }
+    $rows = @($script:Workspaces)
+    $wsListCard.Height = [Math]::Max(158, 88 + ($rows.Count * 70))
+    $width = Set-StudioVerticalStack -Panel $script:Ui.WorkspacesFlow -Cards @($wsSaveCard, $wsListCard) -Padding 24 -BottomPadding 24 -MinWidth 620
+    # The title label is created before the card can be widened; the card
+    # helper reserves 360px, so give long translated titles the full row.
+    foreach ($wsCard in @($wsSaveCard, $wsListCard)) {
+        foreach ($child in @($wsCard.Controls)) {
+            if ($child -is [System.Windows.Forms.Label] -and $child.Top -eq 15) {
+                $child.Width = [Math]::Max(200, $width - 40)
+            }
+        }
+    }
+    $buttonWidth = [Math]::Min(340, [Math]::Max(220, [int]$width - 40 - 180 - 16))
+    $wsNameBox.Width = [Math]::Max(180, $width - 40 - $buttonWidth - 16)
+    $wsSaveButton.Left = 20 + $wsNameBox.Width + 16
+    $wsSaveButton.Width = $buttonWidth
+    $wsSaveHint.Width = [Math]::Max(200, $width - 40)
+    $wsListFlow.Width = [Math]::Max(200, $width - 40)
+    $wsListFlow.Height = [Math]::Max(60, $wsListCard.Height - 88)
+    $wsEmpty.Width = [Math]::Max(200, $width - 40)
+    foreach ($row in @($wsListFlow.Controls)) {
+        $row.Width = [Math]::Max(240, $wsListFlow.ClientSize.Width - 8)
+        if ($row.Controls.Count -lt 4) { continue }
+        $nameLabel = $row.Controls[0]
+        $metaLabel = $row.Controls[1]
+        $restoreButton = $row.Controls[2]
+        $deleteButton = $row.Controls[3]
+        $restoreButton.Left = $row.Width - 222
+        $deleteButton.Left = $row.Width - 112
+        $nameLabel.Width = [Math]::Max(120, $restoreButton.Left - 26)
+        $metaLabel.Width = [Math]::Max(120, $restoreButton.Left - 26)
+    }
+}
+
+function Refresh-StudioWorkspaces {
+    try { $script:Workspaces = @(Get-SRWorkspaces) } catch { $script:Workspaces = @() }
+    if (-not $script:Ui.WsListFlow) { return }
+    $wsListFlow.SuspendLayout()
+    try {
+        $wsListFlow.Controls.Clear()
+        foreach ($workspace in @($script:Workspaces)) {
+            $row = New-StudioCard -X 0 -Y 0 -Width 600 -Height 62 -Fill $script:P.CardAlt -Border $script:P.BorderSoft -Radius 10
+            $row.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 8)
+            $nameLabel = New-StudioLabel -Text ([string]$workspace.Name) -X 14 -Y 7 -Width 340 -Height 20 -Font $script:FontSemibold -Color $script:P.Text
+            $nameLabel.AutoEllipsis = $true
+            $capturedText = ''
+            try { $capturedText = (T 'WsCaptured' 'Captured {0}') -f (Format-StudioDate -Date ([datetime]$workspace.CapturedAt) -Format 'g') } catch { }
+            $metaText = (T 'WsMeta' '{0} apps  •  {1} folders  •  {2} tabs') -f [int]$workspace.Apps, [int]$workspace.Folders, [int]$workspace.Tabs
+            if (-not [string]::IsNullOrWhiteSpace($capturedText)) { $metaText = $capturedText + '  •  ' + $metaText }
+            $metaLabel = New-StudioLabel -Text $metaText -X 14 -Y 31 -Width 340 -Height 18 -Font $script:FontBodySmall -Color $script:P.Muted
+            $metaLabel.AutoEllipsis = $true
+            $restoreButton = New-StudioButton -Text (T 'BtnRestore' 'Restore') -X 380 -Y 15 -Width 100 -Height 32 -Glyph ([string][char]0xE777)
+            $restoreButton.Tag = [string]$workspace.Path
+            $restoreButton.Add_Click({
+                param($sender, $eventArgs)
+                Open-StudioRestore -SnapshotPath ([string]$sender.Tag)
+            })
+            $deleteButton = New-StudioButton -Text (T 'BtnDelete' 'Delete') -X 490 -Y 15 -Width 100 -Height 32 -Danger -Glyph ''
+            $deleteButton.Tag = [string]$workspace.Name
+            $deleteButton.Add_Click({
+                param($sender, $eventArgs)
+                $workspaceName = [string]$sender.Tag
+                $answer = [System.Windows.Forms.MessageBox]::Show(
+                    ((T 'WsDeleteText' 'Delete workspace "{0}"? Its saved snapshot is removed from this PC.') -f $workspaceName),
+                    (T 'WsDeleteTitle' 'Delete workspace'), [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+                if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+                try {
+                    [void](Remove-SRWorkspace -Name $workspaceName)
+                    Refresh-StudioWorkspaces
+                    Show-StudioToast ((T 'WsDeletedToast' 'Workspace "{0}" deleted.') -f $workspaceName) $script:P.Green
+                } catch {
+                    Show-StudioToast ((T 'WsDeleteFailed' 'Could not delete workspace: {0}') -f $_.Exception.Message) $script:P.Red
+                }
+            })
+            $row.Controls.Add($nameLabel)
+            $row.Controls.Add($metaLabel)
+            $row.Controls.Add($restoreButton)
+            $row.Controls.Add($deleteButton)
+            [void]$wsListFlow.Controls.Add($row)
+        }
+        $wsEmpty.Visible = (@($script:Workspaces).Count -eq 0)
+        $wsListFlow.Visible = (@($script:Workspaces).Count -gt 0)
+    } finally {
+        $wsListFlow.ResumeLayout()
+    }
+    Layout-StudioWorkspaces
+}
+
+
+# ---------------------------------------------------------------------------
+# Workspaces
+# ---------------------------------------------------------------------------
+
+$wsSaveButton.Add_Click({
+    $name = [string]$script:Ui.WsNameBox.Text
+    $name = $name.Trim()
+    if ([string]::IsNullOrWhiteSpace($name)) {
+        Show-StudioToast (T 'WsEmptyName' 'Enter a name for this workspace first.') $script:P.Amber
+        return
+    }
+    $existing = @($script:Workspaces) | Where-Object { [string]::Equals([string]$_.Name, $name, [System.StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1
+    if ($null -ne $existing) {
+        $answer = [System.Windows.Forms.MessageBox]::Show(
+            ((T 'WsOverwriteText' 'A workspace named "{0}" already exists. Replace it with the current desktop?') -f $existing.Name),
+            (T 'WsOverwriteTitle' 'Replace workspace'), [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+        if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+        try { [void](Remove-SRWorkspace -Name $existing.Name) } catch { }
+    }
+    try {
+        [void](Save-SRSnapshot -Force)
+        [void](Save-SRWorkspace -Name $name)
+        $script:Ui.WsNameBox.Text = ''
+        Refresh-StudioWorkspaces
+        Show-StudioToast ((T 'WsSavedToast' 'Workspace "{0}" saved.') -f $name) $script:P.Green
+    } catch {
+        Show-StudioToast ((T 'WsSaveFailed' 'Could not save workspace: {0}') -f $_.Exception.Message) $script:P.Red
+    }
+})
+
 $settingsPage = New-StudioPage -Name 'Settings'
 $settingsFlow = New-Object System.Windows.Forms.Panel
 $settingsFlow.Location = New-Object System.Drawing.Point(0, 0)
@@ -3202,7 +3402,7 @@ $numDays.Add_ValueChanged({
 })
 
 # Card: restore behavior
-$restoreCard = New-StudioSettingsCard -Title 'Restore behavior' -Description 'Choose how Session Recovery offers to reopen apps, folders and tabs.' -Height 206
+$restoreCard = New-StudioSettingsCard -Title 'Restore behavior' -Description 'Choose how Session Recovery offers to reopen apps, folders and tabs.' -Height 268
 $settingsFlow.Controls.Add($restoreCard)
 $settingsCards.Add($restoreCard)
 
@@ -3231,6 +3431,13 @@ $comboTabMode = New-StudioCombo -X 440 -Y 152 -Width 180
 Set-StudioLocalizedCombo -Combo $comboTabMode -Keys @('TabModeSmart', 'TabModeCaptured', 'TabModeNative', 'TabModeNone') -Defaults @('Smart', 'Captured', 'Native', 'None')
 $comboTabMode.SelectedIndex = 0
 $restoreCard.Controls.Add($comboTabMode)
+
+$togglePreRestore = New-StudioToggle -X 20 -Y 200 -Checked $true
+$restoreCard.Controls.Add($togglePreRestore)
+$preRestoreLabel = New-StudioLabel -Text (T 'SetPreRestore' 'Save a safety snapshot before every restore') -X 76 -Y 204 -Width 620 -Height 20 -Font $script:FontBody -Color $script:P.Text
+$restoreCard.Controls.Add($preRestoreLabel)
+$preRestoreHint = New-StudioLabel -Text (T 'SetPreRestoreHint' 'Undo last restore then puts the previous desktop back. The snapshot stays local and pinned until the next restore.') -X 76 -Y 224 -Width 700 -Height 32 -Font $script:FontBodySmall -Color $script:P.Subtle
+$restoreCard.Controls.Add($preRestoreHint)
 
 # Card: browser capture
 $browserCard = New-StudioSettingsCard -Title 'Browser capture' -Description 'Chrome, Edge, Brave and other Chromium browsers use a safe live fallback when their session files are empty.' -Height 264 -WrapDescription
@@ -3509,6 +3716,8 @@ function Load-StudioSettings {
         $script:Ui.AutoExportBox.Text = if ($null -ne $autoExportProperty) { [string]$autoExportProperty.Value } else { '' }
     }
     $toggleRestoreBrowsers.Checked = [bool]$script:Config.restoreBrowsers
+    $preRestoreProperty = $script:Config.PSObject.Properties['savePreRestoreSnapshot']
+    $togglePreRestore.Checked = if ($null -ne $preRestoreProperty) { [bool]$preRestoreProperty.Value } else { $true }
     $toggleCaptureBrowsers.Checked = [bool]$script:Config.captureBrowserTabs
     $toggleApprox.Checked = [bool]$script:Config.captureApproximateTabs
     $redactProperty = $script:Config.PSObject.Properties['redactUrls']
@@ -3568,6 +3777,7 @@ function Save-StudioSettings {
             $config.autoExportFolder = $exportPath
         }
         $config.restoreBrowsers = [bool]$toggleRestoreBrowsers.Checked
+        $config.savePreRestoreSnapshot = [bool]$togglePreRestore.Checked
         $config.captureBrowserTabs = [bool]$toggleCaptureBrowsers.Checked
         $config.captureApproximateTabs = [bool]$toggleApprox.Checked
         $config.redactUrls = [bool]$toggleRedact.Checked
@@ -3767,6 +3977,154 @@ function Update-StudioInsights {
         $script:Ui.InsightSummary.Text = [string]$_.Exception.Message
         $script:Ui.InsightSummary.ForeColor = $script:P.Red
     }
+}
+
+$diagHistoryCard = New-StudioSettingsCard -Title (T 'DiagRestoreHistory' 'Restore history') -Description (T 'DiagRestoreHistoryDesc' 'The most recent restores on this PC and the safety snapshot each one created.') -Height 260 -WrapDescription
+$diagFlow.Controls.Add($diagHistoryCard)
+
+$diagHistoryFlow = New-Object System.Windows.Forms.FlowLayoutPanel
+$diagHistoryFlow.Location = New-Object System.Drawing.Point(20, 76)
+$diagHistoryFlow.Size = New-Object System.Drawing.Size(700, 168)
+$diagHistoryFlow.FlowDirection = [System.Windows.Forms.FlowDirection]::TopDown
+$diagHistoryFlow.WrapContents = $false
+$diagHistoryFlow.AutoScroll = $false
+$diagHistoryFlow.BackColor = $script:P.Card
+$diagHistoryCard.Controls.Add($diagHistoryFlow)
+$script:Ui.DiagHistoryFlow = $diagHistoryFlow
+
+$diagHistoryEmpty = New-StudioLabel -Text (T 'RestoreHistoryEmpty' 'No restores have run yet.') -X 20 -Y 84 -Width 700 -Height 40 -Font $script:FontBody -Color $script:P.Muted
+$diagHistoryCard.Controls.Add($diagHistoryEmpty)
+$script:Ui.DiagHistoryEmpty = $diagHistoryEmpty
+
+function Get-StudioRestoreSourceText {
+    param([string]$Source)
+    switch ($Source) {
+        'manual' { return (T 'RestoreHistorySourceManual' 'Manual restore') }
+        'workspace' { return (T 'RestoreHistorySourceWorkspace' 'Workspace restore') }
+        'command' { return (T 'RestoreHistorySourceCommand' 'Command line restore') }
+        'undo' { return (T 'RestoreHistorySourceUndo' 'Undo restore') }
+        'automatic' { return (T 'RestoreHistorySourceAuto' 'Automatic restore') }
+        default { return (T 'RestoreHistorySourceAuto' 'Automatic restore') }
+    }
+}
+
+function Update-StudioRestoreHistory {
+    param([object[]]$Entries)
+    if (-not $script:Ui.DiagHistoryFlow) { return }
+    $items = @($Entries | Where-Object { $null -ne $_ } | Select-Object -First 5)
+    $diagHistoryFlow.SuspendLayout()
+    try {
+        $diagHistoryFlow.Controls.Clear()
+        foreach ($entry in $items) {
+            $row = New-StudioCard -X 0 -Y 0 -Width 600 -Height 54 -Fill $script:P.CardAlt -Border $script:P.BorderSoft -Radius 10
+            $row.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 8)
+            $whenText = [string]$entry.At
+            try { $whenText = (Format-StudioDate -Date ([datetime]::Parse([string]$entry.At)) -Format 'g') } catch { }
+            $headline = (T 'RestoreHistoryLine' '{0}  •  {1}  •  {2} restored, {3} failed') -f $whenText, (Get-StudioRestoreSourceText -Source ([string]$entry.Source)), [int]$entry.Started, [int]$entry.Failed
+            $headlineLabel = New-StudioLabel -Text $headline -X 14 -Y 6 -Width 340 -Height 19 -Font $script:FontBody -Color $script:P.Text
+            $headlineLabel.AutoEllipsis = $true
+            $snapshotText = [string]$entry.SnapshotName
+            if ([string]::IsNullOrWhiteSpace($snapshotText)) { $snapshotText = '—' }
+            $checkpointOk = -not [string]::IsNullOrWhiteSpace([string]$entry.Checkpoint)
+            if ($checkpointOk) { try { $checkpointOk = Test-Path -LiteralPath ([string]$entry.Checkpoint) } catch { $checkpointOk = $false } }
+            $undoLabel = if ($checkpointOk) { (T 'RestoreHistoryUndo' 'Undo') } else { (T 'RestoreHistoryNoCheckpoint' 'no safety snapshot') }
+            $detailLabel = New-StudioLabel -Text ($snapshotText + '  •  ' + $undoLabel) -X 14 -Y 28 -Width 340 -Height 17 -Font $script:FontBodySmall -Color $script:P.Muted
+            $detailLabel.AutoEllipsis = $true
+            $row.Controls.Add($headlineLabel)
+            $row.Controls.Add($detailLabel)
+            if ($checkpointOk) {
+                $undoButton = New-StudioButton -Text (T 'RestoreHistoryUndo' 'Undo') -X 380 -Y 11 -Width 100 -Height 32 -Glyph ''
+                $undoButton.Tag = [string]$entry.Checkpoint
+                $undoButton.Add_Click({
+                    param($sender, $eventArgs)
+                    $checkpointPath = [string]$sender.Tag
+                    if ([string]::IsNullOrWhiteSpace($checkpointPath) -or -not (Test-Path -LiteralPath $checkpointPath)) {
+                        Show-StudioToast (T 'UndoNoCheckpoint' 'No safety snapshot is available yet.') $script:P.Amber
+                        return
+                    }
+                    $answer = [System.Windows.Forms.MessageBox]::Show(
+                        (T 'UndoConfirmText' 'Reopen the desktop that was captured right before your last restore?'),
+                        (T 'UndoConfirmTitle' 'Undo last restore'), [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+                    if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+                    try {
+                        [void](Start-SRUndoLastRestore -CheckpointPath $checkpointPath)
+                        Show-StudioToast (T 'UndoStarted' 'Restoring the desktop from before your last restore...') $script:P.Green
+                    } catch {
+                        Show-StudioToast ((T 'UndoFailed' 'Could not undo the last restore: {0}') -f $_.Exception.Message) $script:P.Red
+                    }
+                })
+                $row.Controls.Add($undoButton)
+            }
+            [void]$diagHistoryFlow.Controls.Add($row)
+        }
+        $diagHistoryEmpty.Visible = ($items.Count -eq 0)
+        $diagHistoryFlow.Visible = ($items.Count -gt 0)
+    } finally {
+        $diagHistoryFlow.ResumeLayout()
+    }
+}
+
+$diagStorageCard = New-StudioSettingsCard -Title (T 'DiagStorageHealth' 'Storage health') -Description (T 'DiagStorageDesc' 'Unreadable snapshots, orphaned thumbnails and leftover temporary files are found here. Everything stays local.') -Height 196 -WrapDescription
+$diagFlow.Controls.Add($diagStorageCard)
+
+$diagStorageTitle = New-StudioLabel -Text (T 'CheckingWord' 'Checking...') -X 20 -Y 76 -Width 520 -Height 24 -Font $script:FontSemiboldLarge -Color $script:P.Text
+$diagStorageCard.Controls.Add($diagStorageTitle)
+$script:Ui.DiagStorageTitle = $diagStorageTitle
+$diagStorageDetail = New-StudioLabel -Text '' -X 20 -Y 104 -Width 520 -Height 52 -Font $script:FontBodySmall -Color $script:P.Muted
+$diagStorageCard.Controls.Add($diagStorageDetail)
+$script:Ui.DiagStorageDetail = $diagStorageDetail
+$diagStorageHint = New-StudioLabel -Text (T 'StorageQuarantineHint' 'Unreadable files are moved to the quarantine folder, not deleted.') -X 20 -Y 156 -Width 520 -Height 18 -Font $script:FontBodySmall -Color $script:P.Subtle
+$diagStorageCard.Controls.Add($diagStorageHint)
+$diagStorageCleanup = New-StudioButton -Text (T 'StorageCleanup' 'Clean up') -X 560 -Y 76 -Width 180 -Height 34 -Glyph ([string][char]0xE74D)
+$diagStorageCleanup.Add_Click({
+    $answer = [System.Windows.Forms.MessageBox]::Show(
+        (T 'StorageCleanupText' 'Apply your retention settings and remove orphaned thumbnails and temporary files? Unreadable snapshots are moved to a quarantine folder.'),
+        (T 'StorageCleanupTitle' 'Clean up storage'), [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+    if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+    try {
+        [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::WaitCursor
+        $result = Invoke-SRStorageCleanup
+        [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
+        Update-StudioStorageHealth -Health $result.Health
+        $message = (T 'StorageCleaned' 'Cleanup finished: {0} removed, {1} quarantined, {2} freed.') -f [int]$result.RemovedCount, [int]$result.QuarantinedCount, (Format-StudioBytes -Bytes ([int64]$result.BytesFreed))
+        if ([int]$result.RetentionRemoved -gt 0) { $message = $message + ' ' + ((T 'StorageRetentionApplied' '{0} old snapshot(s) removed by retention.') -f [int]$result.RetentionRemoved) }
+        Show-StudioToast $message $script:P.Green
+        Refresh-StudioData
+    } catch {
+        [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
+        Show-StudioToast ((T 'StorageCleanupFailed' 'Cleanup failed: {0}') -f $_.Exception.Message) $script:P.Red
+    }
+})
+$diagStorageCard.Controls.Add($diagStorageCleanup)
+$script:Ui.DiagStorageCleanup = $diagStorageCleanup
+
+function Update-StudioStorageHealth {
+    param($Health)
+    if (-not $script:Ui.DiagStorageTitle) { return }
+    if ($null -eq $Health) {
+        $script:Ui.DiagStorageTitle.Text = (T 'CheckingWord' 'Checking...')
+        $script:Ui.DiagStorageDetail.Text = ''
+        $script:Ui.DiagStorageCleanup.Enabled = $false
+        return
+    }
+    $issues = [int]$Health.UnreadableCount + [int]$Health.OrphanedCount + [int]$Health.TempCount + [int]$Health.WorkspaceThumbnailCount
+    $pinned = @($script:Config.pinnedSnapshots | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count
+    $summary = (T 'StorageSummary' '{0} snapshot(s)  •  {1} on disk  •  {2} pinned') -f [int]$Health.SnapshotCount, (Format-StudioBytes -Bytes ([int64]$Health.SnapshotBytes)), $pinned
+    if ($issues -eq 0) {
+        $script:Ui.DiagStorageTitle.Text = (T 'StorageHealthy' 'Storage looks clean')
+        $script:Ui.DiagStorageTitle.ForeColor = $script:P.Green
+        $script:Ui.DiagStorageDetail.Text = $summary
+    } else {
+        $script:Ui.DiagStorageTitle.Text = (T 'StorageIssues' '{0} issue(s)  •  {1} can be reclaimed') -f $issues, (Format-StudioBytes -Bytes ([int64]$Health.ReclaimableBytes))
+        $script:Ui.DiagStorageTitle.ForeColor = $script:P.Amber
+        $lines = New-Object System.Collections.Generic.List[string]
+        $lines.Add($summary)
+        if ([int]$Health.UnreadableCount -gt 0) { $lines.Add((T 'StorageUnreadable' '{0} unreadable snapshot(s)') -f [int]$Health.UnreadableCount) }
+        if ([int]$Health.OrphanedCount -gt 0) { $lines.Add((T 'StorageOrphanThumbs' '{0} orphaned thumbnail folder(s)') -f [int]$Health.OrphanedCount) }
+        if ([int]$Health.TempCount -gt 0) { $lines.Add((T 'StorageTemp' '{0} leftover temporary file(s)') -f [int]$Health.TempCount) }
+        $script:Ui.DiagStorageDetail.Text = ($lines -join "`r`n")
+    }
+    $script:Ui.DiagStorageCleanup.Enabled = $true
 }
 
 $diagTimelineCard = New-StudioSettingsCard -Title (T 'DiagTimeline' 'Recovery timeline') -Description (T 'DiagTimelineDesc' 'Restarts, power loss and blue screens from the Windows event log over the last 30 days. Read locally, never uploaded.') -Height 300 -WrapDescription
@@ -4024,6 +4382,10 @@ function Render-StudioDiagnostics {
 
         Update-StudioTimeline
 
+        try { Update-StudioRestoreHistory -Entries @($diag.RestoreHistory) } catch { Update-StudioRestoreHistory -Entries @() }
+        try { Update-StudioStorageHealth -Health $diag.StorageHealth } catch { Update-StudioStorageHealth -Health $null }
+        Layout-StudioDiagnostics
+
         $logPath = [string]$diag.LogPath
         if (Test-Path -LiteralPath $logPath) {
             $log = @(Get-Content -LiteralPath $logPath -Tail 160 -ErrorAction SilentlyContinue)
@@ -4166,7 +4528,7 @@ function Complete-StudioDiagnosticsWorker {
 
 function Layout-StudioDiagnostics {
     if (-not $script:Ui.DiagFlow) { return }
-    $width = Set-StudioVerticalStack -Panel $script:Ui.DiagFlow -Cards @($diagHealthCard, $diagChecksCard, $diagInsightsCard, $diagTimelineCard, $diagBrowserCard, $diagLogCard) -Padding 24 -BottomPadding 24 -MinWidth 620
+    $width = Set-StudioVerticalStack -Panel $script:Ui.DiagFlow -Cards @($diagHealthCard, $diagChecksCard, $diagHistoryCard, $diagStorageCard, $diagInsightsCard, $diagTimelineCard, $diagBrowserCard, $diagLogCard) -Padding 24 -BottomPadding 24 -MinWidth 620
     # Ring at the right edge, with the Run checks button beneath it. The
     # headline and description may use the full width beside the ring, so
     # every translated headline still fits on one line. The detail summary
@@ -4205,6 +4567,26 @@ function Layout-StudioDiagnostics {
     $diagTopSites.Left = $diagTopSitesTitle.Left
     $diagTopSites.Width = $halfWidth
     $diagCheckFlow.Width = [Math]::Max(200, $width - 40)
+    $historyRows = @($diagHistoryFlow.Controls)
+    $diagHistoryCard.Height = [Math]::Max(160, 92 + ($historyRows.Count * 62))
+    $diagHistoryFlow.Width = [Math]::Max(200, $width - 40)
+    $diagHistoryFlow.Height = [Math]::Max(50, $diagHistoryCard.Height - 92)
+    $diagHistoryEmpty.Width = [Math]::Max(200, $width - 40)
+    foreach ($row in $historyRows) {
+        $row.Width = [Math]::Max(240, $diagHistoryFlow.ClientSize.Width - 8)
+        if ($row.Controls.Count -lt 3) { continue }
+        $headlineLabel = $row.Controls[0]
+        $detailLabel = $row.Controls[1]
+        $undoButton = $row.Controls[2]
+        $undoButton.Left = $row.Width - 114
+        $headlineLabel.Width = [Math]::Max(120, $undoButton.Left - 26)
+        $detailLabel.Width = [Math]::Max(120, $undoButton.Left - 26)
+    }
+    $diagStorageTitle.Width = [Math]::Max(200, $width - 40)
+    $diagStorageDetail.Width = [Math]::Max(200, $width - 40)
+    $diagStorageHint.Width = [Math]::Max(200, $width - 40)
+    $diagStorageCleanup.Left = $width - $diagStorageCleanup.Width - 20
+    $diagStorageCleanup.Top = [Math]::Max(76, $diagStorageCard.Height - 58)
     $diagTimelineLabel.Width = [Math]::Max(200, $width - 40)
     $diagBrowserLabel.Width = [Math]::Max(200, $width - 40)
     $diagLogText.Width = [Math]::Max(200, $width - 40)
@@ -4681,7 +5063,7 @@ function Layout-StudioAbout {
 # Layout and page switching
 # ---------------------------------------------------------------------------
 
-foreach ($bufferedControl in @($main, $sidebar, $header, $snapSplit, $snapFlow, $recentFlow, $settingsFlow, $exFlow, $diagFlow, $aboutFlow)) {
+foreach ($bufferedControl in @($main, $sidebar, $header, $snapSplit, $snapFlow, $recentFlow, $settingsFlow, $exFlow, $diagFlow, $aboutFlow, $wsFlow)) {
     Enable-StudioDoubleBuffer $bufferedControl
 }
 
@@ -4760,12 +5142,24 @@ function Layout-StudioDashboard {
     $recentFlow.Height = [Math]::Max(72, $lowerHeight - 94)
     $recentSpark.Top = $lowerHeight - 42
     $recentSpark.Width = $recentCard.Width - 32
-    foreach ($button in @($quickCapture, $quickRestore, $quickFolder, $quickDiagnostics)) {
+    $quickButtons = @($quickCapture, $quickRestore, $quickUndo, $quickFolder, $quickDiagnostics)
+    foreach ($button in $quickButtons) {
         $button.Width = $quickCard.Width - 32
     }
-    $quickRestore.Top = 86
-    $quickFolder.Top = 128
-    $quickDiagnostics.Top = 170
+    # Five quick actions must all fit inside the lower card at the minimum
+    # window height. Size them from the real card height so the last button is
+    # never clipped on a short window.
+    $quickTop = 40
+    $quickGap = 6
+    $quickSpace = [Math]::Max(120, $lowerHeight - $quickTop - 10)
+    $quickHeight = [int][Math]::Floor(($quickSpace - (($quickButtons.Count - 1) * $quickGap)) / $quickButtons.Count)
+    $quickHeight = [Math]::Max(24, [Math]::Min(34, $quickHeight))
+    $quickY = $quickTop
+    foreach ($button in $quickButtons) {
+        $button.Top = $quickY
+        $button.Height = $quickHeight
+        $quickY += $quickHeight + $quickGap
+    }
     $dashboardHint.Top = $height - 24
 }
 
@@ -4846,6 +5240,7 @@ function Layout-StudioPage {
     switch ($Name) {
         'Dashboard' { Layout-StudioDashboard }
         'Snapshots' { Layout-StudioSnapshots }
+        'Workspaces' { Layout-StudioWorkspaces }
         'Exclusions' { Layout-StudioExclusions }
         'RecoveryKit' { Layout-StudioRecoveryKit }
         'Settings' { Layout-StudioSettings }
@@ -4891,6 +5286,10 @@ function Show-StudioPage {
                 $pageTitle.Text = 'Snapshots'
                 $pageSubtitle.Text = 'A timeline of everything Session Recovery has saved.'
             }
+            'Workspaces' {
+                $pageTitle.Text = (T 'NavWorkspaces' 'Workspaces')
+                $pageSubtitle.Text = (T 'SubWorkspaces' 'Reopen a saved desktop in one click.')
+            }
             'Exclusions' {
                 $pageTitle.Text = 'Exclusions'
                 $pageSubtitle.Text = 'Keep private or noisy windows out of your snapshots.'
@@ -4932,6 +5331,7 @@ function Show-StudioPage {
     switch ($Name) {
         'Dashboard' { if ($firstShow -or $script:DashboardDirty) { Refresh-StudioDashboard } }
         'Snapshots' { if ($firstShow -or $script:SnapshotsDirty) { Refresh-StudioSnapshotRows } }
+        'Workspaces' { if ($firstShow) { Refresh-StudioWorkspaces } }
         'Exclusions' { if ($firstShow -or $script:ExclusionsDirty) { Refresh-StudioExclusions } }
         'RecoveryKit' { if ($firstShow) { Update-StudioKitSummary } }
         'Settings' { if (-not $script:SettingsLoaded) { Load-StudioSettings } }
@@ -4941,7 +5341,7 @@ function Show-StudioPage {
         # WinForms can scroll a fresh AutoScroll panel to the last control
         # that was added or focused. Reset after the page's own loading code so
         # the first card is always the one users see when they open the page.
-        foreach ($scrollFlow in @($script:Ui.SettingsFlow, $script:Ui.DiagFlow, $script:Ui.AboutFlow, $script:Ui.KitFlow)) {
+        foreach ($scrollFlow in @($script:Ui.SettingsFlow, $script:Ui.DiagFlow, $script:Ui.AboutFlow, $script:Ui.KitFlow, $script:Ui.WorkspacesFlow)) {
             if ($null -ne $scrollFlow) {
                 $scrollFlow.AutoScrollPosition = New-Object System.Drawing.Point(0, 0)
             }
@@ -5200,8 +5600,8 @@ $form.Add_KeyDown({
         $eventArgs.SuppressKeyPress = $true
     } elseif ($eventArgs.Control) {
         $map = @{
-            'D1' = 'Dashboard'; 'D2' = 'Snapshots'; 'D3' = 'Exclusions';
-            'D4' = 'Settings'; 'D5' = 'Diagnostics'; 'D6' = 'About'; 'D7' = 'RecoveryKit'
+            'D1' = 'Dashboard'; 'D2' = 'Snapshots'; 'D3' = 'Workspaces'; 'D4' = 'Exclusions';
+            'D5' = 'Settings'; 'D6' = 'Diagnostics'; 'D7' = 'About'; 'D8' = 'RecoveryKit'
         }
         $keyName = [string]$eventArgs.KeyCode
         if ($map.ContainsKey($keyName)) {
@@ -5294,7 +5694,7 @@ if (-not [string]::IsNullOrWhiteSpace($RenderDir)) {
             $renderWaitMs = [Math]::Max(100, [int]$env:SESSIONRECOVERY_RENDER_MS)
         }
     } catch { }
-    foreach ($renderPage in @('Dashboard', 'Snapshots', 'Exclusions', 'RecoveryKit', 'Settings', 'Diagnostics', 'About')) {
+    foreach ($renderPage in @('Dashboard', 'Snapshots', 'Workspaces', 'Exclusions', 'RecoveryKit', 'Settings', 'Diagnostics', 'About')) {
         Show-StudioPage -Name $renderPage
         # The diagnostics page fills in from a background worker. Pump the
         # worker queue and wait for the loaded state so the audit covers the
@@ -5310,6 +5710,7 @@ if (-not [string]::IsNullOrWhiteSpace($RenderDir)) {
         if ([string]$env:SESSIONRECOVERY_RENDER_SCROLL -eq 'bottom') {
             $scrollFlow = switch ($renderPage) {
                 'Settings' { $script:Ui.SettingsFlow }
+                'Workspaces' { $script:Ui.WorkspacesFlow }
                 'RecoveryKit' { $script:Ui.KitFlow }
                 'Diagnostics' { $script:Ui.DiagFlow }
                 'About' { $script:Ui.AboutFlow }
@@ -5369,3 +5770,4 @@ if (-not [string]::IsNullOrWhiteSpace($RenderDir)) {
 }
 [void]$form.ShowDialog()
 $form.Dispose()
+

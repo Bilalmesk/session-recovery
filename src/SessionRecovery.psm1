@@ -1,4 +1,4 @@
-﻿Set-StrictMode -Version 2.0
+Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 # ---------------------------------------------------------------------------
@@ -1186,6 +1186,7 @@ function Get-SRDefaultConfig {
         eventSnapshots          = $true
         hibernateGuard          = $true
         keepHibernateCheckpoints = 3
+        savePreRestoreSnapshot  = $true
         captureDevWorkspaces    = $true
         restoreVirtualDesktops  = $true
         launchOrder             = @()
@@ -4453,11 +4454,33 @@ function Get-SRWorkspaces {
         $dir = Join-Path $script:SRRoot 'workspaces'
         if (-not (Test-Path -LiteralPath $dir)) { return $result.ToArray() }
         foreach ($file in @(Get-ChildItem -LiteralPath $dir -Filter '*.json' -File -ErrorAction SilentlyContinue | Sort-Object -Property Name)) {
-            $result.Add([pscustomobject]@{
-                Name = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
-                Path = $file.FullName
-                At   = $file.LastWriteTime
-            })
+            $entry = [pscustomobject]@{
+                Name       = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
+                Path       = $file.FullName
+                At         = $file.LastWriteTime
+                CapturedAt = $file.LastWriteTime
+                Size       = [int64]$file.Length
+                Apps       = 0
+                Folders    = 0
+                Browsers   = 0
+                Tabs       = 0
+            }
+            try {
+                $snapshot = Read-SRSnapshotFile -Path $file.FullName
+                $capturedProperty = $snapshot.PSObject.Properties['capturedAt']
+                if ($null -ne $capturedProperty -and -not [string]::IsNullOrWhiteSpace([string]$capturedProperty.Value)) {
+                    $entry.CapturedAt = [DateTimeOffset]::Parse([string]$capturedProperty.Value, [System.Globalization.CultureInfo]::InvariantCulture).LocalDateTime
+                }
+                $entry.Apps = @($snapshot.apps).Count
+                $entry.Folders = @($snapshot.explorer).Count
+                $entry.Browsers = @($snapshot.browsers).Count
+                $tabs = 0
+                foreach ($browser in @($snapshot.browsers)) {
+                    foreach ($profile in @($browser.profiles)) { $tabs += @($profile.tabs).Count }
+                }
+                $entry.Tabs = $tabs
+            } catch { }
+            $result.Add($entry)
         }
     } catch { }
     return $result.ToArray()
@@ -4483,6 +4506,390 @@ function Save-SRWorkspace {
         }
     } catch { }
     return $target
+}
+
+function Remove-SRWorkspace {
+    param([Parameter(Mandatory = $true)][string]$Name)
+    $match = @(Get-SRWorkspaces) | Where-Object { [string]::Equals([string]$_.Name, [string]$Name, [System.StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1
+    if ($null -eq $match) { throw "Workspace not found: $Name" }
+    Remove-Item -LiteralPath $match.Path -Force
+    $thumbDir = Join-Path (Split-Path -Parent $match.Path) ($match.Name + '-thumbs')
+    if (Test-Path -LiteralPath $thumbDir) {
+        Remove-Item -LiteralPath $thumbDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    return $true
+}
+
+function Write-SRJsonAtomic {
+    # Small JSON sidecars (restore history, checkpoint marker) must survive a
+    # power cut without ever being left half-written.
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)]$Value
+    )
+    $parent = Split-Path -Parent $Path
+    if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+    $json = $Value | ConvertTo-Json -Depth 8
+    $temp = Join-Path $parent ('.' + [System.IO.Path]::GetFileName($Path) + '.' + [guid]::NewGuid().ToString('N') + '.tmp')
+    $temp = [System.IO.Path]::GetFullPath($temp)
+    $Path = [System.IO.Path]::GetFullPath($Path)
+    [System.IO.File]::WriteAllText($temp, $json, (New-Object System.Text.UTF8Encoding($false)))
+    try {
+        if (Test-Path -LiteralPath $Path) {
+            # File.Replace keeps the old file's ACLs, but it rejects a null or
+            # relative backup path; delete-then-move is equivalent and works
+            # on every Windows PowerShell file system provider.
+            [System.IO.File]::Delete($Path)
+        }
+        [System.IO.File]::Move($temp, $Path)
+    } catch {
+        try { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue } catch { }
+        throw
+    }
+}
+
+function Get-SRRestoreCheckpointPath {
+    return (Join-Path $script:SRRoot 'last-restore-checkpoint.json')
+}
+
+function Get-SRRestoreCheckpoint {
+    # The safety snapshot captured immediately before the newest restore.
+    # A marker file makes this a single small read; when the marker is missing
+    # the newest pre-restore snapshot is discovered by its reason field.
+    $markerPath = Get-SRRestoreCheckpointPath
+    if (Test-Path -LiteralPath $markerPath) {
+        try {
+            $marker = Get-Content -LiteralPath $markerPath -Raw -ErrorAction Stop | ConvertFrom-Json
+            $path = [string]$marker.Path
+            if (-not [string]::IsNullOrWhiteSpace($path) -and (Test-Path -LiteralPath $path)) {
+                return [pscustomobject]@{
+                    Path         = $path
+                    SnapshotName = Split-Path -Leaf $path
+                    At           = [string]$marker.At
+                    Source       = [string]$marker.Source
+                }
+            }
+        } catch { }
+    }
+    foreach ($file in @(Get-SRSnapshotFiles | Select-Object -First 30)) {
+        try {
+            $snapshot = Read-SRSnapshotFile -Path $file.FullName
+            $reasonProperty = $snapshot.PSObject.Properties['reason']
+            if ($null -ne $reasonProperty -and [string]$reasonProperty.Value -eq 'pre-restore') {
+                return [pscustomobject]@{
+                    Path         = $file.FullName
+                    SnapshotName = $file.Name
+                    At           = $file.LastWriteTime.ToString('o')
+                    Source       = 'restore'
+                }
+            }
+        } catch { }
+    }
+    return $null
+}
+
+function New-SRRestoreCheckpoint {
+    param([string]$Source = 'restore')
+    $config = Get-SRConfig
+    $enabled = $true
+    try {
+        $property = $config.PSObject.Properties['savePreRestoreSnapshot']
+        if ($null -ne $property) { $enabled = [bool]$property.Value }
+    } catch { }
+    if (-not $enabled) { return $null }
+
+    try {
+        $previous = Get-SRRestoreCheckpoint
+        $path = Save-SRSnapshot -Force -Reason 'pre-restore'
+        if ([string]::IsNullOrWhiteSpace([string]$path) -or -not (Test-Path -LiteralPath $path)) { return $null }
+        # Keep exactly one undo checkpoint pinned. The previous one is unpinned
+        # so retention can reclaim it after the next few snapshots.
+        if ($null -ne $previous -and -not [string]::IsNullOrWhiteSpace([string]$previous.Path) -and [string]$previous.Path -ne [string]$path) {
+            try { [void](Set-SRSnapshotPinned -Path ([string]$previous.Path) -Pinned $false) } catch { }
+        }
+        [void](Set-SRSnapshotPinned -Path ([string]$path) -Pinned $true)
+        $marker = [pscustomobject]@{
+            Path         = [string]$path
+            SnapshotName = Split-Path -Leaf $path
+            At           = (Get-Date).ToString('o')
+            Source       = [string]$Source
+        }
+        Write-SRJsonAtomic -Path (Get-SRRestoreCheckpointPath) -Value $marker
+        Write-SRLog -Message ("Safety snapshot saved before restore: {0}" -f $path)
+        return $marker
+    } catch {
+        Write-SRLog -Level WARN -Message ("Safety snapshot failed: {0}" -f $_.Exception.Message)
+        return $null
+    }
+}
+
+function Get-SRRestoreHistoryPath {
+    return (Join-Path $script:SRRoot 'restore-history.json')
+}
+
+function Get-SRRestoreHistoryEntry {
+    # Normalizes one stored entry. Storing a bare array in a one-line JSON file
+    # makes ConvertFrom-Json return a single object for a one-entry file, so
+    # every read walks the raw object's properties instead.
+    param($Item)
+    if ($null -eq $Item) { return $null }
+    return [pscustomobject]@{
+        At           = [string]$Item.At
+        Source       = [string]$Item.Source
+        SnapshotName = [string]$Item.SnapshotName
+        SnapshotAt   = [string]$Item.SnapshotAt
+        Started      = [int]$Item.Started
+        Failed       = [int]$Item.Failed
+        Checkpoint   = [string]$Item.Checkpoint
+        Status       = [string]$Item.Status
+    }
+}
+
+function Get-SRRestoreHistory {
+    param([int]$Limit = 8)
+    $path = Get-SRRestoreHistoryPath
+    if (-not (Test-Path -LiteralPath $path)) { return @() }
+    try {
+        $raw = Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json
+        $entries = New-Object System.Collections.Generic.List[object]
+        foreach ($item in @($raw)) {
+            $entry = Get-SRRestoreHistoryEntry -Item $item
+            if ($null -ne $entry) { $entries.Add($entry) }
+        }
+        $all = $entries.ToArray()
+        if ($Limit -gt 0) { $all = @($all | Select-Object -First $Limit) }
+        return $all
+    } catch {
+        Write-SRLog -Level WARN -Message ("Could not read restore history: {0}" -f $_.Exception.Message)
+        return @()
+    }
+}
+
+function Add-SRRestoreHistory {
+    param(
+        [string]$SnapshotPath = '',
+        [string]$SnapshotAt = '',
+        [string]$Source = 'manual',
+        [int]$Started = 0,
+        [int]$Failed = 0,
+        [string]$CheckpointPath = '',
+        [string]$Status = 'completed'
+    )
+    $entry = [pscustomobject]@{
+        At           = (Get-Date).ToString('o')
+        Source       = [string]$Source
+        SnapshotName = if ([string]::IsNullOrWhiteSpace($SnapshotPath)) { '' } else { Split-Path -Leaf $SnapshotPath }
+        SnapshotAt   = [string]$SnapshotAt
+        Started      = [int]$Started
+        Failed       = [int]$Failed
+        Checkpoint   = [string]$CheckpointPath
+        Status       = [string]$Status
+    }
+    try {
+        $existing = @(Get-SRRestoreHistory -Limit 19)
+        $all = New-Object System.Collections.Generic.List[object]
+        $all.Add($entry)
+        foreach ($previous in $existing) {
+            if ($null -ne $previous) { $all.Add($previous) }
+        }
+        $trimmed = @($all.ToArray() | Select-Object -First 20)
+        Write-SRJsonAtomic -Path (Get-SRRestoreHistoryPath) -Value $trimmed
+        Write-SRLog -Message ("Restore history recorded: {0}, {1} started, {2} failed." -f $entry.Source, $entry.Started, $entry.Failed)
+    } catch {
+        Write-SRLog -Level WARN -Message ("Could not record restore history: {0}" -f $_.Exception.Message)
+    }
+    return $entry
+}
+
+function Get-SRFolderBytes {
+    param([string]$Path)
+    $bytes = [int64]0
+    try {
+        foreach ($file in @(Get-ChildItem -LiteralPath $Path -Recurse -File -Force -ErrorAction SilentlyContinue)) {
+            $bytes += [int64]$file.Length
+        }
+    } catch { }
+    return $bytes
+}
+
+function Get-SRStorageHealth {
+    # Read-only local audit: unreadable snapshots, thumbnail folders whose
+    # snapshot is gone, and temporary files left by an interrupted write.
+    $snapshotDir = Get-SRSnapshotDirectory
+    $root = Get-SRRoot
+    $files = @(Get-SRSnapshotFiles)
+    $validThumbs = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($file in $files) {
+        $name = [string]$file.Name
+        if ($name.EndsWith('.gz', [System.StringComparison]::OrdinalIgnoreCase)) { $name = $name.Substring(0, $name.Length - 3) }
+        if ($name.EndsWith('.json', [System.StringComparison]::OrdinalIgnoreCase)) { $name = $name.Substring(0, $name.Length - 5) }
+        if ($name.StartsWith('session-', [System.StringComparison]::OrdinalIgnoreCase)) { $name = $name.Substring(8) }
+        [void]$validThumbs.Add($name)
+    }
+
+    $unreadable = New-Object System.Collections.Generic.List[object]
+    $snapshotBytes = [int64]0
+    foreach ($file in $files) {
+        $snapshotBytes += [int64]$file.Length
+        try {
+            [void](Read-SRSnapshotFile -Path $file.FullName)
+        } catch {
+            $unreadable.Add([pscustomobject]@{ Path = $file.FullName; Name = $file.Name; Bytes = [int64]$file.Length })
+        }
+    }
+
+    $orphanThumbs = New-Object System.Collections.Generic.List[object]
+    $thumbsRoot = Join-Path $snapshotDir 'thumbs'
+    if (Test-Path -LiteralPath $thumbsRoot) {
+        foreach ($folder in @(Get-ChildItem -LiteralPath $thumbsRoot -Directory -ErrorAction SilentlyContinue)) {
+            if (-not $validThumbs.Contains([string]$folder.Name)) {
+                $orphanThumbs.Add([pscustomobject]@{ Path = $folder.FullName; Name = $folder.Name; Bytes = (Get-SRFolderBytes -Path $folder.FullName) })
+            }
+        }
+    }
+
+    $tempFiles = New-Object System.Collections.Generic.List[object]
+    foreach ($dir in @($snapshotDir, $root, (Join-Path $root 'workspaces'))) {
+        if ([string]::IsNullOrWhiteSpace($dir) -or -not (Test-Path -LiteralPath $dir)) { continue }
+        foreach ($temp in @(Get-ChildItem -LiteralPath $dir -Filter '*.tmp' -File -Force -ErrorAction SilentlyContinue)) {
+            $tempFiles.Add([pscustomobject]@{ Path = $temp.FullName; Name = $temp.Name; Bytes = [int64]$temp.Length })
+        }
+    }
+
+    $workspaceThumbs = New-Object System.Collections.Generic.List[object]
+    $workspaceDir = Join-Path $root 'workspaces'
+    if (Test-Path -LiteralPath $workspaceDir) {
+        foreach ($folder in @(Get-ChildItem -LiteralPath $workspaceDir -Directory -Filter '*-thumbs' -ErrorAction SilentlyContinue)) {
+            $baseName = [string]$folder.Name
+            $baseName = $baseName.Substring(0, $baseName.Length - 7)
+            if (-not (Test-Path -LiteralPath (Join-Path $workspaceDir ($baseName + '.json')))) {
+                $workspaceThumbs.Add([pscustomobject]@{ Path = $folder.FullName; Name = $folder.Name; Bytes = (Get-SRFolderBytes -Path $folder.FullName) })
+            }
+        }
+    }
+
+    $reclaimable = [int64]0
+    # @(GenericList) yields the list itself in some PowerShell versions, so
+    # enumerate with ToArray() to get the individual items every time.
+    foreach ($item in @($unreadable.ToArray())) { $reclaimable += [int64]$item.Bytes }
+    foreach ($item in @($orphanThumbs.ToArray())) { $reclaimable += [int64]$item.Bytes }
+    foreach ($item in @($tempFiles.ToArray())) { $reclaimable += [int64]$item.Bytes }
+    foreach ($item in @($workspaceThumbs.ToArray())) { $reclaimable += [int64]$item.Bytes }
+
+    return [pscustomobject]@{
+        GeneratedAt                = (Get-Date).ToString('o')
+        SnapshotCount              = [int]$files.Count
+        SnapshotBytes              = $snapshotBytes
+        UnreadableSnapshots        = $unreadable.ToArray()
+        UnreadableCount            = [int]$unreadable.Count
+        OrphanedThumbnails         = $orphanThumbs.ToArray()
+        OrphanedCount              = [int]$orphanThumbs.Count
+        TempFiles                  = $tempFiles.ToArray()
+        TempCount                  = [int]$tempFiles.Count
+        OrphanedWorkspaceThumbnails = $workspaceThumbs.ToArray()
+        WorkspaceThumbnailCount    = [int]$workspaceThumbs.Count
+        ReclaimableBytes           = $reclaimable
+        Healthy                    = (($unreadable.Count + $orphanThumbs.Count + $tempFiles.Count + $workspaceThumbs.Count) -eq 0)
+    }
+}
+
+function Invoke-SRStorageCleanup {
+    # Applies retention, quarantines unreadable snapshots (never silently
+    # deletes user data), and removes thumbnails/temp files that can no longer
+    # be used by anything.
+    $health = Get-SRStorageHealth
+    $config = Get-SRConfig
+    $beforeFiles = @(Get-SRSnapshotFiles)
+    $beforeBytes = [int64]0
+    foreach ($file in $beforeFiles) { $beforeBytes += [int64]$file.Length }
+    try {
+        Remove-OldSRSnapshots -Keep ([int]$config.keepSnapshots) -MaxAgeDays ([int]$config.keepSnapshotDays) -Pinned @($config.pinnedSnapshots)
+    } catch {
+        Write-SRLog -Level WARN -Message ("Retention during cleanup failed: {0}" -f $_.Exception.Message)
+    }
+    $afterFiles = @(Get-SRSnapshotFiles)
+    $afterBytes = [int64]0
+    foreach ($file in $afterFiles) { $afterBytes += [int64]$file.Length }
+    $retentionRemoved = [Math]::Max(0, $beforeFiles.Count - $afterFiles.Count)
+    $bytesFreed = [int64][Math]::Max(0, $beforeBytes - $afterBytes)
+
+    $quarantined = 0
+    if ($health.UnreadableCount -gt 0) {
+        $quarantineRoot = Join-Path (Get-SRRoot) ('quarantine\' + (Get-Date).ToString('yyyyMMdd-HHmmss'))
+        try {
+            New-Item -ItemType Directory -Path $quarantineRoot -Force | Out-Null
+            foreach ($item in @($health.UnreadableSnapshots)) {
+                if (-not (Test-Path -LiteralPath $item.Path)) { continue }
+                try {
+                    Move-Item -LiteralPath $item.Path -Destination (Join-Path $quarantineRoot $item.Name) -Force
+                    $quarantined++
+                } catch { }
+            }
+        } catch { }
+    }
+
+    $removed = 0
+    foreach ($item in @($health.OrphanedThumbnails)) {
+        if (Test-Path -LiteralPath $item.Path) {
+            try { Remove-Item -LiteralPath $item.Path -Recurse -Force; $removed++; $bytesFreed += [int64]$item.Bytes } catch { }
+        }
+    }
+    foreach ($item in @($health.OrphanedWorkspaceThumbnails)) {
+        if (Test-Path -LiteralPath $item.Path) {
+            try { Remove-Item -LiteralPath $item.Path -Recurse -Force; $removed++; $bytesFreed += [int64]$item.Bytes } catch { }
+        }
+    }
+    foreach ($item in @($health.TempFiles)) {
+        if (Test-Path -LiteralPath $item.Path) {
+            try { Remove-Item -LiteralPath $item.Path -Force; $removed++; $bytesFreed += [int64]$item.Bytes } catch { }
+        }
+    }
+
+    $result = [pscustomobject]@{
+        RemovedCount       = [int]$removed
+        QuarantinedCount   = [int]$quarantined
+        RetentionRemoved   = [int]$retentionRemoved
+        BytesFreed         = [int64]$bytesFreed
+        Health             = Get-SRStorageHealth
+    }
+    Write-SRLog -Message ("Storage cleanup: {0} removed, {1} quarantined, {2} old snapshot(s) retired, {3} bytes freed." -f $result.RemovedCount, $result.QuarantinedCount, $result.RetentionRemoved, $result.BytesFreed)
+    return $result
+}
+
+function Get-SRHostExecutable {
+    $candidates = @()
+    if ($env:SESSIONRECOVERY_HOST_EXE) { $candidates += $env:SESSIONRECOVERY_HOST_EXE }
+    $candidates += (Join-Path $PSScriptRoot 'SessionRecovery.exe')
+    $candidates += (Join-Path (Split-Path $PSScriptRoot -Parent) 'dist\SessionRecovery.exe')
+    $candidates += (Join-Path $env:LOCALAPPDATA 'SessionRecovery\app\SessionRecovery.exe')
+    foreach ($candidate in $candidates) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$candidate) -and (Test-Path -LiteralPath $candidate)) { return [string]$candidate }
+    }
+    return $null
+}
+
+function Start-SRUndoLastRestore {
+    # Reopens the desktop captured immediately before the newest restore. The
+    # headless restore is itself recorded, so the undo can be undone again.
+    # -CheckpointPath lets Restore history undo an older entry when its safety
+    # snapshot still exists.
+    param([string]$CheckpointPath = '')
+    if (-not [string]::IsNullOrWhiteSpace($CheckpointPath)) {
+        if (-not (Test-Path -LiteralPath $CheckpointPath)) { throw 'That safety snapshot is no longer available.' }
+        $checkpoint = [pscustomobject]@{
+            Path         = $CheckpointPath
+            SnapshotName = Split-Path -Leaf $CheckpointPath
+            At           = (Get-Date).ToString('o')
+            Source       = 'history'
+        }
+    } else {
+        $checkpoint = Get-SRRestoreCheckpoint
+    }
+    if ($null -eq $checkpoint) { throw 'No safety snapshot is available yet.' }
+    $hostExe = Get-SRHostExecutable
+    if ([string]::IsNullOrWhiteSpace([string]$hostExe)) { throw 'SessionRecovery.exe is missing.' }
+    [void](Start-SRDetached -FilePath $hostExe -Arguments @('--restore-manual', '-SnapshotPath', [string]$checkpoint.Path, '-NoUI'))
+    return $checkpoint
 }
 
 function New-SRSnapshot {
@@ -7020,10 +7427,13 @@ function Get-SRDiagnostics {
             MaxRestoreAgeHours  = [int]$config.maxRestoreAgeHours
             RestoreBrowsers     = [bool]$config.restoreBrowsers
             DefaultTabMode      = [string]$config.defaultTabMode
+            SavePreRestoreSnapshot = if ($null -ne $config.PSObject.Properties['savePreRestoreSnapshot']) { [bool]$config.savePreRestoreSnapshot } else { $true }
             ExcludeApps         = @($config.excludeApps)
             ExcludeFolders      = @($config.excludeFolders)
             ExcludeUrls         = @($config.excludeUrls)
         }
+        RestoreHistory           = @(Get-SRRestoreHistory -Limit 8)
+        StorageHealth            = Get-SRStorageHealth
         RecentLog                = @($recentLog)
     }
 }
