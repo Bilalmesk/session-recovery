@@ -17,7 +17,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-$script:AppVersion = '3.0.2'
+$script:AppVersion = '3.0.3'
 $script:ScriptDir = $PSScriptRoot
 $script:AppDir = if ($env:SESSIONRECOVERY_HOST_EXE) { Split-Path -Parent $env:SESSIONRECOVERY_HOST_EXE } else { $PSScriptRoot }
 $script:HostExe = $null
@@ -1277,6 +1277,7 @@ function Refresh-StudioData {
         'Workspaces' { if ($script:PageLoaded.ContainsKey('Workspaces')) { Refresh-StudioWorkspaces } }
         'Exclusions' { if ($script:PageLoaded.ContainsKey('Exclusions')) { Refresh-StudioExclusions } }
         'RecoveryKit' { if ($script:PageLoaded.ContainsKey('RecoveryKit')) { Update-StudioKitSummary } }
+        'About' { if ($script:PageLoaded.ContainsKey('About')) { Update-StudioAboutData } }
         'Diagnostics' { if ($script:PageLoaded.ContainsKey('Diagnostics')) { Start-StudioDiagnosticsRefresh -Force } }
     }
 }
@@ -4868,84 +4869,80 @@ function Layout-StudioRecoveryKit {
 $aboutPage = New-StudioPage -Name 'About'
 $aboutFlow = New-StudioScrollPanel -Padding (New-Object System.Windows.Forms.Padding(24)) -AutoScroll $true
 $aboutFlow.Dock = [System.Windows.Forms.DockStyle]::Fill
-$aboutFlow.Padding = New-Object System.Windows.Forms.Padding(24)
-$aboutFlow.AutoScroll = $true
-$aboutFlow.BackColor = $script:P.Bg
 $aboutPage.Controls.Add($aboutFlow)
 $script:Ui.AboutFlow = $aboutFlow
 
-$aboutHero = New-StudioCard -X 0 -Y 0 -Width 800 -Height 184 -Fill $script:P.Card -Border $script:P.BorderSoft -Radius 16
+# Hero: identity, version, and the two actions that always work.
+$aboutHero = New-StudioCard -X 0 -Y 0 -Width 800 -Height 176 -Fill $script:P.Card -Border $script:P.BorderSoft -Radius 16
 $aboutHero.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 14)
 $aboutFlow.Controls.Add($aboutHero)
 
 $aboutIcon = New-Object System.Windows.Forms.PictureBox
-$aboutIcon.Location = New-Object System.Drawing.Point(24, 26)
-$aboutIcon.Size = New-Object System.Drawing.Size(68, 68)
+$aboutIcon.Location = New-Object System.Drawing.Point(24, 24)
+$aboutIcon.Size = New-Object System.Drawing.Size(64, 64)
 $aboutIcon.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
 $aboutIcon.BackColor = [System.Drawing.Color]::Transparent
 if ($script:IconPath) {
     try { $aboutIcon.Image = (New-Object System.Drawing.Icon($script:IconPath)).ToBitmap() } catch { }
 }
 $aboutHero.Controls.Add($aboutIcon)
-$aboutName = New-StudioLabel -Text 'Session Recovery' -X 110 -Y 26 -Width 460 -Height 40 -Font (New-Object System.Drawing.Font('Segoe UI Semibold', 24)) -Color $script:P.Text
+
+$aboutName = New-StudioLabel -Text 'Session Recovery' -X 106 -Y 22 -Width 520 -Height 40 -Font (New-Object System.Drawing.Font('Segoe UI Semibold', 23)) -Color $script:P.Text
 $aboutHero.Controls.Add($aboutName)
-$aboutTagline = New-StudioLabel -Text (T 'SubDashboard' 'Your session, exactly as you left it.') -X 112 -Y 67 -Width 460 -Height 20 -Font $script:FontBody -Color $script:P.Muted
+$aboutTagline = New-StudioLabel -Text (T 'SubAbout' 'Local, fast and private by design.') -X 108 -Y 62 -Width 520 -Height 20 -Font $script:FontBody -Color $script:P.Muted
 $aboutHero.Controls.Add($aboutTagline)
-$aboutVersion = New-StudioBadge -Text ((T 'AboutVersionLabel' 'VERSION') + ' ' + $script:AppVersion) -Width 128 -Height 24 -Fill $script:P.AccentSoft -TextColor $script:P.Accent
-$aboutVersion.Location = New-Object System.Drawing.Point(112, 98)
+$aboutVersion = New-StudioBadge -Text ((T 'AboutVersionCard' 'Version {0}') -f $script:AppVersion) -Width 148 -Height 24 -Fill $script:P.AccentSoft -TextColor $script:P.Accent
+$aboutVersion.Location = New-Object System.Drawing.Point(108, 92)
 $aboutHero.Controls.Add($aboutVersion)
-$aboutGithub = New-StudioButton -Text (T 'BtnViewGithub' 'View on GitHub') -X 24 -Y 128 -Width 150 -Height 34 -Glyph ''
-$aboutGithub.Add_Click({ Start-Process 'https://github.com/Bilalmesk/session-recovery' | Out-Null })
+$script:Ui.AboutVersion = $aboutVersion
+
+$aboutGithub = New-StudioButton -Text (T 'BtnViewGithub' 'View on GitHub') -X 24 -Y 124 -Width 168 -Height 34 -Glyph ''
+$aboutGithub.Add_Click({
+    try { Start-Process 'https://github.com/Bilalmesk/session-recovery' | Out-Null }
+    catch { Show-StudioToast ((T 'AboutCopyFail' 'Could not copy: {0}') -f $_.Exception.Message) $script:P.Red }
+})
 $aboutHero.Controls.Add($aboutGithub)
-$aboutCopy = New-StudioButton -Text (T 'BtnCopyDiagnostics' 'Copy diagnostics') -X 184 -Y 128 -Width 180 -Height 34 -Glyph ''
+$aboutCopy = New-StudioButton -Text (T 'AboutCopyVersion' 'Copy version info') -X 200 -Y 124 -Width 190 -Height 34 -Glyph ''
 $aboutCopy.Add_Click({
     try {
-        $report = if ($script:DiagnosticsReport) { [string]$script:DiagnosticsReport } else { 'Session Recovery ' + $script:AppVersion }
-        [System.Windows.Forms.Clipboard]::SetText($report)
-        Show-StudioToast (T 'ToastReportCopied' 'Diagnostics report copied.') $script:P.Green
+        $lines = @(
+            ('Session Recovery {0}' -f $script:AppVersion),
+            ('Windows: ' + [Environment]::OSVersion.VersionString),
+            ('PowerShell: ' + $PSVersionTable.PSVersion.ToString()),
+            ('Data: ' + (Get-SRRoot)),
+            ('Config: ' + (Get-SRConfigPath)),
+            ('Snapshots: ' + (Get-SRSnapshotDirectory)),
+            ('Snapshots on disk: ' + @($script:Snapshots).Count)
+        )
+        [System.Windows.Forms.Clipboard]::SetText(($lines -join "`r`n"))
+        Show-StudioToast (T 'AboutCopied' 'Version information copied.') $script:P.Green
     } catch {
-        Show-StudioToast ((T 'UpdateCopyFail' 'Could not copy: {0}') -f $_.Exception.Message) $script:P.Red
+        Show-StudioToast ((T 'AboutCopyFail' 'Could not copy: {0}') -f $_.Exception.Message) $script:P.Red
     }
 })
 $aboutHero.Controls.Add($aboutCopy)
+$script:Ui.AboutCopy = $aboutCopy
 
-$aboutLocal = New-StudioSettingsCard -Title (T 'AboutLocalTitle' 'Local by design') -Description (T 'AboutLocalDesc' 'No account, no cloud service and no telemetry.') -Height 180
-$aboutFlow.Controls.Add($aboutLocal)
-$aboutLocalText = New-StudioLabel -Text (T 'AboutLocalText' "Snapshots are plain JSON files in your Windows profile. Browser tabs are read locally, and restore opens apps and folders without rewriting files.`r`n`r`nThe background app keeps capturing while you work. Everything can be inspected, backed up or deleted from this Studio.") -X 20 -Y 64 -Width 740 -Height 100 -Font $script:FontBody -Color $script:P.Muted
-$aboutLocal.Controls.Add($aboutLocalText)
-
-$aboutNew = New-StudioSettingsCard -Title ((T 'WhatsNewTitle' 'What is new in {0}') -f $script:AppVersion) -Description (T 'WhatsNewDesc' 'Fixed text layout in every language, and closed privacy gaps.') -Height 260
-$aboutFlow.Controls.Add($aboutNew)
-$aboutNewText = New-StudioLabel -Text (T 'AboutWhatsNewText' "• Text no longer runs into other controls: labels ellipsize and badges resize in all nine languages.`r`n• Snapshots can be sealed with DPAPI encryption; gzip files now respect retention.`r`n• Virtual desktops are remembered per window and restored when possible.`r`n• Windows from unplugged monitors are mapped onto the current layout, not clamped.`r`n• PuTTY sessions and Remote Desktop targets reconnect directly on restore.`r`n• mpv reports exact playback positions through its IPC pipe.`r`n• Launch ordering rules, a restore preview, snapshot compare and a control pipe.`r`n• Pester tests and GitHub Actions CI build and verify every change.") -X 20 -Y 64 -Width 740 -Height 170 -Font $script:FontBody -Color $script:P.Muted
-$aboutNew.Controls.Add($aboutNewText)
-
-$aboutUpdates = New-StudioSettingsCard -Title (T 'SetUpdates' 'Application updates') -Description (T 'SetUpdatesDesc' 'Check the public GitHub releases page for a newer build.') -Height 240
+# Updates: one status line, one detail line, and the action buttons below them.
+$aboutUpdates = New-StudioSettingsCard -Title (T 'AboutUpdatesTitle' 'Application updates') -Description (T 'AboutUpdatesDesc' 'Checks the public GitHub releases page. Nothing about your snapshots is sent.') -Height 196 -WrapDescription
 $aboutFlow.Controls.Add($aboutUpdates)
-$updateStatus = New-StudioLabel -Text ((T 'AboutVersionLine' 'You are running version {0}. Check for a newer build without leaving the Studio.') -f $script:AppVersion) -X 20 -Y 64 -Width 740 -Height 58 -Font $script:FontBody -Color $script:P.Muted
+
+$updateStatus = New-StudioLabel -Text ((T 'AboutUpdateIdle' 'Check whether a newer release exists.')) -X 20 -Y 74 -Width 700 -Height 22 -Font $script:FontSemibold -Color $script:P.Text
 $aboutUpdates.Controls.Add($updateStatus)
-$updateDetail = New-StudioLabel -Text '' -X 20 -Y 126 -Width 740 -Height 38 -Font $script:FontBodySmall -Color $script:P.Subtle
+$updateDetail = New-StudioLabel -Text '' -X 20 -Y 98 -Width 700 -Height 34 -Font $script:FontBodySmall -Color $script:P.Muted
 $aboutUpdates.Controls.Add($updateDetail)
-$updateCheck = New-StudioButton -Text (T 'BtnCheckUpdates' 'Check for updates') -X 20 -Y 178 -Width 190 -Height 34 -Glyph ''
+$updateCheck = New-StudioButton -Text (T 'AboutCheckUpdates' 'Check for updates') -X 20 -Y 140 -Width 210 -Height 34 -Primary -Glyph ''
 $aboutUpdates.Controls.Add($updateCheck)
-$updateInstall = New-StudioButton -Text (T 'BtnDownloadInstall' 'Download and install') -X 226 -Y 178 -Width 200 -Height 34 -Glyph ''
+$updateInstall = New-StudioButton -Text (T 'AboutUpdateDownload' 'Download and install') -X 240 -Y 140 -Width 210 -Height 34 -Glyph ''
 $updateInstall.Visible = $false
 $aboutUpdates.Controls.Add($updateInstall)
-$updateRelease = New-StudioButton -Text (T 'BtnReleaseNotes' 'Release notes') -X 442 -Y 178 -Width 156 -Height 34 -Glyph ''
-$updateRelease.Visible = $false
+$updateRelease = New-StudioButton -Text (T 'AboutReleasesPage' 'Open releases page') -X 460 -Y 140 -Width 200 -Height 34 -Glyph ''
+$aboutReleaseLink = 'https://github.com/Bilalmesk/session-recovery/releases/latest'
+$updateRelease.Add_Click({
+    $url = if ($null -ne $script:AvailableUpdate -and -not [string]::IsNullOrWhiteSpace([string]$script:AvailableUpdate.ReleaseUrl)) { [string]$script:AvailableUpdate.ReleaseUrl } else { $script:AboutReleaseLink }
+    try { Start-Process $url | Out-Null } catch { }
+})
 $aboutUpdates.Controls.Add($updateRelease)
-
-$aboutData = New-StudioSettingsCard -Title (T 'AboutDataTitle' 'Data & support') -Description (T 'AboutDataDesc' 'Session Recovery is private and local. These are the only places it writes.') -Height 210
-$aboutFlow.Controls.Add($aboutData)
-$aboutDataText = New-StudioLabel -Text '' -X 20 -Y 64 -Width 740 -Height 84 -Font $script:FontMono -Color $script:P.Muted
-$aboutData.Controls.Add($aboutDataText)
-$aboutDataText.Text = ((T 'AboutDataLabelData' 'DATA') + '     ' + (Get-SRRoot)) + "`r`n" + ((T 'AboutDataLabelConfig' 'CONFIG') + '   ' + (Get-SRConfigPath)) + "`r`n" + ((T 'AboutDataLabelSnapshots' 'SNAPSHOTS') + ' ' + (Get-SRSnapshotDirectory))
-$aboutDataOpen = New-StudioButton -Text (T 'BtnOpenData' 'Open data folder') -X 20 -Y 158 -Width 220 -Height 32 -Glyph ([string][char]0xE838)
-$aboutDataOpen.Add_Click({ Open-StudioPath (Get-SRRoot) })
-$aboutData.Controls.Add($aboutDataOpen)
-
-$aboutFooter = New-StudioLabel -Text ((T 'AboutFooterNote' 'Session Recovery {0}  •  MIT licensed  •  made for Windows 10 and 11') -f $script:AppVersion) -X 0 -Y 0 -Width 800 -Height 18 -Font $script:FontBodySmall -Color $script:P.Subtle
-$aboutFooter.Margin = New-Object System.Windows.Forms.Padding(0, 2, 0, 0)
-$aboutFlow.Controls.Add($aboutFooter)
 
 $script:Ui.UpdateStatus = $updateStatus
 $script:Ui.UpdateDetail = $updateDetail
@@ -4953,16 +4950,61 @@ $script:Ui.UpdateCheck = $updateCheck
 $script:Ui.UpdateInstall = $updateInstall
 $script:Ui.UpdateRelease = $updateRelease
 
-function Set-StudioUpdateStatus {
-    param(
-        [string]$Text,
-        [System.Drawing.Color]$Color = $script:P.Muted,
-        [string]$Detail = ''
-    )
-    $script:Ui.UpdateStatus.Text = $Text
-    $script:Ui.UpdateStatus.ForeColor = $Color
+# Installation paths: written on refresh, never baked in at startup.
+$aboutSystem = New-StudioSettingsCard -Title (T 'AboutSystemTitle' 'This installation') -Description (T 'AboutSystemDesc' 'Where the app, its data and its logs live on this PC.') -Height 196 -WrapDescription
+$aboutFlow.Controls.Add($aboutSystem)
+$aboutSystemText = New-StudioLabel -Text '' -X 20 -Y 72 -Width 700 -Height 76 -Font $script:FontMono -Color $script:P.Muted
+$aboutSystem.Controls.Add($aboutSystemText)
+$aboutSystemOpen = New-StudioButton -Text (T 'BtnOpenData' 'Open data folder') -X 20 -Y 154 -Width 220 -Height 32 -Glyph ([string][char]0xE838)
+$aboutSystemOpen.Add_Click({ Open-StudioPath (Get-SRRoot) })
+$aboutSystem.Controls.Add($aboutSystemOpen)
+$aboutSystemLogs = New-StudioButton -Text (T 'BtnOpenLogs' 'Open logs') -X 250 -Y 154 -Width 190 -Height 32 -Glyph ([string][char]0xE838)
+$aboutSystemLogs.Add_Click({ Open-StudioPath (Get-SRLogDirectory) })
+$aboutSystem.Controls.Add($aboutSystemLogs)
+$script:Ui.AboutSystemText = $aboutSystemText
+$script:Ui.AboutGithub = $aboutGithub
+$script:Ui.AboutSystemOpen = $aboutSystemOpen
+$script:Ui.AboutSystemLogs = $aboutSystemLogs
+
+# Privacy: the promise, in one sentence.
+$aboutPrivacy = New-StudioSettingsCard -Title (T 'AboutPrivacyTitle' 'Privacy') -Description (T 'AboutPrivacyText' 'Snapshots, browser tabs and restore history stay in your Windows profile. There is no account, telemetry or cloud service.') -Height 128 -WrapDescription
+$aboutFlow.Controls.Add($aboutPrivacy)
+
+$aboutFooter = New-StudioLabel -Text ((T 'AboutFooterNote' 'Session Recovery {0}  •  MIT licensed  •  made for Windows 10 and 11') -f $script:AppVersion) -X 0 -Y 0 -Width 800 -Height 18 -Font $script:FontBodySmall -Color $script:P.Subtle
+$aboutFooter.Margin = New-Object System.Windows.Forms.Padding(0, 2, 0, 0)
+$aboutFlow.Controls.Add($aboutFooter)
+
+function Update-StudioAboutData {
+    # snapshot list, the version label and the resolved paths, so it is
+    # refreshed whenever the Studio reloads its data.
+    if (-not $script:Ui.AboutFlow) { return }
+    $root = Get-SRRoot
+    $snapshots = Get-SRSnapshotDirectory
+    $count = @($script:Snapshots).Count
+    $bytes = [int64]0
+    foreach ($entry in @($script:Snapshots)) { try { $bytes += [int64](Get-Item -LiteralPath $entry.Path).Length } catch { } }
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add(('{0,-10} {1}' -f (T 'AboutSystemApp' 'PROGRAM'), $script:ScriptDir))
+    $lines.Add(('{0,-10} {1}' -f (T 'AboutSystemData' 'DATA'), $root))
+    $lines.Add(('{0,-10} {1}' -f (T 'AboutDataLabelSnapshots' 'SNAPSHOTS'), $snapshots))
+    $lines.Add(((T 'AboutSystemCount' '{0} snapshot(s)  •  {1}') -f $count, (Format-StudioBytes -Bytes $bytes)))
+    $aboutSystemText.Text = ($lines -join "`r`n")
+    if ($script:Ui.AboutVersion) {
+        $script:Ui.AboutVersion.Text = ((T 'AboutVersionCard' 'Version {0}') -f $script:AppVersion)
+    }
+}
+
+function Set-StudioAboutStatus {
+    param([string]$Status, [string]$Detail = '', [System.Drawing.Color]$Color = [System.Drawing.Color]::Empty)
+    if (-not $script:Ui.UpdateStatus) { return }
+    $script:Ui.UpdateStatus.Text = $Status
+    $script:Ui.UpdateStatus.ForeColor = if ($Color.IsEmpty) { $script:P.Text } else { $Color }
     $script:Ui.UpdateDetail.Text = $Detail
 }
+
+# ---------------------------------------------------------------------------
+# About: update flow
+# ---------------------------------------------------------------------------
 
 function Start-StudioUpdateCheck {
     if ($script:UpdateBusy -or $script:UpdateInstalling) { return }
@@ -4972,8 +5014,7 @@ function Start-StudioUpdateCheck {
     $script:DownloadedUpdate = $null
     $script:Ui.UpdateCheck.Enabled = $false
     $script:Ui.UpdateInstall.Visible = $false
-    $script:Ui.UpdateRelease.Visible = $false
-    Set-StudioUpdateStatus -Text (T 'UpdateChecking' 'Checking GitHub Releases...') -Color $script:P.Accent -Detail (T 'UpdateCheckDetail' 'The check runs in the background and never uploads snapshots.')
+    Set-StudioAboutStatus -Status (T 'AboutUpdateBusy' 'Checking GitHub Releases...') -Detail (T 'UpdateCheckDetail' 'The check runs in the background and never uploads snapshots.') -Color $script:P.Muted
     try {
         Start-StudioWorker -Name 'Update' -Script {
             param($modulePath, $currentVersion, $action, $payload)
@@ -4988,105 +5029,7 @@ function Start-StudioUpdateCheck {
     } catch {
         $script:UpdateBusy = $false
         $script:Ui.UpdateCheck.Enabled = $true
-        Set-StudioUpdateStatus -Text (T 'UpdateCheckStartFail' 'Could not start the update check.') -Color $script:P.Red -Detail $_.Exception.Message
-    }
-}
-
-function Start-StudioUpdateDownload {
-    if ($script:UpdateBusy -or $script:UpdateInstalling) { return }
-    if ($null -ne $script:DownloadedUpdate -and (Test-Path -LiteralPath $script:DownloadedUpdate.MsiPath -PathType Leaf)) {
-        Confirm-StudioUpdateInstall
-        return
-    }
-    if ($null -eq $script:AvailableUpdate) { return }
-    $script:UpdateAction = 'download'
-    $script:UpdateBusy = $true
-    $script:Ui.UpdateCheck.Enabled = $false
-    $script:Ui.UpdateInstall.Enabled = $false
-    Set-StudioUpdateStatus -Text ((T 'UpdateDownloading' 'Downloading version {0}...') -f $script:AvailableUpdate.LatestVersion) -Color $script:P.Accent -Detail (T 'UpdateDownloadDetail' 'The MSI will be checked against the release SHA256 before installation.')
-    try {
-        $payload = $script:AvailableUpdate | ConvertTo-Json -Depth 8 -Compress
-        Start-StudioWorker -Name 'Update' -Script {
-            param($modulePath, $currentVersion, $action, $payload)
-            $ErrorActionPreference = 'Stop'
-            Import-Module $modulePath -Force -ErrorAction Stop | Out-Null
-            if ($action -eq 'check') {
-                Get-SRUpdateInfo -CurrentVersion $currentVersion | ConvertTo-Json -Depth 8 -Compress
-            } else {
-                Save-SRUpdate -UpdateJson $payload | ConvertTo-Json -Depth 6 -Compress
-            }
-        } -Arguments @($modulePath, [string]$script:AppVersion, 'download', $payload)
-    } catch {
-        $script:UpdateBusy = $false
-        $script:Ui.UpdateCheck.Enabled = $true
-        $script:Ui.UpdateInstall.Enabled = $true
-        Set-StudioUpdateStatus -Text (T 'UpdateDownloadStartFail' 'Could not start the update download.') -Color $script:P.Red -Detail $_.Exception.Message
-    }
-}
-
-function Install-StudioUpdatePackage {
-    param(
-        [Parameter(Mandatory = $true)][string]$MsiPath,
-        [string]$Version = ''
-    )
-    if (-not (Test-Path -LiteralPath $MsiPath -PathType Leaf)) {
-        Set-StudioUpdateStatus -Text (T 'UpdatePackageMissing' 'The downloaded update package is missing.') -Color $script:P.Red -Detail (T 'UpdateCheckAgain' 'Check again to download a fresh copy.')
-        return
-    }
-    $script:UpdateInstalling = $true
-    $script:Ui.UpdateCheck.Enabled = $false
-    $script:Ui.UpdateInstall.Enabled = $false
-    Set-StudioUpdateStatus -Text ((T 'UpdateInstalling' 'Starting the Windows installer for {0}...') -f $Version) -Color $script:P.Accent -Detail (T 'UpdateInstallDetail' 'The Studio will close while the update installs. Snapshots and settings are preserved.')
-    [System.Windows.Forms.Application]::DoEvents()
-    try {
-        Start-SRUpdateInstall -MsiPath $MsiPath | Out-Null
-        $form.Close()
-    } catch {
-        $script:UpdateInstalling = $false
-        $script:Ui.UpdateCheck.Enabled = $true
-        $script:Ui.UpdateInstall.Enabled = $true
-        Set-StudioUpdateStatus -Text (T 'UpdateInstallFail' 'The update could not be started.') -Color $script:P.Red -Detail $_.Exception.Message
-    }
-}
-
-function Confirm-StudioUpdateInstall {
-    if ($null -eq $script:DownloadedUpdate) { return }
-    $version = [string]$script:DownloadedUpdate.Version
-    $signed = $false
-    $signedProperty = $script:DownloadedUpdate.PSObject.Properties['Signed']
-    if ($null -ne $signedProperty) {
-        try { $signed = [bool]$signedProperty.Value } catch { $signed = $false }
-    }
-    if ($signed) {
-        $text = ((T 'UpdateConfirmText' "Version {0} is downloaded and its SHA256 hash matches the release.`r`n`r`nInstall now? The Studio will close while the per-user MSI updates the app. Your snapshots, settings and exclusions are kept.") -f $version)
-        $title = (T 'UpdateConfirmTitle' 'Install Session Recovery update')
-        $icon = [System.Windows.Forms.MessageBoxIcon]::Question
-        $defaultButton = [System.Windows.Forms.MessageBoxDefaultButton]::Button1
-    } else {
-        # The hash comes from the same release as the MSI, so it proves only
-        # that the download is intact. Make the missing signature explicit and
-        # default to No instead of silently installing the file.
-        $text = ((T 'UpdateUnsignedConfirmText' "UNSIGNED UPDATE. Version {0} is downloaded and its SHA256 hash matches the release, but the MSI is not digitally signed. Windows cannot verify who published or built this file.`r`n`r`nInstall it only if you trust this GitHub repository and the network you downloaded it from. Install now?") -f $version)
-        $title = (T 'UpdateUnsignedConfirmTitle' 'Install unsigned update?')
-        $icon = [System.Windows.Forms.MessageBoxIcon]::Warning
-        $defaultButton = [System.Windows.Forms.MessageBoxDefaultButton]::Button2
-    }
-    $answer = [System.Windows.Forms.MessageBox]::Show(
-        $text,
-        $title,
-        [System.Windows.Forms.MessageBoxButtons]::YesNo,
-        $icon,
-        $defaultButton)
-    if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) {
-        Install-StudioUpdatePackage -MsiPath $script:DownloadedUpdate.MsiPath -Version $version
-    } else {
-        $detailKey = if ($signed) { 'UpdateReadyDetail' } else { 'UpdateUnsignedReadyDetail' }
-        $detailDefault = if ($signed) {
-            'Click Install update when you are ready. The downloaded package stays in your profile.'
-        } else {
-            'The unsigned package was not installed. You can delete it from your profile or install it later after reviewing the warning.'
-        }
-        Set-StudioUpdateStatus -Text ((T 'UpdateReady' 'Version {0} is ready to install.') -f $version) -Color $(if ($signed) { $script:P.Green } else { $script:P.Amber }) -Detail (T $detailKey $detailDefault)
+        Set-StudioAboutStatus -Status (T 'AboutUpdateFailed' 'Could not check for updates.') -Detail ([string]$_.Exception.Message) -Color $script:P.Red
     }
 }
 
@@ -5104,71 +5047,162 @@ function Complete-StudioUpdateWorker {
     } catch { }
 
     if ($null -eq $data) {
-        $message = if (-not [string]::IsNullOrWhiteSpace([string]$Result.Error)) { [string]$Result.Error } else { (T 'UpdateNoResult' 'The update service returned no result.') }
-        Set-StudioUpdateStatus -Text (T 'UpdateCheckFail' 'Could not check for updates.') -Color $script:P.Red -Detail $message
+        $message = if ($null -ne $Result -and -not [string]::IsNullOrWhiteSpace([string]$Result.Error)) { [string]$Result.Error } else { (T 'UpdateNoResult' 'The update service returned no result.') }
+        Set-StudioAboutStatus -Status (T 'AboutUpdateFailed' 'Could not check for updates.') -Detail $message -Color $script:P.Red
         return
     }
 
     if ($action -eq 'check') {
         if (-not [bool]$data.Ok) {
             $hint = if ($data.PSObject.Properties['Hint'] -and -not [string]::IsNullOrWhiteSpace([string]$data.Hint)) { [string]$data.Hint } else { [string]$data.Error }
-            Set-StudioUpdateStatus -Text (T 'UpdateCheckFail' 'Could not check for updates.') -Color $script:P.Red -Detail $hint
+            Set-StudioAboutStatus -Status (T 'AboutUpdateFailed' 'Could not check for updates.') -Detail $hint -Color $script:P.Red
             return
         }
-        if ([bool]$data.HasUpdate) {
-            if ([string]::IsNullOrWhiteSpace([string]$data.MsiName) -or [string]::IsNullOrWhiteSpace([string]$data.ShaName)) {
-                $script:AvailableUpdate = $data
-                $script:Ui.UpdateRelease.Visible = $true
-                Set-StudioUpdateStatus -Text ((T 'UpdateIncomplete' 'Version {0} is available, but the release is incomplete.') -f $data.LatestVersion) -Color $script:P.Amber -Detail (T 'UpdateIncompleteDetail' 'The release needs both a SessionRecovery MSI and a .msi.sha256 asset before the Studio can install it.')
-                return
-            }
-            $script:AvailableUpdate = $data
-            $script:Ui.UpdateInstall.Text = (T 'BtnDownloadInstall' 'Download and install')
-            $script:Ui.UpdateInstall.Visible = $true
-            $script:Ui.UpdateRelease.Visible = $true
-            Set-StudioUpdateStatus -Text ((T 'UpdateAvailable' 'Version {0} is available.') -f $data.LatestVersion) -Color $script:P.Green -Detail ([string]$data.Name)
-        } else {
-            Set-StudioUpdateStatus -Text (T 'UpdateUpToDate' 'You are up to date.') -Color $script:P.Green -Detail ((T 'UpdateLatest' 'Version {0} is the latest release.') -f $data.LatestVersion)
+        if (-not [bool]$data.HasUpdate) {
+            Set-StudioAboutStatus -Status (T 'AboutUpdateUpToDate' 'You are running the latest release.') -Detail ((T 'UpdateLatest' 'Version {0} is the latest release.') -f $data.LatestVersion) -Color $script:P.Green
+            return
         }
+        $script:AvailableUpdate = $data
+        if ([string]::IsNullOrWhiteSpace([string]$data.MsiName) -or [string]::IsNullOrWhiteSpace([string]$data.ShaName)) {
+            Set-StudioAboutStatus -Status ((T 'UpdateIncomplete' 'Version {0} is available, but the release is incomplete.') -f $data.LatestVersion) -Detail (T 'AboutUpdateIncompleteHint' 'The release is missing the MSI or its SHA256 file.') -Color $script:P.Amber
+            return
+        }
+        $script:Ui.UpdateInstall.Text = (T 'AboutUpdateDownload' 'Download and install')
+        $script:Ui.UpdateInstall.Visible = $true
+        Set-StudioAboutStatus -Status ((T 'AboutUpdateAvailable' 'Version {0} is available.') -f $data.LatestVersion) -Detail ([string]$data.Name) -Color $script:P.Accent
         return
     }
 
     if (-not [bool]$data.Ok) {
-        Set-StudioUpdateStatus -Text (T 'UpdateDownloadFail' 'The update download failed.') -Color $script:P.Red -Detail ([string]$data.Error)
+        Set-StudioAboutStatus -Status (T 'UpdateDownloadFail' 'The update download failed.') -Detail ([string]$data.Error) -Color $script:P.Red
         return
     }
     $script:DownloadedUpdate = $data
     $signed = $false
-    $signedProperty = $data.PSObject.Properties['Signed']
-    if ($null -ne $signedProperty) {
-        try { $signed = [bool]$signedProperty.Value } catch { $signed = $false }
-    }
-    $script:Ui.UpdateInstall.Text = (T 'UpdateInstallButton' 'Install update')
+    if ($null -ne $data.PSObject.Properties['Signed']) { try { $signed = [bool]$data.Signed } catch { } }
+    $script:Ui.UpdateInstall.Text = (T 'AboutUpdateInstall' 'Install update')
     $script:Ui.UpdateInstall.Visible = $true
     if ($signed) {
-        Set-StudioUpdateStatus -Text ((T 'UpdateVerified' 'Version {0} is downloaded and verified.') -f $data.Version) -Color $script:P.Green -Detail (T 'UpdateVerifiedDetail' 'SHA256 verified. The installer keeps your snapshots, settings and exclusions.')
+        Set-StudioAboutStatus -Status ((T 'AboutUpdateReady' 'Version {0} is downloaded and ready.') -f $data.Version) -Detail (T 'UpdateVerifiedDetail' 'SHA256 verified. The installer keeps your snapshots, settings and exclusions.') -Color $script:P.Green
     } else {
-        Set-StudioUpdateStatus -Text ((T 'UpdateUnsignedVerified' 'Version {0} is downloaded, but the MSI is unsigned.') -f $data.Version) -Color $script:P.Amber -Detail (T 'UpdateUnsignedVerifiedDetail' 'SHA256 matches the release, but Windows cannot verify who published this file. The install confirmation explains the risk.')
+        Set-StudioAboutStatus -Status ((T 'UpdateUnsignedVerified' 'Version {0} is downloaded, but the MSI is unsigned.') -f $data.Version) -Detail (T 'UpdateUnsignedVerifiedDetail' 'SHA256 matches the release, but Windows cannot verify who published this file. The install confirmation explains the risk.') -Color $script:P.Amber
     }
     Confirm-StudioUpdateInstall
 }
 
 $updateCheck.Add_Click({ Start-StudioUpdateCheck })
 $updateInstall.Add_Click({ Start-StudioUpdateDownload })
-$updateRelease.Add_Click({
-    if ($null -ne $script:AvailableUpdate -and -not [string]::IsNullOrWhiteSpace([string]$script:AvailableUpdate.ReleaseUrl)) {
-        Start-Process ([string]$script:AvailableUpdate.ReleaseUrl) | Out-Null
+
+function Start-StudioUpdateDownload {
+    if ($script:UpdateBusy -or $script:UpdateInstalling) { return }
+    if ($null -ne $script:DownloadedUpdate -and $null -ne $script:DownloadedUpdate.PSObject.Properties['MsiPath'] -and (Test-Path -LiteralPath $script:DownloadedUpdate.MsiPath -PathType Leaf)) {
+        Confirm-StudioUpdateInstall
+        return
     }
-})
+    if ($null -eq $script:AvailableUpdate) { return }
+    $script:UpdateAction = 'download'
+    $script:UpdateBusy = $true
+    $script:Ui.UpdateCheck.Enabled = $false
+    $script:Ui.UpdateInstall.Enabled = $false
+    Set-StudioAboutStatus -Status ((T 'AboutUpdateDownloading' 'Downloading version {0}...') -f $script:AvailableUpdate.LatestVersion) -Detail (T 'UpdateDownloadDetail' 'The MSI will be checked against the release SHA256 before installation.') -Color $script:P.Muted
+    try {
+        $payload = $script:AvailableUpdate | ConvertTo-Json -Depth 8 -Compress
+        Start-StudioWorker -Name 'Update' -Script {
+            param($modulePath, $currentVersion, $action, $payload)
+            $ErrorActionPreference = 'Stop'
+            Import-Module $modulePath -Force -ErrorAction Stop | Out-Null
+            if ($action -eq 'check') {
+                Get-SRUpdateInfo -CurrentVersion $currentVersion | ConvertTo-Json -Depth 8 -Compress
+            } else {
+                Save-SRUpdate -UpdateJson $payload | ConvertTo-Json -Depth 6 -Compress
+            }
+        } -Arguments @($modulePath, [string]$script:AppVersion, 'download', $payload)
+    } catch {
+        $script:UpdateBusy = $false
+        $script:Ui.UpdateCheck.Enabled = $true
+        $script:Ui.UpdateInstall.Enabled = $true
+        Set-StudioAboutStatus -Status (T 'UpdateDownloadFail' 'The update download failed.') -Detail ([string]$_.Exception.Message) -Color $script:P.Red
+    }
+}
+
+function Install-StudioUpdatePackage {
+    param(
+        [Parameter(Mandatory = $true)][string]$MsiPath,
+        [string]$Version = ''
+    )
+    if (-not (Test-Path -LiteralPath $MsiPath -PathType Leaf)) {
+        Set-StudioAboutStatus -Status (T 'UpdatePackageMissing' 'The downloaded update package is missing.') -Detail (T 'UpdateCheckAgain' 'Check again to download a fresh copy.') -Color $script:P.Red
+        return
+    }
+    $script:UpdateInstalling = $true
+    $script:Ui.UpdateCheck.Enabled = $false
+    $script:Ui.UpdateInstall.Enabled = $false
+    Set-StudioAboutStatus -Status (T 'AboutUpdateInstalling' 'Starting the installer...') -Detail (T 'UpdateInstallDetail' 'The Studio will close while the update installs. Snapshots and settings are preserved.') -Color $script:P.Muted
+    [System.Windows.Forms.Application]::DoEvents()
+    try {
+        Start-SRUpdateInstall -MsiPath $MsiPath | Out-Null
+        $form.Close()
+    } catch {
+        $script:UpdateInstalling = $false
+        $script:Ui.UpdateCheck.Enabled = $true
+        $script:Ui.UpdateInstall.Enabled = $true
+        Set-StudioAboutStatus -Status (T 'UpdateInstallFail' 'The update could not be started.') -Detail ([string]$_.Exception.Message) -Color $script:P.Red
+    }
+}
+
+function Confirm-StudioUpdateInstall {
+    if ($null -eq $script:DownloadedUpdate) { return }
+    $version = [string]$script:DownloadedUpdate.Version
+    $signed = $false
+    if ($null -ne $script:DownloadedUpdate.PSObject.Properties['Signed']) {
+        try { $signed = [bool]$script:DownloadedUpdate.Signed } catch { $signed = $false }
+    }
+    if ($signed) {
+        $text = ((T 'UpdateConfirmText' "Version {0} is downloaded and its SHA256 hash matches the release.`r`n`r`nInstall now? The Studio will close while the per-user MSI updates the app. Your snapshots, settings and exclusions are kept.") -f $version)
+        $title = (T 'UpdateConfirmTitle' 'Install Session Recovery update')
+        $icon = [System.Windows.Forms.MessageBoxIcon]::Question
+        $defaultButton = [System.Windows.Forms.MessageBoxDefaultButton]::Button1
+    } else {
+        # The hash comes from the same release as the MSI, so it proves only
+        # that the download is intact. Default to No for an unsigned build.
+        $text = ((T 'UpdateUnsignedConfirmText' "UNSIGNED UPDATE. Version {0} is downloaded and its SHA256 hash matches the release, but the MSI is not digitally signed. Windows cannot verify who published or built this file.`r`n`r`nInstall it only if you trust this GitHub repository and the network you downloaded it from. Install now?") -f $version)
+        $title = (T 'UpdateUnsignedConfirmTitle' 'Install unsigned update?')
+        $icon = [System.Windows.Forms.MessageBoxIcon]::Warning
+        $defaultButton = [System.Windows.Forms.MessageBoxDefaultButton]::Button2
+    }
+    $answer = [System.Windows.Forms.MessageBox]::Show($text, $title, [System.Windows.Forms.MessageBoxButtons]::YesNo, $icon, $defaultButton)
+    if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) {
+        Install-StudioUpdatePackage -MsiPath $script:DownloadedUpdate.MsiPath -Version $version
+    } elseif ($signed) {
+        Set-StudioAboutStatus -Status ((T 'AboutUpdateReady' 'Version {0} is downloaded and ready.') -f $version) -Detail (T 'UpdateReadyDetail' 'Click Install update when you are ready. The downloaded package stays in your profile.') -Color $script:P.Green
+    } else {
+        Set-StudioAboutStatus -Status ((T 'UpdateUnsignedVerified' 'Version {0} is downloaded, but the MSI is unsigned.') -f $version) -Detail (T 'UpdateUnsignedReadyDetail' 'The unsigned package was not installed. You can delete it from your profile or install it later after reviewing the warning.') -Color $script:P.Amber
+    }
+}
+function Reset-StudioAboutFromCache {
+    # Re-entering the page shows the last known result instead of a blank line.
+    if ($null -ne $script:DownloadedUpdate) {
+        $script:Ui.UpdateInstall.Text = (T 'AboutUpdateInstall' 'Install update')
+        $script:Ui.UpdateInstall.Visible = $true
+        Set-StudioAboutStatus -Status ((T 'AboutUpdateReady' 'Version {0} is downloaded and ready.') -f $script:DownloadedUpdate.Version) -Detail (T 'UpdateReadyDetail' 'Click Install update when you are ready. The downloaded package stays in your profile.') -Color $script:P.Green
+    } elseif ($null -ne $script:AvailableUpdate) {
+        $script:Ui.UpdateInstall.Text = (T 'AboutUpdateDownload' 'Download and install')
+        $script:Ui.UpdateInstall.Visible = $true
+        Set-StudioAboutStatus -Status ((T 'AboutUpdateAvailable' 'Version {0} is available.') -f $script:AvailableUpdate.LatestVersion) -Detail ([string]$script:AvailableUpdate.Name) -Color $script:P.Accent
+    } elseif (-not $script:UpdateBusy) {
+        Set-StudioAboutStatus -Status (T 'AboutUpdateIdle' 'Check whether a newer release exists.') -Detail ''
+    }
+}
 
 function Layout-StudioAbout {
     if (-not $script:Ui.AboutFlow) { return }
-    $width = Set-StudioVerticalStack -Panel $script:Ui.AboutFlow -Cards @($aboutHero, $aboutUpdates, $aboutLocal, $aboutNew, $aboutData, $aboutFooter) -Padding 24 -BottomPadding 24 -MinWidth 620
-    $aboutLocalText.Width = $width - 40
-    $aboutNewText.Width = $width - 40
-    $updateStatus.Width = $width - 40
-    $updateDetail.Width = $width - 40
-    $aboutDataText.Width = $width - 40
+    $width = Set-StudioVerticalStack -Panel $script:Ui.AboutFlow -Cards @($aboutHero, $aboutUpdates, $aboutSystem, $aboutPrivacy, $aboutFooter) -Padding 24 -BottomPadding 24 -MinWidth 620
+    $aboutTagline.Width = [Math]::Max(180, $width - 128)
+    $aboutName.Width = [Math]::Max(180, $width - 128)
+    $inner = [Math]::Max(200, $width - 40)
+    $updateStatus.Width = $inner
+    $updateDetail.Width = $inner
+    $aboutSystemText.Width = $inner
     $aboutFooter.Width = $width
 }
 
@@ -5451,6 +5485,7 @@ function Show-StudioPage {
         'RecoveryKit' { if ($firstShow) { Update-StudioKitSummary } }
         'Settings' { if (-not $script:SettingsLoaded) { Load-StudioSettings } }
         'Diagnostics' { if ($firstShow -or $script:DiagnosticsDirty) { Start-StudioDiagnosticsRefresh } }
+        'About' { Update-StudioAboutData; if ($firstShow) { Reset-StudioAboutFromCache } }
     }
     if ($firstShow) {
         # WinForms can scroll a fresh AutoScroll panel to the last control

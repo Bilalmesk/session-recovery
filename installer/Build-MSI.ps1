@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
     Build-MSI.ps1
     Builds the per-user Session Recovery MSI with WiX.
@@ -13,7 +13,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string]$Version = '3.0.2',
+    [string]$Version = '3.0.3',
     [switch]$NoRestore
 )
 
@@ -75,8 +75,20 @@ Session Recovery {0}
 Reopen the apps, File Explorer folders and browser tabs that were open before
 a crash, power cut or unexpected restart.
 
-What's new in 3.0.2
+What's new in 3.0.3
 -------------------
+- The About page was rebuilt. It now shows the version, the installation
+  folders, current snapshot count, privacy notes, and the update check, each in
+  a single card with labels that fit in all nine languages.
+- Fixed the About page's update check: its status line no longer stays blank,
+  the buttons no longer move the page when clicked, and the release note text
+  is gone.
+- The wheel now scrolls the page everywhere, not only over the gaps between
+  cards, and a click never scrolls the page out from under you.
+- Version 3.0.3.
+
+Also in 3.0.2
+-------------
 - Pages no longer jump when you click something in them. Windows scrolled a
   control into view as soon as it took focus, which moved Settings and About by
   hundreds of pixels on the first click, including Check for updates.
