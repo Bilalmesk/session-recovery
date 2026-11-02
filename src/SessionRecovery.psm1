@@ -2194,6 +2194,58 @@ function Get-SRTitleKey {
     return $value.Trim().ToLowerInvariant()
 }
 
+function Select-SRRecentlyClosedUrls {
+    # Pairs closed-tab records with the URL that was closed.
+    #
+    # Chromium's session file stores a timestamp per closed tab but not which
+    # URL was in it. The only honest reconstruction is: for each close, find
+    # the URL whose *last* visit is closest before it, within a short window.
+    # One record yields at most one URL, so closing three tabs can mark at most
+    # three URLs, and a day of browsing can never be swept in.
+    #
+    # Visits before $FloorMs and closes before it are ignored, so old history
+    # is never treated as recently closed.
+    param(
+        [object[]]$Visits = @(),
+        [long[]]$ClosedAtMs = @(),
+        [long]$NowMs = 0,
+        [int]$WindowMinutes = 30
+    )
+    $result = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    if ($null -eq $ClosedAtMs -or @($ClosedAtMs).Count -eq 0 -or $WindowMinutes -le 0) { return $result }
+    $windowMs = [int64]($WindowMinutes * 60000)
+    if ($NowMs -le 0) { $NowMs = ([DateTimeOffset]::UtcNow).ToUnixTimeMilliseconds() }
+    $floorMs = [int64]$NowMs - $windowMs
+
+    # Last visit per URL. Older visits tell us nothing about what is open now.
+    $lastVisit = @{}
+    foreach ($visit in @($Visits)) {
+        if ($null -eq $visit) { continue }
+        $url = [string]$visit.url
+        if ([string]::IsNullOrWhiteSpace($url)) { continue }
+        $ms = [int64]0
+        try { $ms = [int64]$visit.lastMs } catch { continue }
+        if ($ms -le 0) { continue }
+        $key = $url.ToLowerInvariant()
+        if (-not $lastVisit.ContainsKey($key) -or $ms -gt [int64]$lastVisit[$key]) { $lastVisit[$key] = $ms }
+    }
+
+    foreach ($recordMs in @($ClosedAtMs | Sort-Object)) {
+        $recordMs = [int64]$recordMs
+        if ($recordMs -lt $floorMs) { continue }
+        $bestKey = $null
+        $bestMs = [long]0
+        foreach ($key in @($lastVisit.Keys)) {
+            $visitMs = [int64]$lastVisit[$key]
+            if ($visitMs -gt $recordMs) { continue }
+            if (($recordMs - $visitMs) -gt $windowMs) { continue }
+            if ($visitMs -gt $bestMs) { $bestMs = $visitMs; $bestKey = $key }
+        }
+        if ($null -ne $bestKey) { [void]$result.Add($bestKey) }
+    }
+    return $result
+}
+
 function Get-SRChromiumHistoryTabs {
     # Chromium keeps its live tab list in the session files, but the moment a
     # tab is closed the file only records a "tab closed" event. Reading the
@@ -2206,12 +2258,18 @@ function Get-SRChromiumHistoryTabs {
         [IntPtr]$WindowHandle = [IntPtr]::Zero,
         [datetime]$BrowserStartTime = [datetime]::MinValue,
         [int]$LookbackHours = 24,
-        [bool]$AllowApproximate = $true
+        [bool]$AllowApproximate = $true,
+        # A tab only counts as "closed shortly before the capture" when its
+        # close record is this recent. Wider than a snapshot interval, so a
+        # tab closed between two snapshots is still caught, but narrow enough
+        # that yesterday's browsing never comes back.
+        [int]$ReopenWindowMinutes = 30
     )
 
     $empty = [pscustomobject]@{ tabs = @(); source = 'none'; file = $null; fileAt = $null; approximate = $false; windowOrder = @() }
     if (-not $AllowApproximate) { return $empty }
     if (-not ('SessionRecovery.ChromiumHistory' -as [type])) { return $empty }
+    $now = Get-Date
 
     $session = Get-SRChromiumSessionTabs -ProfileDirectory $ProfileDirectory
     $liveTabs = @($session.tabs)
@@ -2234,58 +2292,79 @@ function Get-SRChromiumHistoryTabs {
         if ([int64]::TryParse([string]$value, [ref]$number) -and $number -gt 0) { $closedAt.Add($number) }
     }
     $closedSorted = @($closedAt.ToArray() | Sort-Object)
-    $closedUsed = New-Object 'System.Collections.Generic.HashSet[int]'
 
     $liveUrls = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     foreach ($tab in $liveTabs) { [void]$liveUrls.Add(([string]$tab.url).ToLowerInvariant()) }
 
-    # One entry per URL, oldest first. An entry is "open" when the live session
-    # still holds it, or when a tab-closed record proves it survived its last
-    # visit. Everything else was closed by the user.
-    $byUrl = [ordered]@{}
-    foreach ($entry in @($history | Sort-Object -Property LastVisit)) {
+    # Only closes inside this window count as "closed shortly before the
+    # capture". A tab closed hours ago is history, not something to reopen.
+    $recentFloorMs = ([DateTimeOffset]$now.ToUniversalTime()).ToUnixTimeMilliseconds() - [int64]($ReopenWindowMinutes * 60000)
+    $usableClosed = @($closedSorted | Where-Object { [int64]$_ -ge $recentFloorMs })
+
+    # One row per URL, keyed by its *last* visit. Pairing per URL (not per
+    # visit) is what bounds the result: closing three tabs can mark at most
+    # three URLs as recently closed, so the merge cannot sweep in a day of
+    # browsing.
+    $lastVisitByUrl = [ordered]@{}
+    foreach ($entry in @($history)) {
         if ($null -eq $entry) { continue }
         $url = [string]$entry.Url
         if (-not (Test-SRRestorableUrl -Url $url)) { continue }
         $key = $url.ToLowerInvariant()
         $visited = [DateTime]::MinValue
         try { $visited = [datetime]$entry.LastVisit } catch { }
-        $open = $liveUrls.Contains($key)
-        if (-not $open -and $closedSorted.Count -gt 0 -and $visited -ne [DateTime]::MinValue) {
-            $rowMs = ([datetimeoffset]$visited.ToUniversalTime()).ToUnixTimeMilliseconds()
-            for ($index = 0; $index -lt $closedSorted.Count; $index++) {
-                if ($closedUsed.Contains($index)) { continue }
-                if ($closedSorted[$index] -gt $rowMs) { $open = $true; [void]$closedUsed.Add($index); break }
+        if ($visited -eq [DateTime]::MinValue) { continue }
+        $rowMs = ([datetimeoffset]$visited.ToUniversalTime()).ToUnixTimeMilliseconds()
+        if (-not $lastVisitByUrl.Contains($key)) {
+            $lastVisitByUrl[$key] = [pscustomobject]@{
+                url    = $url
+                title  = [string]$entry.Title
+                lastMs = $rowMs
             }
+        } elseif ($rowMs -gt [int64]$lastVisitByUrl[$key].lastMs) {
+            $lastVisitByUrl[$key].lastMs = $rowMs
+            if (-not [string]::IsNullOrWhiteSpace([string]$entry.Title)) { $lastVisitByUrl[$key].title = [string]$entry.Title }
         }
-        if (-not $byUrl.Contains($key)) {
-            $byUrl[$key] = [pscustomobject]@{
-                matchUrl    = $key
-                url         = $url
-                title       = [string]$entry.Title
-                open        = $open
-                occurrences = 0
-                firstSeen   = $visited
-            }
+    }
+
+    # A URL was closed recently when a closed-tab record lands shortly after
+    # its last visit: the user visited it, then closed that tab.
+    $visitRows = New-Object System.Collections.Generic.List[object]
+    foreach ($key in @($lastVisitByUrl.Keys)) {
+        $visitRows.Add([pscustomobject]@{ url = [string]$lastVisitByUrl[$key].url; lastMs = [int64]$lastVisitByUrl[$key].lastMs })
+    }
+    $recentlyClosed = Select-SRRecentlyClosedUrls -Visits $visitRows.ToArray() -ClosedAtMs @($usableClosed) `
+        -NowMs ([DateTimeOffset]$now.ToUniversalTime()).ToUnixTimeMilliseconds() -WindowMinutes $ReopenWindowMinutes
+
+    $byUrl = [ordered]@{}
+    foreach ($key in @($lastVisitByUrl.Keys)) {
+        $row = $lastVisitByUrl[$key]
+        $isLive = $liveUrls.Contains($key)
+        $byUrl[$key] = [pscustomobject]@{
+            matchUrl       = $key
+            url            = [string]$row.url
+            title          = [string]$row.title
+            open           = [bool]$isLive
+            recentlyClosed = [bool](-not $isLive -and $recentlyClosed.Contains($key))
+            occurrences    = 1
+            firstSeen      = ([DateTimeOffset]::FromUnixTimeMilliseconds([int64]$row.lastMs)).UtcDateTime
         }
-        $row = $byUrl[$key]
-        $row.occurrences = [int]$row.occurrences + 1
-        if ($open) { $row.open = $true }
-        if ([string]::IsNullOrWhiteSpace([string]$row.title) -and -not [string]::IsNullOrWhiteSpace([string]$entry.Title)) { $row.title = [string]$entry.Title }
     }
     foreach ($liveTab in $liveTabs) {
         $key = ([string]$liveTab.url).ToLowerInvariant()
         if (-not $byUrl.Contains($key)) {
             $byUrl[$key] = [pscustomobject]@{
-                matchUrl    = $key
-                url         = [string]$liveTab.url
-                title       = [string]$liveTab.title
-                open        = $true
-                occurrences = 1
-                firstSeen   = [DateTime]::UtcNow
+                matchUrl       = $key
+                url            = [string]$liveTab.url
+                title          = [string]$liveTab.title
+                open           = $true
+                recentlyClosed = $false
+                occurrences    = 1
+                firstSeen      = [DateTime]::UtcNow
             }
         } else {
             $byUrl[$key].open = $true
+            $byUrl[$key].recentlyClosed = $false
             if ([string]::IsNullOrWhiteSpace([string]$byUrl[$key].title)) { $byUrl[$key].title = [string]$liveTab.title }
         }
     }
@@ -2293,14 +2372,15 @@ function Get-SRChromiumHistoryTabs {
     $result = New-Object System.Collections.Generic.List[object]
     foreach ($row in @($byUrl.Values)) {
         $result.Add([pscustomobject]@{
-            url         = [string]$row.url
-            title       = [string]$row.title
-            pinned      = $false
-            windowId    = 0
-            matchUrl    = [string]$row.matchUrl
-            occurrences = [int]$row.occurrences
-            firstSeen   = $row.firstSeen
-            open        = [bool]$row.open
+            url            = [string]$row.url
+            title          = [string]$row.title
+            pinned         = $false
+            windowId       = 0
+            matchUrl       = [string]$row.matchUrl
+            occurrences    = [int]$row.occurrences
+            firstSeen      = $row.firstSeen
+            open           = [bool]$row.open
+            recentlyClosed = [bool]$row.recentlyClosed
         })
     }
 
@@ -2491,7 +2571,12 @@ function Get-SRChromiumTabs {
                             -WindowHandle $WindowHandle -BrowserStartTime $BrowserStartTime `
                             -LookbackHours $HistoryLookbackHours -AllowApproximate $AllowApproximate
                         if ($null -ne $rebuild -and @($rebuild.tabs).Count -gt 0) {
-                            $closedOnly = @($rebuild.tabs | Where-Object { -not [bool]$_.open })
+                            # Only tabs whose close record is recent are added
+                            # back. Everything else in the rebuild is either
+                            # still open or was closed long ago.
+                            $closedOnly = @($rebuild.tabs | Where-Object {
+                                ($null -ne $_.PSObject.Properties['recentlyClosed']) -and [bool]$_.recentlyClosed
+                            })
                             if ($closedOnly.Count -gt 0) {
                                 $merged = @(Merge-SRClosedTabExtras -Tabs $clean.ToArray() -Extra $closedOnly)
                             }
@@ -3014,6 +3099,87 @@ function Get-SRVlcRecentMedia {
     return $result
 }
 
+function Get-SRMediaPositionEstimate {
+    # Estimates the playback position for a file that is currently open.
+    #
+    # Dead reckoning is the only thing available when a player never writes its
+    # position, but it is only valid over a short gap. A player left open for
+    # hours, or a background app that was not running between snapshots, says
+    # nothing about how much was actually watched. Advancing by the whole gap
+    # pushed the estimate hours or days ahead and the duration clamp then
+    # parked it at the end of the file, which is exactly the "off by a long
+    # time" symptom. Every path here is therefore bounded by MaxDriftMinutes.
+    param(
+        [datetime]$Now = (Get-Date),
+        # Previous estimate for this player, or $null when there is none.
+        $Previous = $null,
+        # Whether Previous belongs to this same file AND the same player run.
+        [bool]$SameSession = $false,
+        # The player's exact saved position, when it exposes one.
+        [long]$SavedPositionMs = 0,
+        # The player honours its own saved position on relaunch.
+        [bool]$SavedPositionTrusted = $false,
+        # Process start time of the player, or MinValue.
+        [datetime]$PlayerStartTime = [datetime]::MinValue,
+        [int]$MaxDriftMinutes = 30
+    )
+
+    $maxDrift = [timespan]::FromMinutes([Math]::Max(1, $MaxDriftMinutes))
+    $anchorMs = [long]0
+    $anchorAt = $Now
+    $anchoredFromPlayer = $false
+
+    if ($SameSession -and $null -ne $Previous) {
+        $previousAnchorMs = [long]0
+        $previousAnchorAt = $Now
+        try {
+            $previousAnchorMs = [long][double]$Previous.anchorPositionMs
+            $previousAnchorAt = [datetime]::Parse([string]$Previous.anchorAt, [System.Globalization.CultureInfo]::InvariantCulture)
+        } catch {
+            $previousAnchorMs = [long]0
+            $previousAnchorAt = $Now
+        }
+        if ($previousAnchorAt -eq [datetime]::MinValue -or $previousAnchorAt -gt $Now) { $previousAnchorAt = $Now }
+        $anchorMs = $previousAnchorMs
+        $anchorAt = $previousAnchorAt
+        if (($Now - $anchorAt) -gt $maxDrift) { $anchorAt = $Now - $maxDrift }
+
+        if ($SavedPositionTrusted -and $SavedPositionMs -gt $anchorMs) {
+            $anchorMs = $SavedPositionMs
+            $anchorAt = $Now
+            if ($null -ne $Previous -and $null -ne $Previous.PSObject.Properties['lastSeenAt']) {
+                try {
+                    $lastSeen = [datetime]::Parse([string]$Previous.lastSeenAt, [System.Globalization.CultureInfo]::InvariantCulture)
+                    if ($lastSeen -gt [datetime]::MinValue -and $lastSeen -le $Now) { $anchorAt = $lastSeen }
+                } catch { }
+            }
+            if (($Now - $anchorAt) -gt $maxDrift) { $anchorAt = $Now - $maxDrift }
+            $anchoredFromPlayer = $true
+        }
+    } else {
+        # First sighting of this file, or the player restarted. A process that
+        # has only just started really did begin playing at around its own
+        # start time; one that has been up for hours tells us nothing at all.
+        if ($PlayerStartTime -ne [datetime]::MinValue -and (($Now - $PlayerStartTime) -le $maxDrift)) {
+            $anchorAt = $PlayerStartTime
+        }
+        if ($SavedPositionTrusted -and $SavedPositionMs -gt 0) {
+            $anchorMs = $SavedPositionMs
+            $anchoredFromPlayer = $true
+        }
+    }
+
+    $positionMs = $anchorMs + [int64](($Now - $anchorAt).TotalMilliseconds)
+    if ($positionMs -lt 0) { $positionMs = 0 }
+
+    return [pscustomobject]@{
+        PositionMs = [int64]$positionMs
+        AnchorMs   = [int64]$anchorMs
+        AnchorAt   = $anchorAt
+        FromPlayer = [bool]$anchoredFromPlayer
+    }
+}
+
 function Get-SRMediaDurationSeconds {
     param([string]$Path)
     if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) { return $null }
@@ -3109,6 +3275,12 @@ function Get-SRMediaPlayerMedia {
     $now = Get-Date
     $seenPlayer = $false
 
+    # Dead reckoning is only meaningful over a short gap. If the player sat
+    # open for hours, or the background app was not running between two
+    # snapshots, the elapsed time says nothing about how much was actually
+    # watched. Get-SRMediaPositionEstimate bounds every advance by this.
+    $MaxPositionDriftMinutes = 30
+
     # Earliest start time among running VLC processes. A newly started VLC
     # usually begins playing its file immediately, so this anchors the very
     # first snapshot after the player launches.
@@ -3186,35 +3358,16 @@ function Get-SRMediaPlayerMedia {
             $lastSeen -gt [datetime]::MinValue -and $lastSeen -lt $now -and
             ($vlcStart -eq [datetime]::MinValue -or $vlcStart -le $lastSeen))
 
-        if ($sameSession) {
-            # Continue from the previous snapshot's estimate.
-            try {
-                $anchorMs = [long][double]$entry.anchorPositionMs
-                $anchorAt = [datetime]::Parse([string]$entry.anchorAt, [System.Globalization.CultureInfo]::InvariantCulture)
-            } catch {
-                $anchorMs = [long]0
-                $anchorAt = $lastSeen
-            }
-            if ($resumeMode -eq 1 -and $savedMs -gt $anchorMs) {
-                # VLC auto-resumes and knows a newer exact position.
-                $anchorMs = $savedMs
-                $anchorAt = $lastSeen
-            }
-            if ($resumeMode -eq 1 -and $savedMs -gt 0) { $anchoredFromVlc = $true }
-        } else {
-            # First sighting, or VLC restarted since the last snapshot: anchor
-            # to the player's own start time. With VLC auto-resume enabled the
-            # saved position is where playback actually continued from.
-            if ($vlcStart -gt [datetime]::MinValue -and $vlcStart -lt $now) { $anchorAt = $vlcStart }
-            if ($resumeMode -eq 1 -and $savedMs -gt 0) {
-                $anchorMs = $savedMs
-                $anchoredFromVlc = $true
-            }
-        }
+        $estimate = Get-SRMediaPositionEstimate -Now $now -Previous $entry -SameSession $sameSession `
+            -SavedPositionMs $savedMs -SavedPositionTrusted ($resumeMode -eq 1) `
+            -PlayerStartTime $vlcStart -MaxDriftMinutes $MaxPositionDriftMinutes
+        $positionMs = [int64]$estimate.PositionMs
+        $anchorMs = [int64]$estimate.AnchorMs
+        $anchorAt = $estimate.AnchorAt
+        $anchoredFromVlc = [bool]$estimate.FromPlayer
 
         if ($null -eq $durationSeconds) { $durationSeconds = Get-SRMediaDurationSeconds -Path $file }
 
-        $positionMs = $anchorMs + [int64](($now - $anchorAt).TotalMilliseconds)
         if ($positionMs -lt 0) { $positionMs = 0 }
         if ($null -ne $durationSeconds -and $durationSeconds -gt 0) {
             $capMs = [int64]($durationSeconds * 1000) - 5000
@@ -3284,21 +3437,14 @@ function Get-SRMediaPlayerMedia {
 
         $entry = $null
         if ($state.players.ContainsKey([string]$player.key)) { $entry = $state.players[[string]$player.key] }
-        $anchorMs = [long]0
-        $anchorAt = $now
-        if ($null -ne $entry -and [string]$entry.file -eq $file) {
-            try {
-                $anchorMs = [long][double]$entry.anchorPositionMs
-                $anchorAt = [datetime]::Parse([string]$entry.anchorAt, [System.Globalization.CultureInfo]::InvariantCulture)
-                if ($anchorAt -ge $now -or $anchorAt -eq [datetime]::MinValue) { $anchorAt = $now; $anchorMs = 0 }
-            } catch {
-                $anchorMs = [long]0
-                $anchorAt = $now
-            }
-        }
+        $sameSession = ($null -ne $entry -and [string]$entry.file -eq $file)
+        $estimate = Get-SRMediaPositionEstimate -Now $now -Previous $entry -SameSession $sameSession `
+            -MaxDriftMinutes $MaxPositionDriftMinutes
+        $anchorMs = [int64]$estimate.AnchorMs
+        $anchorAt = $estimate.AnchorAt
 
         $durationSeconds = Get-SRMediaDurationSeconds -Path $file
-        $positionMs = $anchorMs + [int64](($now - $anchorAt).TotalMilliseconds)
+        $positionMs = [int64]$estimate.PositionMs
         if ($positionMs -lt 0) { $positionMs = 0 }
         $estimated = $true
         if ($null -ne $mpvExact -and $null -ne $mpvExact.Position -and [double]$mpvExact.Position -ge 0) {

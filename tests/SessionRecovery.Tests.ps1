@@ -1881,6 +1881,128 @@ Describe 'Browser tab restore uses the captured snapshot' {
     }
 }
 
+Describe 'Select-SRRecentlyClosedUrls' {
+    BeforeAll {
+        $script:nowMs = ([DateTimeOffset]::UtcNow).ToUnixTimeMilliseconds()
+        function M([int]$MinutesAgo) { $script:nowMs - [int64]($MinutesAgo * 60000) }
+    }
+
+    It 'returns only the tabs that were actually closed, not a day of history' {
+        # Twenty pages visited over ten hours, then three tabs closed in the
+        # last few minutes. The old code restored all twenty.
+        $visits = @()
+        for ($i = 1; $i -le 20; $i++) {
+            $visits += [pscustomobject]@{ url = "https://site.example/page$i"; lastMs = (M (600 - ($i * 25))) }
+        }
+        $visits += [pscustomobject]@{ url = 'https://site.example/page1'; lastMs = (M 12) }
+        $visits += [pscustomobject]@{ url = 'https://site.example/page2'; lastMs = (M 8) }
+        $visits += [pscustomobject]@{ url = 'https://site.example/page3'; lastMs = (M 4) }
+
+        $closed = @((M 11), (M 7), (M 3))
+        $result = Select-SRRecentlyClosedUrls -Visits $visits -ClosedAtMs $closed -NowMs $script:nowMs -WindowMinutes 30
+
+        $result.Count | Should -Be 3 -Because 'three closes can mark at most three URLs'
+        $result | Should -Contain 'https://site.example/page1'
+        $result | Should -Contain 'https://site.example/page2'
+        $result | Should -Contain 'https://site.example/page3'
+    }
+
+    It 'ignores old history when nothing was closed recently' {
+        $visits = @(1..20 | ForEach-Object { [pscustomobject]@{ url = "https://old.example/p$_"; lastMs = (M 600) } })
+        $result = Select-SRRecentlyClosedUrls -Visits $visits -ClosedAtMs @((M 5)) -NowMs $script:nowMs -WindowMinutes 30
+        $result.Count | Should -Be 0 -Because 'no visit falls inside the reopen window'
+    }
+
+    It 'ignores closes older than the window' {
+        $visits = @([pscustomobject]@{ url = 'https://x.example/a'; lastMs = (M 200) })
+        $result = Select-SRRecentlyClosedUrls -Visits $visits -ClosedAtMs @((M 180)) -NowMs $script:nowMs -WindowMinutes 30
+        $result.Count | Should -Be 0
+    }
+
+    It 'pairs each close with the nearest preceding visit' {
+        $visits = @(
+            [pscustomobject]@{ url = 'https://x.example/near'; lastMs = (M 10) }
+            [pscustomobject]@{ url = 'https://x.example/farther'; lastMs = (M 25) }
+        )
+        $result = Select-SRRecentlyClosedUrls -Visits $visits -ClosedAtMs @((M 9)) -NowMs $script:nowMs -WindowMinutes 30
+        $result.Count | Should -Be 1
+        $result | Should -Contain 'https://x.example/near'
+    }
+
+    It 'uses the last visit when a URL was visited several times' {
+        $visits = @(
+            [pscustomobject]@{ url = 'https://x.example/a'; lastMs = (M 300) }
+            [pscustomobject]@{ url = 'https://x.example/a'; lastMs = (M 5) }
+        )
+        $result = Select-SRRecentlyClosedUrls -Visits $visits -ClosedAtMs @((M 4)) -NowMs $script:nowMs -WindowMinutes 30
+        $result.Count | Should -Be 1
+    }
+
+    It 'returns nothing without visits or without closes' {
+        (Select-SRRecentlyClosedUrls -Visits @() -ClosedAtMs @((M 5)) -NowMs $script:nowMs -WindowMinutes 30).Count |
+            Should -Be 0
+        (Select-SRRecentlyClosedUrls -Visits @([pscustomobject]@{ url = 'https://x.example/a'; lastMs = (M 5) }) `
+            -ClosedAtMs @() -NowMs $script:nowMs -WindowMinutes 30).Count | Should -Be 0
+    }
+}
+
+Describe 'Get-SRMediaPositionEstimate' {
+    BeforeAll { $script:now = Get-Date }
+
+    It 'does not advance by the whole life of a long-running player' {
+        # The reported bug: VLC had been open for days, so anchoring to its
+        # process start put the position at the end of the file.
+        $estimate = Get-SRMediaPositionEstimate -Now $script:now -SameSession $false `
+            -PlayerStartTime $script:now.AddDays(-3)
+        $estimate.PositionMs | Should -Be 0 -Because 'a three-day-old process says nothing about this file'
+    }
+
+    It 'anchors to a player that only just started' {
+        $estimate = Get-SRMediaPositionEstimate -Now $script:now -SameSession $false `
+            -PlayerStartTime $script:now.AddSeconds(-5)
+        [Math]::Round($estimate.PositionMs / 1000) | Should -Be 5
+    }
+
+    It 'trusts an exact saved position when the player resumes by itself' {
+        $estimate = Get-SRMediaPositionEstimate -Now $script:now -SameSession $false `
+            -SavedPositionMs 600000 -SavedPositionTrusted $true -PlayerStartTime $script:now.AddSeconds(-3)
+        [Math]::Round($estimate.PositionMs / 1000) | Should -Be 603
+        $estimate.FromPlayer | Should -BeTrue
+    }
+
+    It 'advances normally across a short gap' {
+        $previous = [pscustomobject]@{
+            anchorPositionMs = 600000
+            anchorAt         = $script:now.AddMinutes(-3).ToString('o')
+            lastSeenAt       = $script:now.AddMinutes(-3).ToString('o')
+        }
+        $estimate = Get-SRMediaPositionEstimate -Now $script:now -Previous $previous -SameSession $true
+        [Math]::Round($estimate.PositionMs / 1000) | Should -Be 780
+    }
+
+    It 'caps the advance when snapshots are hours apart' {
+        $previous = [pscustomobject]@{
+            anchorPositionMs = 600000
+            anchorAt         = $script:now.AddHours(-8).ToString('o')
+            lastSeenAt       = $script:now.AddHours(-8).ToString('o')
+        }
+        $estimate = Get-SRMediaPositionEstimate -Now $script:now -Previous $previous -SameSession $true
+        $seconds = [Math]::Round($estimate.PositionMs / 1000)
+        $seconds | Should -BeGreaterThan 600
+        $seconds | Should -BeLessOrEqual (600 + (30 * 60) + 5) -Because 'drift is capped at 30 minutes'
+    }
+
+    It 'never returns a negative position when the anchor is in the future' {
+        $previous = [pscustomobject]@{
+            anchorPositionMs = 600000
+            anchorAt         = $script:now.AddHours(2).ToString('o')
+            lastSeenAt       = $script:now.AddHours(2).ToString('o')
+        }
+        $estimate = Get-SRMediaPositionEstimate -Now $script:now -Previous $previous -SameSession $true
+        $estimate.PositionMs | Should -BeGreaterOrEqual 0
+    }
+}
+
 Describe 'Closed Chromium tabs are merged back into the capture' {
     It 'adds a closed tab that the snapshot does not have' {
         $captured = @(

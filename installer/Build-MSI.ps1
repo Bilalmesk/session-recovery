@@ -13,7 +13,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string]$Version = '3.0.4',
+    [string]$Version = '3.0.5',
     [switch]$NoRestore
 )
 
@@ -75,8 +75,26 @@ Session Recovery {0}
 Reopen the apps, File Explorer folders and browser tabs that were open before
 a crash, power cut or unexpected restart.
 
-What's new in 3.0.4
+What's new in 3.0.5
 -------------------
+- Restoring a snapshot no longer reopens tabs you closed long ago. Closing
+  three tabs used to bring back everything visited that day, because every
+  History row in the lookback window was treated as a closed tab. A tab is
+  now only added back when a close record proves it was closed in the last
+  half hour, and each record can claim at most one tab.
+- Media position restore no longer lands a long way from where you were. The
+  estimate advanced by the whole time the player had been open, so VLC left
+  running for hours put the position days ahead and the duration clamp then
+  parked it at the end of the file. Playback is now advanced by at most 30
+  minutes across a gap, so a snapshot taken while the app was not running no
+  longer turns idle time into watched time.
+- The same rule applies to mpv, MPC-HC, MPC-BE, PotPlayer and Windows Media
+  Player, and an anchor timestamp from the future can no longer produce a
+  negative position.
+- Version 3.0.5.
+
+Also in 3.0.4
+-------------
 - Restore no longer opens every tab twice after a crash. When the browser is
   already running, restore reads its live session, compares it with the
   snapshot, and reopens only the tabs that are genuinely missing. A restore
@@ -90,7 +108,6 @@ What's new in 3.0.4
   The default stays the strict full strip.
 - Tab matching ignores tracking parameters, host case and trailing slashes, so
   the same page is recognised even when the snapshot stores a redacted URL.
-- Version 3.0.4.
 
 Also in 3.0.3
 -------------

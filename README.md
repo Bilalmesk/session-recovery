@@ -6,7 +6,7 @@
 
 ![Windows 10/11](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?logo=windows&logoColor=white)
 ![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-5391FE?logo=powershell&logoColor=white)
-![Version](https://img.shields.io/badge/version-3.0.4-8B5CF6)
+![Version](https://img.shields.io/badge/version-3.0.5-8B5CF6)
 ![Local only](https://img.shields.io/badge/privacy-100%25%20local-22C55E)
 
 [Install](#-install) · [Restore](#-restore) · [Configure](#%EF%B8%8F-configure) · [Troubleshoot](#-troubleshooting) · [Uninstall](#-uninstall)
@@ -260,6 +260,8 @@ Use the Studio **Settings** page, or edit `%LOCALAPPDATA%\SessionRecovery\config
 - **Export** saves a snapshot as plain JSON; **Import** validates and adds one back to the timeline.
 - **Search** matches app names, folders, browsers, tab titles, URLs and dates.
 - **VLC:** the playing file and position are recorded. After a crash, playback resumes up to one snapshot interval *early* (never ahead). Estimated positions show a `~` in the Studio. Only local files are seeked; discs, streams and playlists just open the player.
+- **Position accuracy:** the position is estimated, because players do not write it during playback. The estimate advances by at most 30 minutes between snapshots (fewer with the default 3-minute interval), so time the player spent idle — or time the background app was not running — is never counted as watched. A player left open for days no longer makes restore jump to the end of the file.
+- **Recently closed tabs:** a tab closed in the last 30 minutes is added back to the capture, because Chromium records the close but not which URL it held. Each close record can claim only one URL, so closing three tabs adds three tabs back, never a day of browsing history. Turn off `captureApproximateTabs` to disable this entirely.
 
 </details>
 
