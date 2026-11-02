@@ -162,42 +162,42 @@ Describe 'String tables' {
 # Pure helpers
 # ---------------------------------------------------------------------------
 
-Describe 'Redact-SRUrl' {
+Describe 'Protect-SRUrl' {
     It 'strips query strings and fragments' {
-        Redact-SRUrl 'https://example.com/page?token=secret#frag' | Should -Be 'https://example.com/page'
+        Protect-SRUrl 'https://example.com/page?token=secret#frag' | Should -Be 'https://example.com/page'
     }
 
     It 'keeps clean URLs untouched' {
-        Redact-SRUrl 'https://example.com/page' | Should -Be 'https://example.com/page'
+        Protect-SRUrl 'https://example.com/page' | Should -Be 'https://example.com/page'
     }
 
     It 'survives empty input' {
-        Redact-SRUrl '' | Should -Be ''
+        Protect-SRUrl '' | Should -Be ''
     }
 
     Context 'Safe mode' {
         It 'keeps ordinary deep-link parameters' {
-            Redact-SRUrl -Url 'https://docs.example.com/d/1?page=3&tab=notes' -Mode Safe |
+            Protect-SRUrl -Url 'https://docs.example.com/d/1?page=3&tab=notes' -Mode Safe |
                 Should -Be 'https://docs.example.com/d/1?page=3&tab=notes'
         }
 
         It 'blanks credential-looking values but keeps the parameter name' {
-            Redact-SRUrl -Url 'https://docs.example.com/d/1?token=abc&hl=en' -Mode Safe |
+            Protect-SRUrl -Url 'https://docs.example.com/d/1?token=abc&hl=en' -Mode Safe |
                 Should -Be 'https://docs.example.com/d/1?token=REDACTED&hl=en'
         }
 
         It 'does not redact an ordinary short parameter such as a timestamp' {
-            Redact-SRUrl -Url 'https://video.example.com/watch?v=abc&t=42' -Mode Safe |
+            Protect-SRUrl -Url 'https://video.example.com/watch?v=abc&t=42' -Mode Safe |
                 Should -Be 'https://video.example.com/watch?v=abc&t=42'
         }
 
         It 'always drops the fragment, which is where OAuth tokens live' {
-            Redact-SRUrl -Url 'https://example.com/cb?code=x#access_token=secret' -Mode Safe |
+            Protect-SRUrl -Url 'https://example.com/cb?code=x#access_token=secret' -Mode Safe |
                 Should -Not -Match 'access_token=secret'
         }
 
         It 'still strips everything in the default Full mode' {
-            Redact-SRUrl -Url 'https://example.com/page?page=3' | Should -Be 'https://example.com/page'
+            Protect-SRUrl -Url 'https://example.com/page?page=3' | Should -Be 'https://example.com/page'
         }
     }
 }
@@ -1878,6 +1878,61 @@ Describe 'Browser tab restore uses the captured snapshot' {
         $state.Count | Should -Be 1
         @($state[0].tabs).Count | Should -Be 3 -Because 'the snapshot is the source of truth for a restore'
         @($state[0].snapshotTabs).Count | Should -Be 3
+    }
+}
+
+Describe 'Module export hygiene' {
+    It 'exports only approved verbs so Import-Module never warns' {
+        # An unapproved verb (Redact-SRUrl used to be one) makes PowerShell
+        # print a naming warning on every import, which users saw at logon.
+        $approved = @(Get-Verb | ForEach-Object { $_.Verb })
+        $bad = @(Get-Module SessionRecovery | ForEach-Object { $_.ExportedCommands.Keys } |
+            Where-Object { $approved -notcontains ($_ -split '-')[0] })
+        $bad | Should -Be @()
+    }
+
+    It 'still exports the renamed URL protection command' {
+        Get-Command Protect-SRUrl -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
+    }
+}
+
+Describe 'Auto snapshot resource guards' {
+    It 'pauses only on battery power at or below the threshold' {
+        Test-SRLowBattery -OnBattery $true -BatteryPercent 15 -ThresholdPercent 20 | Should -BeTrue
+        Test-SRLowBattery -OnBattery $true -BatteryPercent 20 -ThresholdPercent 20 | Should -BeTrue
+        Test-SRLowBattery -OnBattery $true -BatteryPercent 50 -ThresholdPercent 20 | Should -BeFalse
+        Test-SRLowBattery -OnBattery $false -BatteryPercent 5 -ThresholdPercent 20 | Should -BeFalse
+        Test-SRLowBattery -OnBattery $true -BatteryPercent -1 -ThresholdPercent 20 | Should -BeFalse -Because 'an unknown reading never pauses'
+        Test-SRLowBattery -OnBattery $true -BatteryPercent 5 -ThresholdPercent 0 | Should -BeFalse -Because 'threshold 0 disables the guard'
+    }
+
+    It 'pauses only when free space is below the minimum' {
+        Test-SRLowDiskSpace -FreeSpaceMB 100 -MinimumMB 200 | Should -BeTrue
+        Test-SRLowDiskSpace -FreeSpaceMB 500 -MinimumMB 200 | Should -BeFalse
+        Test-SRLowDiskSpace -FreeSpaceMB 100 -MinimumMB 0 | Should -BeFalse -Because '0 disables the guard'
+        Test-SRLowDiskSpace -FreeSpaceMB -1 -MinimumMB 200 | Should -BeFalse -Because 'an unknown reading never pauses'
+    }
+
+    It 'defaults both guards on with sensible thresholds' {
+        $config = Get-SRDefaultConfig
+        $config.pauseOnLowBattery | Should -BeTrue
+        $config.lowBatteryPercent | Should -Be 20
+        $config.minFreeDiskSpaceMB | Should -Be 200
+    }
+
+    It 'blocks when the disk minimum cannot be met' {
+        $config = Get-SRDefaultConfig
+        $config.minFreeDiskSpaceMB = [int]::MaxValue
+        $reason = Test-SRAutoSnapshotBlocked -Config $config
+        $reason | Should -Not -BeNullOrEmpty
+        $reason | Should -Match 'low on space'
+    }
+
+    It 'stays quiet when both guards are disabled' {
+        $config = Get-SRDefaultConfig
+        $config.pauseOnLowBattery = $false
+        $config.minFreeDiskSpaceMB = 0
+        Test-SRAutoSnapshotBlocked -Config $config | Should -BeNullOrEmpty
     }
 }
 

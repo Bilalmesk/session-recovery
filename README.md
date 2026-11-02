@@ -232,6 +232,9 @@ Use the Studio **Settings** page, or edit `%LOCALAPPDATA%\SessionRecovery\config
 | `captureApproximateTabs` | `true` | UI Automation/history fallback (marked approximate) |
 | `captureMediaPlayers` | `true` | Capture the VLC file and estimated position |
 | `tabHistoryLookbackHours` | `24` | History fallback window |
+| `pauseOnLowBattery` | `true` | Skip auto snapshots when on battery at or below `lowBatteryPercent` |
+| `lowBatteryPercent` | `20` | Battery charge threshold for the low-battery pause (`0` disables it) |
+| `minFreeDiskSpaceMB` | `200` | Skip auto snapshots when the snapshot drive has less free space (`0` disables it) |
 | `showNotifications` | `true` | Tray balloons and toasts |
 | `startWithWindows` | `true` | Create the Startup shortcut |
 | `desktopShortcut` | `true` | Create the desktop shortcut |

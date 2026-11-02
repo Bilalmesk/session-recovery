@@ -1209,6 +1209,9 @@ function Get-SRDefaultConfig {
         language                = 'en'
         pauseWhenIdleMinutes    = 15
         pauseOnFullscreen       = $true
+        pauseOnLowBattery       = $true
+        lowBatteryPercent       = 20
+        minFreeDiskSpaceMB      = 200
         captureHotkey           = $true
         autoExportFolder        = ''
         captureThumbnails       = $false
@@ -4416,7 +4419,7 @@ function Test-SRSensitiveQueryName {
         $Name -match '(?i)(token|secret|password|passwd|api_?key|signature|credential)')
 }
 
-function Redact-SRUrl {
+function Protect-SRUrl {
     # Keeps credentials out of snapshots.
     #   Full (default) strips the whole query string and fragment, so nothing
     #                  site-specific survives and deep links are lost.
@@ -4462,7 +4465,7 @@ function ConvertTo-SRTabMatchKey {
     # and a trailing slash or host-case difference must not create a duplicate.
     param([string]$Url)
     if ([string]::IsNullOrWhiteSpace($Url)) { return '' }
-    $value = Redact-SRUrl -Url ([string]$Url).Trim() -Mode 'Full'
+    $value = Protect-SRUrl -Url ([string]$Url).Trim() -Mode 'Full'
     $value = $value -replace '/+$', ''
     return $value.ToLowerInvariant()
 }
@@ -4505,7 +4508,7 @@ function Invoke-SRUrlRedaction {
             foreach ($tab in @($profile.tabs)) {
                 $urlProperty = $tab.PSObject.Properties['url']
                 if ($null -ne $urlProperty) {
-                    $tab.url = Redact-SRUrl -Url ([string]$urlProperty.Value) -Mode $Mode
+                    $tab.url = Protect-SRUrl -Url ([string]$urlProperty.Value) -Mode $Mode
                 }
             }
         }
@@ -4520,7 +4523,7 @@ function Invoke-SRUrlRedaction {
         foreach ($argument in @($argsProperty.Value)) {
             $value = [string]$argument
             if ($value -match '^(?i)https?://') {
-                $redacted.Add((Redact-SRUrl -Url $value -Mode $Mode))
+                $redacted.Add((Protect-SRUrl -Url $value -Mode $Mode))
             } else {
                 $redacted.Add($value)
             }
@@ -5654,7 +5657,7 @@ function New-SRSnapshot {
             foreach ($profile in @($browser.profiles)) {
                 foreach ($tab in @($profile.tabs)) {
                     $urlProperty = $tab.PSObject.Properties['url']
-                    if ($null -ne $urlProperty) { $tab.url = Redact-SRUrl -Url ([string]$urlProperty.Value) -Mode $redactMode }
+                    if ($null -ne $urlProperty) { $tab.url = Protect-SRUrl -Url ([string]$urlProperty.Value) -Mode $redactMode }
                 }
             }
         }
@@ -5665,7 +5668,7 @@ function New-SRSnapshot {
             foreach ($argument in @($argsProperty.Value)) {
                 $value = [string]$argument
                 if ($value -match '^(?i)https?://') {
-                    $redactedArgs.Add((Redact-SRUrl -Url $value -Mode $redactMode))
+                    $redactedArgs.Add((Protect-SRUrl -Url $value -Mode $redactMode))
                 } else {
                     $redactedArgs.Add($value)
                 }
@@ -5887,6 +5890,111 @@ public static class SRForeground {
 $script:SRScreens = $null
 $script:SRForegroundChecked = $null
 
+function Test-SRLowBattery {
+    # Pure decision core for the battery guard, so the policy is testable
+    # without a battery. Only a machine that is clearly on battery, with a
+    # readable charge at or below the threshold, counts as low. An unknown
+    # reading (desktops, some VMs) never pauses anything.
+    param(
+        [bool]$OnBattery,
+        [int]$BatteryPercent,
+        [int]$ThresholdPercent
+    )
+    if (-not $OnBattery) { return $false }
+    if ($ThresholdPercent -le 0) { return $false }
+    if ($BatteryPercent -lt 0 -or $BatteryPercent -gt 100) { return $false }
+    return ($BatteryPercent -le $ThresholdPercent)
+}
+
+function Test-SRLowDiskSpace {
+    # Pure decision core for the disk guard. A minimum of 0 (or below) turns
+    # the guard off; an unknown reading (-1) never pauses anything.
+    param(
+        [int64]$FreeSpaceMB,
+        [int]$MinimumMB
+    )
+    if ($MinimumMB -le 0) { return $false }
+    if ($FreeSpaceMB -lt 0) { return $false }
+    return ($FreeSpaceMB -lt $MinimumMB)
+}
+
+function Get-SRFreeDiskSpaceMB {
+    # Free space, in megabytes, on the drive that holds the snapshots.
+    param([Parameter(Mandatory = $true)][string]$Path)
+    try {
+        $full = [System.IO.Path]::GetFullPath($Path)
+        $root = [System.IO.Path]::GetPathRoot($full)
+        if ([string]::IsNullOrWhiteSpace($root)) { return $null }
+        $drive = New-Object System.IO.DriveInfo($root)
+        if (-not $drive.IsReady) { return $null }
+        return [int64]($drive.AvailableFreeSpace / 1MB)
+    } catch {
+        return $null
+    }
+}
+
+function Test-SRAutoSnapshotBlocked {
+    # Resource guards for automatic snapshots, in the same spirit as the idle
+    # and fullscreen pauses: protect the machine rather than capture over it.
+    # Manual captures (tray, hotkey) run regardless.
+    #
+    #   Low battery: on battery power at or below lowBatteryPercent, stop
+    #                writing until the machine is plugged in. A crash on a
+    #                dying battery is still covered by the suspend checkpoint.
+    #   Low disk:    less than minFreeDiskSpaceMB free on the snapshot drive,
+    #                so capture can never be the thing that fills the disk.
+    # Returns '' when nothing blocks, otherwise a human-readable reason.
+    param([Parameter(Mandatory = $true)][object]$Config)
+
+    # Battery guard.
+    $pauseOnBattery = $true
+    try {
+        $property = $Config.PSObject.Properties['pauseOnLowBattery']
+        if ($null -ne $property) { $pauseOnBattery = [bool]$property.Value }
+    } catch { }
+    if ($pauseOnBattery) {
+        $threshold = 20
+        try {
+            $property = $Config.PSObject.Properties['lowBatteryPercent']
+            if ($null -ne $property) { $threshold = [int]$property.Value }
+        } catch { }
+        $status = $null
+        try {
+            Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+            $status = [System.Windows.Forms.SystemInformation]::PowerStatus
+        } catch { }
+        if ($null -ne $status) {
+            $onBattery = ($status.PowerLineStatus -eq [System.Windows.Forms.PowerLineStatus]::Offline)
+            $charge = [int]$status.BatteryChargeStatus
+            # 128 = NoSystemBattery, 255 = Unknown. Neither is "on battery".
+            $hasBattery = (($charge -band 128) -eq 0) -and ($charge -ne 255)
+            $percent = -1
+            try {
+                $fraction = [double]$status.BatteryLifePercent
+                if ($fraction -ge 0 -and $fraction -le 1) { $percent = [int][Math]::Round($fraction * 100) }
+            } catch { }
+            if ($onBattery -and $hasBattery -and (Test-SRLowBattery -OnBattery $onBattery -BatteryPercent $percent -ThresholdPercent $threshold)) {
+                return ('battery is low ({0}%)' -f $percent)
+            }
+        }
+    }
+
+    # Disk guard.
+    $minimumMB = 200
+    try {
+        $property = $Config.PSObject.Properties['minFreeDiskSpaceMB']
+        if ($null -ne $property) { $minimumMB = [int]$property.Value }
+    } catch { }
+    if ($minimumMB -gt 0) {
+        $freeMB = Get-SRFreeDiskSpaceMB -Path $script:SRSnapshotDir
+        if ($null -ne $freeMB -and (Test-SRLowDiskSpace -FreeSpaceMB $freeMB -MinimumMB $minimumMB)) {
+            return ('the snapshot drive is low on space ({0:N0} MB free)' -f $freeMB)
+        }
+    }
+
+    return ''
+}
+
 function Save-SRSnapshot {
     param(
         [switch]$Force,
@@ -5913,6 +6021,11 @@ function Save-SRSnapshot {
         try { $pauseFullscreen = [bool]$config.pauseOnFullscreen } catch { }
         if ($pauseFullscreen -and (Test-SRFullscreenActive)) {
             Write-SRLog -Level DEBUG -Message 'Skipped snapshot: a fullscreen app is in front.'
+            return $null
+        }
+        $resourceReason = Test-SRAutoSnapshotBlocked -Config $config
+        if (-not [string]::IsNullOrEmpty($resourceReason)) {
+            Write-SRLog -Level DEBUG -Message ('Skipped snapshot: {0}.' -f $resourceReason)
             return $null
         }
     }
