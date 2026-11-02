@@ -1193,6 +1193,9 @@ function Get-SRDefaultConfig {
         snapshotIntervalMinutes = 3
         keepSnapshots           = 48
         keepSnapshotDays        = 0
+        tieredRetention         = $true
+        keepHourlyDays          = 7
+        keepDailyDays           = 30
         promptOnLogon           = 'CrashOnly'
         maxRestoreAgeHours      = 72
         restoreBrowsers         = $true
@@ -5565,7 +5568,23 @@ function Invoke-SRStorageCleanup {
     $beforeBytes = [int64]0
     foreach ($file in $beforeFiles) { $beforeBytes += [int64]$file.Length }
     try {
-        Remove-OldSRSnapshots -Keep ([int]$config.keepSnapshots) -MaxAgeDays ([int]$config.keepSnapshotDays) -Pinned @($config.pinnedSnapshots)
+        $tiered = $false
+        try {
+            $tieredProperty = $config.PSObject.Properties['tieredRetention']
+            if ($null -ne $tieredProperty) { $tiered = [bool]$tieredProperty.Value }
+        } catch { }
+        $hourlyDays = 7
+        try {
+            $hourlyProperty = $config.PSObject.Properties['keepHourlyDays']
+            if ($null -ne $hourlyProperty) { $hourlyDays = [int]$hourlyProperty.Value }
+        } catch { }
+        $dailyDays = 30
+        try {
+            $dailyProperty = $config.PSObject.Properties['keepDailyDays']
+            if ($null -ne $dailyProperty) { $dailyDays = [int]$dailyProperty.Value }
+        } catch { }
+        Remove-OldSRSnapshots -Keep ([int]$config.keepSnapshots) -MaxAgeDays ([int]$config.keepSnapshotDays) `
+            -Pinned @($config.pinnedSnapshots) -Tiered $tiered -HourlyDays $hourlyDays -DailyDays $dailyDays
     } catch {
         Write-SRLog -Level WARN -Message ("Retention during cleanup failed: {0}" -f $_.Exception.Message)
     }
@@ -5861,11 +5880,89 @@ function New-SRSnapshot {
     return $snapshot
 }
 
+function Get-SRTieredRetention {
+    # Decides which snapshot names survive retention, in tiers. Pure: takes
+    # file-like records (Name + LastWriteTime) and returns a keep-set, so the
+    # policy is unit-testable without a filesystem.
+    #
+    # A flat keep-count is the weakest link in the pipeline: 48 files at a
+    # 3-minute interval cover only ~2.4 hours, so a crash the morning after a
+    # late night has nothing to restore. Tiering keeps the same recent depth
+    # and then thins history instead of deleting it:
+    #
+    #   recent   newest KeepRecent files, untouched (the crash window)
+    #   hourly   newest snapshot per clock hour for the last HourlyDays days
+    #   daily    newest snapshot per calendar day for the last DailyDays days
+    #
+    # Files older than every tier are removed. Pinned snapshots never reach
+    # this function - the caller holds them out.
+    param(
+        [object[]]$Files = @(),
+        [int]$KeepRecent = 48,
+        [int]$HourlyDays = 7,
+        [int]$DailyDays = 30,
+        [datetime]$Now = (Get-Date)
+    )
+    $keep = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $ordered = @(@($Files) | Where-Object { $null -ne $_ } | Sort-Object -Property LastWriteTime -Descending)
+    if (@($ordered).Count -eq 0) { return [pscustomobject]@{ Keep = $keep } }
+
+    # Tier 1: the recent window, by count so a burst of activity never
+    # shrinks the crash window below the configured depth.
+    $recentCount = [Math]::Max(1, $KeepRecent)
+    for ($i = 0; $i -lt @($ordered).Count -and $i -lt $recentCount; $i++) {
+        [void]$keep.Add([string]$ordered[$i].Name)
+    }
+
+    $older = @($ordered | Select-Object -Skip $recentCount)
+    if ($older.Count -eq 0) { return [pscustomobject]@{ Keep = $keep } }
+
+    # Tier 2: hourly. Newest snapshot per clock-hour inside the window. The
+    # hours the recent window already represents are seeded so the tier never
+    # adds a second representative for an hour the recent set covers.
+    $hourlyCut = if ($HourlyDays -gt 0) { $Now.AddDays(-1 * $HourlyDays) } else { $null }
+    $dailyCut = if ($DailyDays -gt 0) { $Now.AddDays(-1 * $DailyDays) } else { $null }
+
+    $remaining = New-Object System.Collections.Generic.List[object]
+    if ($null -ne $hourlyCut) {
+        $seenHours = New-Object 'System.Collections.Generic.HashSet[string]'
+        foreach ($file in $ordered) {
+            if (-not $keep.Contains([string]$file.Name)) { continue }
+            [void]$seenHours.Add($file.LastWriteTime.ToString('yyyyMMdd-HH'))
+        }
+        foreach ($file in $ordered) {
+            if ($keep.Contains([string]$file.Name)) { continue }
+            if ($file.LastWriteTime -lt $hourlyCut) { $remaining.Add($file); continue }
+            $hourKey = $file.LastWriteTime.ToString('yyyyMMdd-HH')
+            if ($seenHours.Add($hourKey)) { [void]$keep.Add([string]$file.Name) }
+        }
+    } else {
+        foreach ($file in $ordered) { if (-not $keep.Contains([string]$file.Name)) { $remaining.Add($file) } }
+    }
+
+    # Tier 3: daily. Newest snapshot per calendar day inside the window.
+    if ($null -ne $dailyCut -and $remaining.Count -gt 0) {
+        $seenDays = New-Object 'System.Collections.Generic.HashSet[string]'
+        foreach ($file in @($remaining.ToArray() | Sort-Object -Property LastWriteTime -Descending)) {
+            if ($file.LastWriteTime -lt $dailyCut) { continue }
+            $dayKey = $file.LastWriteTime.ToString('yyyyMMdd')
+            if ($seenDays.Add($dayKey)) { [void]$keep.Add([string]$file.Name) }
+        }
+    }
+
+    return [pscustomobject]@{ Keep = $keep }
+}
+
 function Remove-OldSRSnapshots {
     param(
         [int]$Keep = 48,
         [int]$MaxAgeDays = 0,
-        [string[]]$Pinned = @()
+        [string[]]$Pinned = @(),
+        # Tiered retention keeps hourly and daily representatives beyond the
+        # recent window instead of deleting everything older than it.
+        [bool]$Tiered = $false,
+        [int]$HourlyDays = 7,
+        [int]$DailyDays = 30
     )
     if ($Keep -lt 1) { $Keep = 1 }
 
@@ -5892,6 +5989,17 @@ function Remove-OldSRSnapshots {
     }
 
     $removable = @($files | Where-Object { -not $pinnedNames.Contains($_.Name) })
+
+    if ($Tiered) {
+        $plan = Get-SRTieredRetention -Files $removable -KeepRecent $Keep -HourlyDays $HourlyDays -DailyDays $DailyDays
+        foreach ($file in $removable) {
+            if (-not $plan.Keep.Contains($file.Name)) {
+                Remove-SRSnapshotAndThumbnails -File $file
+            }
+        }
+        return
+    }
+
     if ($removable.Count -le $Keep) { return }
     foreach ($file in $removable[$Keep..($removable.Count - 1)]) {
         Remove-SRSnapshotAndThumbnails -File $file

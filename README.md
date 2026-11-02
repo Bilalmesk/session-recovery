@@ -222,7 +222,10 @@ Use the Studio **Settings** page, or edit `%LOCALAPPDATA%\SessionRecovery\config
 | Setting | Default | Meaning |
 |---|---|---|
 | `snapshotIntervalMinutes` | `3` | Minutes between snapshots |
-| `keepSnapshots` | `48` | Max files (~2.4 h at 3 min) |
+| `keepSnapshots` | `48` | Recent window: the newest files are always kept in full |
+| `tieredRetention` | `true` | Beyond the recent window, thin history to hourly then daily representatives instead of deleting |
+| `keepHourlyDays` | `7` | Days kept at one snapshot per clock hour |
+| `keepDailyDays` | `30` | Days kept at one snapshot per calendar day |
 | `keepSnapshotDays` | `0` | Age cleanup in days (`0` = off) |
 | `promptOnLogon` | `CrashOnly` | `CrashOnly`, `Always`, `Never` |
 | `maxRestoreAgeHours` | `72` | Ignore older snapshots in the automatic prompt |

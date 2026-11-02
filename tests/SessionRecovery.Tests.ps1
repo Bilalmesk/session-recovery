@@ -1936,6 +1936,108 @@ Describe 'Auto snapshot resource guards' {
     }
 }
 
+Describe 'Tiered retention' {
+    BeforeAll {
+        $script:tierNow = Get-Date
+        function New-TierFile {
+            param([string]$Name, [datetime]$At)
+            [pscustomobject]@{ Name = $Name; LastWriteTime = $At }
+        }
+    }
+
+    It 'keeps a daily representative beyond the recent window' {
+        # The core reason for tiers: flat retention deleted everything older
+        # than the recent window, so a crash the morning after a late night
+        # had nothing to restore.
+        $files = @()
+        for ($i = 0; $i -lt 60; $i++) {
+            $files += New-TierFile -Name "burst$i" -At ($script:tierNow.AddMinutes(-2 * $i))
+        }
+        $files += New-TierFile -Name 'yesterday' -At ($script:tierNow.AddDays(-1).AddMinutes(-30))
+        $plan = Get-SRTieredRetention -Files $files -KeepRecent 48 -HourlyDays 7 -DailyDays 30 -Now $script:tierNow
+        $plan.Keep.Contains('yesterday') | Should -BeTrue
+        $plan.Keep.Count | Should -Be 49
+    }
+
+    It 'keeps one snapshot per clock hour inside the hourly window' {
+        # Pinned to a fixed base time so the windows can never straddle an
+        # hour boundary depending on when the suite runs.
+        $base = [datetime]::new(2026, 6, 15, 14, 35, 0)
+        $files = @()
+        for ($i = 0; $i -lt 48; $i++) { $files += New-TierFile -Name "recent$i" -At $base.AddMinutes(-1 * $i) }
+        # Five files inside hour 10 yesterday, four inside hour 09 two days
+        # ago - built from explicit clock times so nothing drifts.
+        for ($i = 0; $i -lt 5; $i++) {
+            $files += New-TierFile -Name "h1-$i" -At ([datetime]::new(2026, 6, 14, 10, (50 - 10 * $i), 0))
+        }
+        for ($i = 0; $i -lt 4; $i++) {
+            $files += New-TierFile -Name "h2-$i" -At ([datetime]::new(2026, 6, 13, 9, (40 - 10 * $i), 0))
+        }
+        $plan = Get-SRTieredRetention -Files $files -KeepRecent 48 -HourlyDays 7 -DailyDays 30 -Now $base
+        (@($files | Where-Object { $_.Name -like 'h1-*' -and $plan.Keep.Contains($_.Name) }).Count) | Should -Be 1
+        (@($files | Where-Object { $_.Name -like 'h2-*' -and $plan.Keep.Contains($_.Name) }).Count) | Should -Be 1
+    }
+
+    It 'removes what is older than every tier and never double-keeps an hour' {
+        # All fifty recent files sit inside one fixed clock hour, so the two
+        # beyond the recent window share an hour the recent set covers.
+        $base = [datetime]::new(2026, 6, 15, 10, 59, 0)
+        $files = @()
+        for ($i = 0; $i -lt 50; $i++) { $files += New-TierFile -Name "r$i" -At $base.AddMinutes(-1 * $i) }
+        $files += New-TierFile -Name 'ancient' -At $base.AddDays(-60)
+        $plan = Get-SRTieredRetention -Files $files -KeepRecent 48 -HourlyDays 7 -DailyDays 30 -Now $base
+        $plan.Keep.Contains('ancient') | Should -BeFalse
+        $plan.Keep.Count | Should -Be 48 -Because 'the spillover files share an hour the recent window covers'
+    }
+
+    It 'reduces to the flat keep-count when tiers are off' {
+        $files = @()
+        for ($i = 0; $i -lt 60; $i++) { $files += New-TierFile -Name "f$i" -At ($script:tierNow.AddMinutes(-30 * $i)) }
+        $plan = Get-SRTieredRetention -Files $files -KeepRecent 48 -HourlyDays 0 -DailyDays 0 -Now $script:tierNow
+        $plan.Keep.Count | Should -Be 48
+    }
+
+    It 'tiers real files on disk and never touches pinned ones' {
+        $dir = Get-SRSnapshotDirectory
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $names = @()
+        for ($i = 0; $i -lt 50; $i++) {
+            $name = ('session-test{0:d3}.json' -f $i)
+            $path = Join-Path $dir $name
+            Set-Content -LiteralPath $path -Value '{}' -Encoding ASCII
+            (Get-Item -LiteralPath $path).LastWriteTime = $script:tierNow.AddMinutes(-3 * $i)
+            $names += $name
+        }
+        $oldName = 'session-testold.json'
+        $oldPath = Join-Path $dir $oldName
+        Set-Content -LiteralPath $oldPath -Value '{}' -Encoding ASCII
+        (Get-Item -LiteralPath $oldPath).LastWriteTime = $script:tierNow.AddDays(-2)
+        $pinnedName = 'session-testpinned.json'
+        $pinnedPath = Join-Path $dir $pinnedName
+        Set-Content -LiteralPath $pinnedPath -Value '{}' -Encoding ASCII
+        (Get-Item -LiteralPath $pinnedPath).LastWriteTime = $script:tierNow.AddDays(-2)
+
+        Remove-OldSRSnapshots -Keep 48 -MaxAgeDays 0 -Pinned @($pinnedName) -Tiered $true -HourlyDays 7 -DailyDays 30
+
+        (Test-Path -LiteralPath $oldPath) | Should -BeTrue -Because 'the daily tier keeps it'
+        (Test-Path -LiteralPath $pinnedPath) | Should -BeTrue -Because 'pinned files are never touched'
+        (@(Get-ChildItem -LiteralPath $dir -Filter 'session-test*.json').Count) | Should -Be 50
+        foreach ($n in @($names | Select-Object -First 48)) {
+            (Test-Path -LiteralPath (Join-Path $dir $n)) | Should -BeTrue
+        }
+        foreach ($n in @($names | Select-Object -Skip 48)) {
+            (Test-Path -LiteralPath (Join-Path $dir $n)) | Should -BeFalse -Because 'beyond the recent window with no tier to save them'
+        }
+    }
+
+    It 'defaults tiers on with 7 hourly and 30 daily days' {
+        $config = Get-SRDefaultConfig
+        $config.tieredRetention | Should -BeTrue
+        $config.keepHourlyDays | Should -Be 7
+        $config.keepDailyDays | Should -Be 30
+    }
+}
+
 Describe 'Unsaved-work radar' {
     It 'detects the dirty markers real editors put in titles' {
         Test-SRTitleUnsavedWork -Title ([string][char]0x25CF + ' main.ts - repo - Visual Studio Code') | Should -BeTrue
