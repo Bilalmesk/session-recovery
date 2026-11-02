@@ -259,8 +259,13 @@ Use the Studio **Settings** page, or edit `%LOCALAPPDATA%\SessionRecovery\config
 - **Pin** keeps a snapshot forever and doesn't count toward `keepSnapshots`.
 - **Export** saves a snapshot as plain JSON; **Import** validates and adds one back to the timeline.
 - **Search** matches app names, folders, browsers, tab titles, URLs and dates.
-- **VLC:** the playing file and position are recorded. After a crash, playback resumes up to one snapshot interval *early* (never ahead). Estimated positions show a `~` in the Studio. Only local files are seeked; discs, streams and playlists just open the player.
-- **Position accuracy:** the position is estimated, because players do not write it during playback. The estimate advances by at most 30 minutes between snapshots (fewer with the default 3-minute interval), so time the player spent idle — or time the background app was not running — is never counted as watched. A player left open for days no longer makes restore jump to the end of the file.
+- **Supported players:** VLC, mpv, MPC-HC, MPC-BE, PotPlayer and Windows Media Player. The playing file is always recorded; the position only when the player really stores one.
+- **Where an exact position comes from**, verified by playing a real file in each player and inspecting what it wrote:
+  - **mpv** — `watch_later/<MD5 of the file path>`, key `start=`. Exact. mpv writes it on a clean quit, which is the position playback resumed from.
+  - **MPC-HC** — `HKCU\Software\MPC-HC\MPC-HC\MediaHistory`, `Filename` + `FilePosition` in milliseconds. Exact, but only when MPC-HC's own *Remember file position* option is on.
+  - **VLC, MPC-BE, PotPlayer, Windows Media Player** — no usable stored position. VLC does not write one while playing (its resume file was unchanged across many minutes of playback, and `times` was `-1` for the file), MPC-BE's resume flag never produces position data, and PotPlayer's `Positions` key holds only window geometry.
+- **When no position is known** the snapshot says *position not recorded* in the Studio and restore opens the file from the start. That is deliberate: an earlier version derived the position from how long the player had been running, and reported 4:51 for a file actually at 1:24:29. Opening near the start beats seeking to a confidently wrong time.
+- **Known positions** advance by at most 30 minutes between snapshots, so idle time — or time the background app was not running — is never counted as watched. Only local files are seeked; discs, streams and playlists just open the player.
 - **Recently closed tabs:** a tab closed in the last 30 minutes is added back to the capture, because Chromium records the close but not which URL it held. Each close record can claim only one URL, so closing three tabs adds three tabs back, never a day of browsing history. Turn off `captureApproximateTabs` to disable this entirely.
 
 </details>

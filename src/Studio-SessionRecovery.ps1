@@ -2489,16 +2489,28 @@ function Update-StudioSnapshotDetails {
         foreach ($mediaApp in $mediaApps) {
             $media = $mediaApp.media
             $clock = ''
-            try {
-                $total = [int][Math]::Floor([double]$media.positionSeconds)
-                $hours = [int][Math]::Floor($total / 3600)
-                $minutes = [int][Math]::Floor(($total % 3600) / 60)
-                $seconds = $total % 60
-                if ($hours -gt 0) { $clock = ('{0}:{1:00}:{2:00}' -f $hours, $minutes, $seconds) }
-                else { $clock = ('{0}:{1:00}' -f $minutes, $seconds) }
-            } catch { }
-            $mark = if ($media.estimated) { '~' } else { '' }
-            $lines.Add(((T 'DetailPlayingLine' '  {0}  {1}  at {2}{3}') -f ([string]$mediaApp.name), (Split-Path -Leaf ([string]$media.file)), $mark, $clock))
+            # A position is only shown when something actually observed one.
+            # VLC exposes no live position, so fabricating one from process
+            # uptime reported times that were hours wrong.
+            $knownProperty = $media.PSObject.Properties['positionKnown']
+            $positionKnown = ($null -eq $knownProperty) -or [bool]$knownProperty.Value
+            if ($null -eq $media.positionSeconds) { $positionKnown = $false }
+            if ($positionKnown) {
+                try {
+                    $total = [int][Math]::Floor([double]$media.positionSeconds)
+                    $hours = [int][Math]::Floor($total / 3600)
+                    $minutes = [int][Math]::Floor(($total % 3600) / 60)
+                    $seconds = $total % 60
+                    if ($hours -gt 0) { $clock = ('{0}:{1:00}:{2:00}' -f $hours, $minutes, $seconds) }
+                    else { $clock = ('{0}:{1:00}' -f $minutes, $seconds) }
+                } catch { $positionKnown = $false }
+            }
+            if (-not $positionKnown) {
+                $lines.Add(((T 'DetailPlayingNoPosition' '  {0}  {1}  (position not recorded)') -f ([string]$mediaApp.name), (Split-Path -Leaf ([string]$media.file))))
+            } else {
+                $mark = if ($media.estimated) { '~' } else { '' }
+                $lines.Add(((T 'DetailPlayingLine' '  {0}  {1}  at {2}{3}') -f ([string]$mediaApp.name), (Split-Path -Leaf ([string]$media.file)), $mark, $clock))
+            }
         }
         $lines.Add('')
     }

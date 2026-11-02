@@ -1949,18 +1949,52 @@ Describe 'Select-SRRecentlyClosedUrls' {
 Describe 'Get-SRMediaPositionEstimate' {
     BeforeAll { $script:now = Get-Date }
 
-    It 'does not advance by the whole life of a long-running player' {
-        # The reported bug: VLC had been open for days, so anchoring to its
-        # process start put the position at the end of the file.
+    It 'reports no position when the only candidate anchor is process uptime' {
+        # Live field data: VLC had been up 291 s while the file was really at
+        # 5069 s, because the user had seeked to 1:19:38. Uptime measures the
+        # process, not playback, so it must never become a position.
         $estimate = Get-SRMediaPositionEstimate -Now $script:now -SameSession $false `
-            -PlayerStartTime $script:now.AddDays(-3)
-        $estimate.PositionMs | Should -Be 0 -Because 'a three-day-old process says nothing about this file'
+            -PlayerStartTime $script:now.AddSeconds(-291)
+        $estimate.Known | Should -BeFalse -Because 'uptime is not evidence of position'
     }
 
-    It 'anchors to a player that only just started' {
+    It 'still refuses a long-running process as an anchor' {
         $estimate = Get-SRMediaPositionEstimate -Now $script:now -SameSession $false `
-            -PlayerStartTime $script:now.AddSeconds(-5)
+            -PlayerStartTime $script:now.AddDays(-3)
+        $estimate.Known | Should -BeFalse
+    }
+
+    It 'uses uptime only when the caller explicitly accepts a guess' {
+        $estimate = Get-SRMediaPositionEstimate -Now $script:now -SameSession $false `
+            -PlayerStartTime $script:now.AddSeconds(-5) -AllowUptimeGuess $true
+        $estimate.Known | Should -BeTrue
         [Math]::Round($estimate.PositionMs / 1000) | Should -Be 5
+    }
+
+    It 'does not turn a previously unknown position into a fabricated one' {
+        # Snapshot 1 recorded no position, so it stored a placeholder 0. If the
+        # next snapshot trusted that placeholder as an anchor it would invent a
+        # position from elapsed time - the same class of bug as uptime.
+        $previous = [pscustomobject]@{
+            anchorPositionMs = 0
+            anchorAt         = $script:now.AddMinutes(-3).ToString('o')
+            lastSeenAt       = $script:now.AddMinutes(-3).ToString('o')
+            positionKnown    = $false
+        }
+        $estimate = Get-SRMediaPositionEstimate -Now $script:now -Previous $previous -SameSession $true
+        $estimate.Known | Should -BeFalse -Because 'no new evidence appeared between snapshots'
+        $estimate.PositionMs | Should -Be 0
+    }
+
+    It 'resumes from our own previous observation of the same file' {
+        $previous = [pscustomobject]@{
+            anchorPositionMs = 0
+            anchorAt         = $script:now.AddMinutes(-2).ToString('o')
+            lastSeenAt       = $script:now.AddMinutes(-2).ToString('o')
+        }
+        $estimate = Get-SRMediaPositionEstimate -Now $script:now -Previous $previous -SameSession $true
+        $estimate.Known | Should -BeTrue
+        [Math]::Round($estimate.PositionMs / 1000) | Should -Be 120
     }
 
     It 'trusts an exact saved position when the player resumes by itself' {
@@ -2000,6 +2034,107 @@ Describe 'Get-SRMediaPositionEstimate' {
         }
         $estimate = Get-SRMediaPositionEstimate -Now $script:now -Previous $previous -SameSession $true
         $estimate.PositionMs | Should -BeGreaterOrEqual 0
+    }
+}
+
+Describe 'Exact player positions' {
+    BeforeAll {
+        $script:mediaPath = 'D:\Shows\episode.mp4'
+    }
+
+    It 'reads the mpv watch_later position using the MD5 of the path' {
+        $dir = Join-Path $env:SESSIONRECOVERY_HOME 'watch_later'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $md5 = [System.Security.Cryptography.MD5]::Create()
+        try {
+            $hash = (($md5.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($script:mediaPath)) |
+                ForEach-Object { $_.ToString('X2') }) -join '')
+        } finally { $md5.Dispose() }
+        Set-Content -LiteralPath (Join-Path $dir $hash) -Value "start=125.066667`n" -Encoding ASCII
+
+        $result = Get-SRMpvWatchLaterPosition -MediaPath $script:mediaPath -SearchDirs @($dir)
+        $result.Known | Should -BeTrue
+        [Math]::Round($result.PositionMs / 1000) | Should -Be 125
+    }
+
+    It 'reports unknown when mpv has no watch_later entry' {
+        $dir = Join-Path $env:SESSIONRECOVERY_HOME 'watch_later-empty'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $result = Get-SRMpvWatchLaterPosition -MediaPath $script:mediaPath -SearchDirs @($dir)
+        $result.Known | Should -BeFalse
+    }
+
+    It 'ignores an mpv entry whose start line is missing or malformed' {
+        $dir = Join-Path $env:SESSIONRECOVERY_HOME 'watch_later-bad'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $md5 = [System.Security.Cryptography.MD5]::Create()
+        try {
+            $hash = (($md5.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($script:mediaPath)) |
+                ForEach-Object { $_.ToString('X2') }) -join '')
+        } finally { $md5.Dispose() }
+        Set-Content -LiteralPath (Join-Path $dir $hash) -Value "# redirect entry`nname=other`n" -Encoding ASCII
+
+        $result = Get-SRMpvWatchLaterPosition -MediaPath $script:mediaPath -SearchDirs @($dir)
+        $result.Known | Should -BeFalse
+    }
+
+    It 'does not claim an exact position for players that store none' {
+        # MPC-BE and PotPlayer were checked by diffing their whole settings
+        # store across a play/quit cycle: neither writes a usable position.
+        foreach ($key in @('mpc-be', 'potplayer', 'wmplayer')) {
+            $result = Get-SRMediaPlayerExactPosition -Key $key -MediaPath $script:mediaPath
+            $result.Known | Should -BeFalse -Because "$key records no playback position"
+        }
+    }
+
+    It 'seeks MPC-HC with /start in milliseconds' {
+        # Get-SRMediaLaunchArguments returns $null when the file is absent, so
+        # the media file has to exist for this to mean anything.
+        $realFile = Join-Path $env:SESSIONRECOVERY_HOME 'mpc-test.mp4'
+        Set-Content -LiteralPath $realFile -Value 'x' -Encoding ASCII
+        $media = [pscustomobject]@{ file = $realFile; positionSeconds = 125.9; positionKnown = $true }
+        $args = @(Get-SRMediaLaunchArguments -ExePath 'C:\Program Files\MPC-HC\mpc-hc64.exe' -Media $media)
+        $args | Should -Contain '/start'
+        $args | Should -Contain '125000'
+        $args | Should -Contain $realFile
+    }
+}
+
+Describe 'Unknown media position is not restored as a seek' {
+    BeforeAll {
+        $script:mediaFile = Join-Path $env:SESSIONRECOVERY_HOME 'episode.mp4'
+        Set-Content -LiteralPath $script:mediaFile -Value 'x' -Encoding ASCII
+    }
+
+    It 'opens the file without seeking when the position was never recorded' {
+        $media = [pscustomobject]@{
+            file            = $script:mediaFile
+            positionSeconds = $null
+            positionKnown   = $false
+        }
+        $args = @(Get-SRMediaLaunchArguments -ExePath 'C:\Program Files\VideoLAN\VLC\vlc.exe' -Media $media)
+        $args | Should -Contain $script:mediaFile
+        ($args -join ' ') | Should -Not -Match '--start-time' -Because 'seeking to a guess is worse than starting over'
+    }
+
+    It 'still seeks when a position was actually recorded' {
+        $media = [pscustomobject]@{
+            file            = $script:mediaFile
+            positionSeconds = 1234.5
+            positionKnown   = $true
+        }
+        $args = @(Get-SRMediaLaunchArguments -ExePath 'C:\Program Files\VideoLAN\VLC\vlc.exe' -Media $media)
+        ($args -join ' ') | Should -Match '--start-time=1234'
+    }
+
+    It 'treats a null position as unknown even when the flag says otherwise' {
+        $media = [pscustomobject]@{
+            file            = $script:mediaFile
+            positionSeconds = $null
+            positionKnown   = $true
+        }
+        $args = @(Get-SRMediaLaunchArguments -ExePath 'C:\Program Files\VideoLAN\VLC\vlc.exe' -Media $media)
+        ($args -join ' ') | Should -Not -Match '--start-time'
     }
 }
 

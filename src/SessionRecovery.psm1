@@ -3102,13 +3102,16 @@ function Get-SRVlcRecentMedia {
 function Get-SRMediaPositionEstimate {
     # Estimates the playback position for a file that is currently open.
     #
-    # Dead reckoning is the only thing available when a player never writes its
-    # position, but it is only valid over a short gap. A player left open for
-    # hours, or a background app that was not running between snapshots, says
-    # nothing about how much was actually watched. Advancing by the whole gap
-    # pushed the estimate hours or days ahead and the duration clamp then
-    # parked it at the end of the file, which is exactly the "off by a long
-    # time" symptom. Every path here is therefore bounded by MaxDriftMinutes.
+    # The only trustworthy anchors are:
+    #   1. An exact position the player itself saved (SavedPositionTrusted).
+    #   2. Our own previous snapshot of the same file, in the same run.
+    #
+    # Process uptime is NOT an anchor. Measured on a live machine: VLC had been
+    # running 291 s, the file had been playing for 5069 s (the user seeked to
+    # 1:19:38), and the old code reported exactly 291 s because it assumed
+    # playback began at 0 when the player started. That is a ~80 minute error
+    # with no upper bound, so uptime is only used when there is genuinely
+    # nothing else - and then the result is explicitly marked as a guess.
     param(
         [datetime]$Now = (Get-Date),
         # Previous estimate for this player, or $null when there is none.
@@ -3121,13 +3124,28 @@ function Get-SRMediaPositionEstimate {
         [bool]$SavedPositionTrusted = $false,
         # Process start time of the player, or MinValue.
         [datetime]$PlayerStartTime = [datetime]::MinValue,
-        [int]$MaxDriftMinutes = 30
+        [int]$MaxDriftMinutes = 30,
+        # When false, no position is returned unless it was actually observed.
+        # A caller that cannot tolerate a wrong position sets this false.
+        [bool]$AllowUptimeGuess = $false
     )
 
     $maxDrift = [timespan]::FromMinutes([Math]::Max(1, $MaxDriftMinutes))
     $anchorMs = [long]0
     $anchorAt = $Now
     $anchoredFromPlayer = $false
+    $hasAnchor = $false
+
+    if ($SameSession -and $null -ne $Previous) {
+        # A previous entry written without an observed position is not an
+        # anchor. Treating its placeholder 0 as real would turn "unknown" into
+        # a fabricated position on the very next snapshot, which is the same
+        # class of bug as the uptime anchor.
+        $previousKnown = $true
+        $knownProperty = $Previous.PSObject.Properties['positionKnown']
+        if ($null -ne $knownProperty -and -not [bool]$knownProperty.Value) { $previousKnown = $false }
+        if (-not $previousKnown) { $SameSession = $false }
+    }
 
     if ($SameSession -and $null -ne $Previous) {
         $previousAnchorMs = [long]0
@@ -3143,6 +3161,7 @@ function Get-SRMediaPositionEstimate {
         $anchorMs = $previousAnchorMs
         $anchorAt = $previousAnchorAt
         if (($Now - $anchorAt) -gt $maxDrift) { $anchorAt = $Now - $maxDrift }
+        $hasAnchor = $true
 
         if ($SavedPositionTrusted -and $SavedPositionMs -gt $anchorMs) {
             $anchorMs = $SavedPositionMs
@@ -3156,16 +3175,38 @@ function Get-SRMediaPositionEstimate {
             if (($Now - $anchorAt) -gt $maxDrift) { $anchorAt = $Now - $maxDrift }
             $anchoredFromPlayer = $true
         }
-    } else {
-        # First sighting of this file, or the player restarted. A process that
-        # has only just started really did begin playing at around its own
-        # start time; one that has been up for hours tells us nothing at all.
-        if ($PlayerStartTime -ne [datetime]::MinValue -and (($Now - $PlayerStartTime) -le $maxDrift)) {
+    } elseif ($SavedPositionTrusted -and $SavedPositionMs -gt 0) {
+        # The player told us where it is, so this beats any guess. Uptime is
+        # meaningful here in a way it never is on its own: we know the
+        # position playback started from, so elapsed time since the player
+        # started is time actually played, not a guess at total progress.
+        $anchorMs = $SavedPositionMs
+        $anchorAt = $Now
+        if ($PlayerStartTime -ne [datetime]::MinValue -and
+            $PlayerStartTime -gt [datetime]::MinValue -and
+            $PlayerStartTime -le $Now -and
+            (($Now - $PlayerStartTime) -le $maxDrift)) {
             $anchorAt = $PlayerStartTime
         }
-        if ($SavedPositionTrusted -and $SavedPositionMs -gt 0) {
-            $anchorMs = $SavedPositionMs
-            $anchoredFromPlayer = $true
+        $anchoredFromPlayer = $true
+        $hasAnchor = $true
+    } elseif ($AllowUptimeGuess -and
+        $PlayerStartTime -ne [datetime]::MinValue -and
+        (($Now - $PlayerStartTime) -le $maxDrift)) {
+        # Only a player that started moments ago and has had no time to be
+        # seeked is a plausible "began at 0" anchor. Even then it is a guess.
+        $anchorAt = $PlayerStartTime
+        $hasAnchor = $true
+    }
+
+    if (-not $hasAnchor) {
+        # Nothing observed. Say so instead of pretending.
+        return [pscustomobject]@{
+            Known      = $false
+            PositionMs = [int64]0
+            AnchorMs   = [int64]0
+            AnchorAt   = $Now
+            FromPlayer = $false
         }
     }
 
@@ -3173,6 +3214,7 @@ function Get-SRMediaPositionEstimate {
     if ($positionMs -lt 0) { $positionMs = 0 }
 
     return [pscustomobject]@{
+        Known      = $true
         PositionMs = [int64]$positionMs
         AnchorMs   = [int64]$anchorMs
         AnchorAt   = $anchorAt
@@ -3358,15 +3400,49 @@ function Get-SRMediaPlayerMedia {
             $lastSeen -gt [datetime]::MinValue -and $lastSeen -lt $now -and
             ($vlcStart -eq [datetime]::MinValue -or $vlcStart -le $lastSeen))
 
+        # VLC never writes the live position while playing (verified: the ini
+        # is untouched for many minutes of playback), exposes no time through
+        # UI Automation, and registers no media session. So the only honest
+        # anchors are our own previous snapshot or a saved position VLC will
+        # actually resume from. Uptime is not an anchor: it produced an ~80
+        # minute error in the field.
         $estimate = Get-SRMediaPositionEstimate -Now $now -Previous $entry -SameSession $sameSession `
             -SavedPositionMs $savedMs -SavedPositionTrusted ($resumeMode -eq 1) `
-            -PlayerStartTime $vlcStart -MaxDriftMinutes $MaxPositionDriftMinutes
+            -PlayerStartTime $vlcStart -MaxDriftMinutes $MaxPositionDriftMinutes -AllowUptimeGuess $false
+
+        if ($null -eq $durationSeconds) { $durationSeconds = Get-SRMediaDurationSeconds -Path $file }
+
+        if (-not $estimate.Known) {
+            # Record the file, but no position. Restoring this opens the right
+            # episode at the start, which is honest, instead of seeking to a
+            # made-up time.
+            $media = [pscustomobject]@{
+                file            = $file
+                title           = $title
+                positionSeconds = $null
+                durationSeconds = $durationSeconds
+                estimated       = $true
+                positionKnown   = $false
+            }
+            $app | Add-Member -NotePropertyName media -NotePropertyValue $media -Force
+            $state.players['vlc'] = [pscustomobject]@{
+                file             = $file
+                savedPositionMs  = $savedMs
+                anchorPositionMs = 0
+                anchorAt         = $now.ToString('o')
+                lastSeenAt       = $now.ToString('o')
+                durationSeconds  = $durationSeconds
+                positionKnown    = $false
+            }
+            $stateDirty = $true
+            Write-SRLog -Level DEBUG -Message ("VLC media captured without a position (no anchor): {0}" -f $file)
+            continue
+        }
+
         $positionMs = [int64]$estimate.PositionMs
         $anchorMs = [int64]$estimate.AnchorMs
         $anchorAt = $estimate.AnchorAt
         $anchoredFromVlc = [bool]$estimate.FromPlayer
-
-        if ($null -eq $durationSeconds) { $durationSeconds = Get-SRMediaDurationSeconds -Path $file }
 
         if ($positionMs -lt 0) { $positionMs = 0 }
         if ($null -ne $durationSeconds -and $durationSeconds -gt 0) {
@@ -3381,6 +3457,7 @@ function Get-SRMediaPlayerMedia {
             positionSeconds = [Math]::Round($positionMs / 1000.0, 1)
             durationSeconds = $durationSeconds
             estimated       = (-not $anchoredFromVlc)
+            positionKnown   = $true
         }
         $app | Add-Member -NotePropertyName media -NotePropertyValue $media -Force
 
@@ -3431,19 +3508,66 @@ function Get-SRMediaPlayerMedia {
         if ([string]::IsNullOrWhiteSpace($file)) { continue }
         $seenKeys[[string]$player.key] = $true
 
-        # mpv only: ask its JSON IPC pipe for the exact position first.
+        # mpv only: ask its JSON IPC pipe for the exact position first. When
+        # mpv runs without --input-ipc-server that fails, so fall through to
+        # the watch_later file, which is exact and always written on quit.
         $mpvExact = $null
         if ([string]$player.key -eq 'mpv') { $mpvExact = Get-SRMpvPlayback }
+
+        # Players that really do record a position: mpv (watch_later) and
+        # MPC-HC (MediaHistory). Verified empirically. MPC-BE and PotPlayer
+        # were checked the same way and store nothing usable.
+        $exact = Get-SRMediaPlayerExactPosition -Key ([string]$player.key) -MediaPath $file
 
         $entry = $null
         if ($state.players.ContainsKey([string]$player.key)) { $entry = $state.players[[string]$player.key] }
         $sameSession = ($null -ne $entry -and [string]$entry.file -eq $file)
-        $estimate = Get-SRMediaPositionEstimate -Now $now -Previous $entry -SameSession $sameSession `
-            -MaxDriftMinutes $MaxPositionDriftMinutes
+        # These players expose no reliable live position, so the same rule
+        # applies as for VLC: only our own previous snapshot or an exact
+        # recorded position is an anchor.
+        if ($exact.Known) {
+            # An exact recorded position wins over dead reckoning outright.
+            $estimate = [pscustomobject]@{
+                Known      = $true
+                PositionMs = [int64]$exact.PositionMs
+                AnchorMs   = [int64]$exact.PositionMs
+                AnchorAt   = $now
+                FromPlayer = $true
+            }
+        } else {
+            $estimate = Get-SRMediaPositionEstimate -Now $now -Previous $entry -SameSession $sameSession `
+                -MaxDriftMinutes $MaxPositionDriftMinutes -AllowUptimeGuess $false
+        }
         $anchorMs = [int64]$estimate.AnchorMs
         $anchorAt = $estimate.AnchorAt
 
         $durationSeconds = Get-SRMediaDurationSeconds -Path $file
+
+        if (-not $estimate.Known -and
+            -not ($null -ne $mpvExact -and $null -ne $mpvExact.Position -and [double]$mpvExact.Position -ge 0)) {
+            $media = [pscustomobject]@{
+                file            = $file
+                title           = Split-Path -Leaf $file
+                positionSeconds = $null
+                durationSeconds = $durationSeconds
+                estimated       = $true
+                positionKnown   = $false
+            }
+            $app | Add-Member -NotePropertyName media -NotePropertyValue $media -Force
+            $state.players[[string]$player.key] = [pscustomobject]@{
+                file             = $file
+                savedPositionMs  = [long]0
+                anchorPositionMs = 0
+                anchorAt         = $now.ToString('o')
+                lastSeenAt       = $now.ToString('o')
+                durationSeconds  = $durationSeconds
+                positionKnown    = $false
+            }
+            $stateDirty = $true
+            Write-SRLog -Level DEBUG -Message ("{0} media captured without a position: {1}" -f $player.key, $file)
+            continue
+        }
+
         $positionMs = [int64]$estimate.PositionMs
         if ($positionMs -lt 0) { $positionMs = 0 }
         $estimated = $true
@@ -3470,6 +3594,7 @@ function Get-SRMediaPlayerMedia {
             positionSeconds = [Math]::Round($positionMs / 1000.0, 1)
             durationSeconds = $durationSeconds
             estimated       = $estimated
+            positionKnown   = $true
         }
         $app | Add-Member -NotePropertyName media -NotePropertyValue $media -Force
         $state.players[[string]$player.key] = [pscustomobject]@{
@@ -3503,8 +3628,16 @@ function Get-SRMediaLaunchArguments {
     if ([string]::IsNullOrWhiteSpace($file) -or -not (Test-Path -LiteralPath $file)) { return $null }
 
     $leaf = [System.IO.Path]::GetFileNameWithoutExtension($ExePath).ToLowerInvariant()
+    # A snapshot may hold no position at all when nothing observed one. Opening
+    # the file at the start is correct then; seeking to a guess is not.
     $position = 0.0
-    try { $position = [double]$Media.positionSeconds } catch { $position = 0.0 }
+    $positionKnown = $true
+    $knownProperty = $Media.PSObject.Properties['positionKnown']
+    if ($null -ne $knownProperty -and -not [bool]$knownProperty.Value) { $positionKnown = $false }
+    if ($null -eq $Media.positionSeconds) { $positionKnown = $false }
+    if ($positionKnown) {
+        try { $position = [double]$Media.positionSeconds } catch { $position = 0.0; $positionKnown = $false }
+    }
 
     if ($leaf -eq 'vlc') {
         $arguments = New-Object System.Collections.Generic.List[string]
@@ -3537,7 +3670,127 @@ function Get-SRMediaLaunchArguments {
         $arguments.Add($file)
         return $arguments.ToArray()
     }
+    if ($leaf -eq 'mpc-hc' -or $leaf -eq 'mpc-hc64') {
+        # MPC-HC takes /start in MILLISECONDS as a separate argument. It also
+        # used to fall through to "open the file", so a captured position was
+        # never applied at all.
+        $arguments = New-Object System.Collections.Generic.List[string]
+        if ($position -ge 10) { $arguments.Add('/start') ; $arguments.Add(('{0}' -f [int64]([Math]::Floor($position) * 1000))) }
+        $arguments.Add($file)
+        return $arguments.ToArray()
+    }
     return @($file)
+}
+
+function Get-SRMpvWatchLaterPosition {
+    # Exact resume position from mpv's own watch_later file.
+    #
+    # Verified against mpv 0.41: the file name is the uppercase MD5 of the
+    # full file path, and the contents hold the position as a line
+    #   start=125.066667
+    # mpv only writes this on a clean quit (or when --save-position-on-quit is
+    # on and playback is replaced), so a hard crash still leaves the previous
+    # value - which is the position playback actually continued from.
+    param(
+        [Parameter(Mandatory = $true)][string]$MediaPath,
+        [string[]]$SearchDirs = @()
+    )
+    $result = [pscustomobject]@{ Known = $false; PositionMs = [long]0; Source = '' }
+    if ([string]::IsNullOrWhiteSpace($MediaPath)) { return $result }
+
+    if ($null -eq $SearchDirs -or @($SearchDirs).Count -eq 0) {
+        $SearchDirs = @(
+            (Join-Path $env:APPDATA 'mpv\watch_later'),
+            (Join-Path $env:LOCALAPPDATA 'mpv\watch_later'),
+            (Join-Path $env:APPDATA 'mpv.net\watch_later')
+        )
+    }
+
+    $hash = ''
+    try {
+        $md5 = [System.Security.Cryptography.MD5]::Create()
+        try {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes([string]$MediaPath)
+            $hash = (($md5.ComputeHash($bytes) | ForEach-Object { $_.ToString('X2') }) -join '')
+        } finally { $md5.Dispose() }
+    } catch { return $result }
+    if ([string]::IsNullOrWhiteSpace($hash)) { return $result }
+
+    foreach ($dir in @($SearchDirs)) {
+        if ([string]::IsNullOrWhiteSpace($dir) -or -not (Test-Path -LiteralPath $dir)) { continue }
+        # mpv writes the name uppercase; match case-insensitively regardless.
+        $candidate = Join-Path $dir $hash
+        if (-not (Test-Path -LiteralPath $candidate)) { continue }
+        try {
+            foreach ($line in @(Get-Content -LiteralPath $candidate -ErrorAction Stop)) {
+                if ($line -match '^\s*start\s*=\s*(-?[0-9]*\.?[0-9]+)\s*$') {
+                    $seconds = 0.0
+                    if ([double]::TryParse($Matches[1], [System.Globalization.NumberStyles]::Float,
+                            [System.Globalization.CultureInfo]::InvariantCulture, [ref]$seconds) -and $seconds -ge 0) {
+                        return [pscustomobject]@{
+                            Known      = $true
+                            PositionMs = [int64]($seconds * 1000)
+                            Source     = 'mpv-watch-later'
+                        }
+                    }
+                }
+            }
+        } catch { }
+    }
+    return $result
+}
+
+function Get-SRMpcHcPosition {
+    # Exact position from MPC-HC's own resume store.
+    #
+    # Verified against MPC-HC 2.8.4: positions live under
+    #   HKCU\Software\MPC-HC\MPC-HC\MediaHistory\<random id>
+    # with "Filename" and "FilePosition" (milliseconds). MPC-HC only keeps
+    # them when Settings\RememberFilePos is on; when it is off the player
+    # itself will not resume, so there is nothing to restore either.
+    param([Parameter(Mandatory = $true)][string]$MediaPath)
+    $result = [pscustomobject]@{ Known = $false; PositionMs = [long]0; Source = '' }
+    if ([string]::IsNullOrWhiteSpace($MediaPath)) { return $result }
+    if (-not (Test-Path -LiteralPath 'HKCU:\Software\MPC-HC\MPC-HC\MediaHistory')) { return $result }
+
+    try {
+        foreach ($key in @(Get-ChildItem 'HKCU:\Software\MPC-HC\MPC-HC\MediaHistory' -ErrorAction SilentlyContinue)) {
+            $props = $null
+            try { $props = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction Stop } catch { continue }
+            $name = ''
+            $position = [long]0
+            $nameProperty = $props.PSObject.Properties['Filename']
+            if ($null -eq $nameProperty) { continue }
+            $name = [string]$nameProperty.Value
+            if ($name -ine $MediaPath) { continue }
+            $positionProperty = $props.PSObject.Properties['FilePosition']
+            if ($null -ne $positionProperty -and $null -ne $positionProperty.Value) {
+                $parsed = [int64]0
+                if ([int64]::TryParse([string]$positionProperty.Value, [ref]$parsed)) { $position = $parsed }
+            }
+            if ($position -gt 0) {
+                return [pscustomobject]@{ Known = $true; PositionMs = $position; Source = 'mpc-hc-history' }
+            }
+        }
+    } catch { }
+    return $result
+}
+
+function Get-SRMediaPlayerExactPosition {
+    # Routes to the reader for players that really do record a position.
+    # MPC-BE and PotPlayer expose nothing usable: verified by diffing their
+    # whole settings store across a play/quit cycle, MPC-BE never writes a
+    # position, and PotPlayer's "Positions" key holds only window geometry.
+    param(
+        [Parameter(Mandatory = $true)][string]$Key,
+        [Parameter(Mandatory = $true)][string]$MediaPath
+    )
+    $none = [pscustomobject]@{ Known = $false; PositionMs = [long]0; Source = '' }
+    switch ([string]$Key) {
+        'mpv' { return Get-SRMpvWatchLaterPosition -MediaPath $MediaPath }
+        'mpc-hc' { return Get-SRMpcHcPosition -MediaPath $MediaPath }
+        default { return $none }
+    }
 }
 
 function Get-SRMpvPlayback {
