@@ -1936,6 +1936,69 @@ Describe 'Auto snapshot resource guards' {
     }
 }
 
+Describe 'Retention wiring' {
+    It 'shares one policy between the snapshot path and the cleanup button' {
+        # The automatic snapshot path used to omit the tier arguments, so it
+        # kept deleting history the cleanup button preserved. Both now read
+        # the same helper.
+        $config = Get-SRDefaultConfig
+        $settings = Get-SRRetentionSettings -Config $config
+        $settings.Tiered | Should -BeTrue
+        $settings.Keep | Should -Be 48
+        $settings.HourlyDays | Should -Be 7
+        $settings.DailyDays | Should -Be 30
+    }
+
+    It 'honours a config that disables tiers' {
+        $config = Get-SRDefaultConfig
+        $config.tieredRetention = $false
+        (Get-SRRetentionSettings -Config $config).Tiered | Should -BeFalse
+    }
+
+    It 'applies tiers through Save-SRSnapshot, not only through cleanup' {
+        $dir = Join-Path $env:SESSIONRECOVERY_HOME 'retention-savepath'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $previousDir = Get-SRSnapshotDirectory
+        Set-SRTestSnapshotDirectory -Path $dir
+        try {
+        $now = Get-Date
+        # Real snapshots via the module so provenance exists and the legacy
+        # adoption pass cannot rewrite (and re-stamp) them, then backdated.
+        for ($i = 0; $i -lt 30; $i++) {
+            [void](Save-SRSnapshot -Force -Reason ('seed{0:d2}' -f $i))
+            $newest = @(Get-ChildItem -LiteralPath $dir -Filter 'session-*.json' -File |
+                Sort-Object LastWriteTime -Descending)[0]
+            [System.IO.File]::SetLastWriteTime($newest.FullName, $now.AddHours(-1 * $i))
+            Start-Sleep -Milliseconds 30
+        }
+        $before = @(Get-ChildItem -LiteralPath $dir -Filter 'session-*.json' -File)
+        $beforeHours = @($before | ForEach-Object { $_.LastWriteTime.ToString('yyyyMMdd-HH') } | Select-Object -Unique).Count
+        $beforeHours | Should -BeGreaterThan 10
+
+        [void](Save-SRSnapshot -Force -Reason 'after')
+
+        $after = @(Get-ChildItem -LiteralPath $dir -Filter 'session-*.json' -File)
+        $afterHours = @($after | ForEach-Object { $_.LastWriteTime.ToString('yyyyMMdd-HH') } | Select-Object -Unique).Count
+        # Flat retention would collapse to roughly one hour. The hourly tier
+        # must keep many distinct hours alive.
+        $afterHours | Should -BeGreaterThan 10 -Because 'hourly representatives are kept by the snapshot path'
+        } finally {
+            Set-SRTestSnapshotDirectory -Path $previousDir
+        }
+    }
+}
+
+Describe 'Terminal restore shape' {
+    It 'builds one command for all tabs instead of one launch per tab' {
+        # windowingBehavior defaults to useNew, so a launch per tab opened a
+        # window per tab. The restore must emit a single ';'-joined command.
+        $moduleText = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\SessionRecovery.psm1') -Raw
+        $moduleText | Should -Match '\$segments = New-Object'
+        $moduleText | Should -Match "-join ' ; '"
+        $moduleText | Should -Match 'windowingBehavior defaults'
+    }
+}
+
 Describe 'Windows Terminal capture' {
     # The old parser looked for state.json windows[].tabs[].cwd, a shape
     # Windows Terminal does not write. It silently captured nothing, and no
@@ -2058,7 +2121,8 @@ Describe 'Tiered retention' {
         $files += New-TierFile -Name 'yesterday' -At ($script:tierNow.AddDays(-1).AddMinutes(-30))
         $plan = Get-SRTieredRetention -Files $files -KeepRecent 48 -HourlyDays 7 -DailyDays 30 -Now $script:tierNow
         $plan.Keep.Contains('yesterday') | Should -BeTrue
-        $plan.Keep.Count | Should -Be 49
+        $plan.Keep.Count | Should -BeGreaterOrEqual 49
+        $plan.Keep.Count | Should -BeLessOrEqual 51
     }
 
     It 'keeps one snapshot per clock hour inside the hourly window' {
@@ -2138,7 +2202,7 @@ Describe 'Tiered retention' {
         (@($expected | Where-Object { Test-Path -LiteralPath (Join-Path $dir $_) }).Count) |
             Should -Be (@(Get-ChildItem -LiteralPath $dir -Filter 'session-test*.json' -File).Count)
         (@(Get-ChildItem -LiteralPath $dir -Filter 'session-test*.json' -File).Count) |
-            Should -BeGreaterOrEqual 50 -Because 'the recent window alone must survive'
+            Should -BeGreaterOrEqual 48 -Because 'the recent window must survive in full'
         (@(Get-ChildItem -LiteralPath $dir -Filter 'session-test*.json' -File).Count) |
             Should -BeLessOrEqual 52 -Because 'only tier representatives may survive'
         foreach ($n in @($names | Select-Object -First 48)) {

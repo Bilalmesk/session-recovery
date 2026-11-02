@@ -1749,16 +1749,21 @@ function Test-SRTitleUnsavedWork {
     if ([string]::IsNullOrWhiteSpace($Title)) { return $false }
     $t = $Title.Trim()
     if ($t.Length -lt 2) { return $false }
+    # The bullet characters come from code points instead of being typed
+    # literally. This file has no BOM, and Windows PowerShell 5.1 decodes
+    # such a file as ANSI, so a literal bullet inside a regex became the
+    # wrong character on CI while passing on a machine that read UTF-8.
+    $markers = [string]@([char]0x002A, [char]0x25CF, [char]0x2022) -join ''
     # Leading marker followed by text that is not another marker.
-    if ($t -match '^[*●•][^\s*●•]') { return $true }
+    if ($t -match ('^[' + $markers + '][^\s' + $markers + ']')) { return $true }
     # Leading marker, a space, then text ("● main.ts - ...").
-    if ($t -match '^[*●•]\s+[^\s*●•]') { return $true }
+    if ($t -match ('^[' + $markers + ']\s+[^\s' + $markers + ']')) { return $true }
     # Trailing marker right after text ("draft.txt*" / "draft.txt [*]").
-    if ($t -match '[^\s*●•]\s*\[\+\]$') { return $true }
+    if ($t -match ('[^\s' + $markers + ']\s*\[\+\]$')) { return $true }
     # vim puts its dirty marker right after the buffer name, mid-title
     # ("main.c [+] - VIM"), standing alone as a token.
     if ($t -match '(?:^|\s)\[\+\](?:\s|$)') { return $true }
-    if ($t -match '[^\s*●•][*●•]$') { return $true }
+    if ($t -match ('[^\s' + $markers + '][*' + $markers + ']$')) { return $true }
     return $false
 }
 
@@ -4777,6 +4782,18 @@ function Set-SRTestTerminalStatePath {
     $script:SRTerminalStateOverride = $Path
 }
 
+# Test seam: point the whole snapshot store somewhere else so a test can
+# exercise Save-SRSnapshot (file writes and retention) without touching real
+# user snapshots or colliding with other tests.
+function Set-SRTestSnapshotDirectory {
+    param([string]$Path = '')
+    if ([string]::IsNullOrWhiteSpace($Path)) { return }
+    $script:SRSnapshotDir = $Path
+    if (-not (Test-Path -LiteralPath $Path)) {
+        New-Item -ItemType Directory -Path $Path -Force | Out-Null
+    }
+}
+
 function Get-SRDevWorkspaces {
     # Reads the editors' own state files (no processes needed) so a restore
     # can reopen the exact folders and projects that were open.
@@ -4951,6 +4968,16 @@ function Get-SRDevWorkspaces {
                     folders = $dirs.ToArray()
                     tabs    = $tabRows.ToArray()
                 })
+            } else {
+                # Verified on real Windows Terminal: state.json does not grow a
+                # persistedWindowLayouts section during a session or on a clean
+                # exit unless firstWindowPreference is set to
+                # persistedWindowLayout (it defaults to defaultProfile). So this
+                # file is usually empty and a crash leaves nothing to read.
+                # Log it once at debug level rather than capturing silently.
+                try {
+                    Write-SRLog -Level DEBUG -Message ('Windows Terminal state.json has no persisted layouts ({0}); its tabs were not captured. Set firstWindowPreference to persistedWindowLayout to enable this.' -f $wtState)
+                } catch { }
             }
         }
     } catch {
@@ -5635,6 +5662,62 @@ function Get-SRStorageHealth {
     }
 }
 
+function Get-SRRetentionSettings {
+    # One place that turns config into retention arguments. Both the automatic
+    # snapshot path and the manual storage cleanup call this, so they cannot
+    # drift apart again: the snapshot path previously omitted -Tiered entirely
+    # and therefore kept deleting history beyond the recent window while the
+    # cleanup button honoured tiers.
+    param([object]$Config = $null)
+    if ($null -eq $Config) { $Config = Get-SRConfig }
+
+    $keep = 48
+    $maxAgeDays = 0
+    $tiered = $true
+    $hourlyDays = 7
+    $dailyDays = 30
+    $pinned = @()
+
+    try { $keep = [int]$Config.keepSnapshots } catch { }
+    try { $maxAgeDays = [int]$Config.keepSnapshotDays } catch { }
+    try {
+        $property = $Config.PSObject.Properties['tieredRetention']
+        if ($null -ne $property) { $tiered = [bool]$property.Value }
+    } catch { }
+    try {
+        $property = $Config.PSObject.Properties['keepHourlyDays']
+        if ($null -ne $property) { $hourlyDays = [int]$property.Value }
+    } catch { }
+    try {
+        $property = $Config.PSObject.Properties['keepDailyDays']
+        if ($null -ne $property) { $dailyDays = [int]$property.Value }
+    } catch { }
+    try { $pinned = @($Config.pinnedSnapshots) } catch { }
+
+    if ($keep -lt 1) { $keep = 1 }
+
+    return [pscustomobject]@{
+        Keep        = $keep
+        MaxAgeDays  = $maxAgeDays
+        Pinned      = $pinned
+        Tiered      = $tiered
+        HourlyDays  = $hourlyDays
+        DailyDays   = $dailyDays
+    }
+}
+
+function Invoke-SRRetention {
+    # Applies retention with the configured policy. Callers get identical
+    # behaviour whether the sweep came from a snapshot or from the cleanup
+    # button.
+    param([object]$Config = $null)
+    $settings = Get-SRRetentionSettings -Config $Config
+    Remove-OldSRSnapshots -Keep $settings.Keep -MaxAgeDays $settings.MaxAgeDays `
+        -Pinned $settings.Pinned -Tiered $settings.Tiered `
+        -HourlyDays $settings.HourlyDays -DailyDays $settings.DailyDays
+    return $settings
+}
+
 function Invoke-SRStorageCleanup {
     # Applies retention, quarantines unreadable snapshots (never silently
     # deletes user data), and removes thumbnails/temp files that can no longer
@@ -5645,23 +5728,7 @@ function Invoke-SRStorageCleanup {
     $beforeBytes = [int64]0
     foreach ($file in $beforeFiles) { $beforeBytes += [int64]$file.Length }
     try {
-        $tiered = $false
-        try {
-            $tieredProperty = $config.PSObject.Properties['tieredRetention']
-            if ($null -ne $tieredProperty) { $tiered = [bool]$tieredProperty.Value }
-        } catch { }
-        $hourlyDays = 7
-        try {
-            $hourlyProperty = $config.PSObject.Properties['keepHourlyDays']
-            if ($null -ne $hourlyProperty) { $hourlyDays = [int]$hourlyProperty.Value }
-        } catch { }
-        $dailyDays = 30
-        try {
-            $dailyProperty = $config.PSObject.Properties['keepDailyDays']
-            if ($null -ne $dailyProperty) { $dailyDays = [int]$dailyProperty.Value }
-        } catch { }
-        Remove-OldSRSnapshots -Keep ([int]$config.keepSnapshots) -MaxAgeDays ([int]$config.keepSnapshotDays) `
-            -Pinned @($config.pinnedSnapshots) -Tiered $tiered -HourlyDays $hourlyDays -DailyDays $dailyDays
+        [void](Invoke-SRRetention -Config $config)
     } catch {
         Write-SRLog -Level WARN -Message ("Retention during cleanup failed: {0}" -f $_.Exception.Message)
     }
@@ -6406,7 +6473,10 @@ function Save-SRSnapshot {
             try { Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue } catch { }
             throw
         }
-        Remove-OldSRSnapshots -Keep ([int]$config.keepSnapshots) -MaxAgeDays ([int]$config.keepSnapshotDays) -Pinned @($config.pinnedSnapshots)
+        # Same policy as the cleanup button. Passing the settings here is what
+        # actually builds hourly and daily history; before this the automatic
+        # path silently used flat count-only retention and deleted it.
+        [void](Invoke-SRRetention -Config $config)
         Write-SRLog -Message ("Snapshot saved: {0} ({1} apps, {2} folders, {3} browsers, {4} tabs)" -f $path, $snapshot.stats.apps, $snapshot.stats.folders, $snapshot.stats.browsers, $snapshot.stats.tabs)
         try {
             $exportFolder = [string]$config.autoExportFolder
@@ -7083,7 +7153,12 @@ function Invoke-SRRestore {
                 Message = 'Windows Terminal is not installed; its tabs were skipped.'
             })
         } else {
-            $opened = 0
+            # One wt invocation for every tab, joined with ';'. Windows
+            # Terminal's windowingBehavior defaults to 'useNew', so a
+            # separate launch per tab produced one WINDOW per tab. A single
+            # command keeps every tab in the window this call creates,
+            # preserves snapshot order, and needs no launch sleeps.
+            $segments = New-Object System.Collections.Generic.List[string]
             foreach ($workspace in $terminalWorkspaces) {
                 $tabList = @()
                 try { $tabList = @($workspace.tabs) } catch { $tabList = @() }
@@ -7096,29 +7171,39 @@ function Invoke-SRRestore {
                     if ($null -eq $tab) { continue }
                     $cwd = [string]$tab.cwd
                     $profileName = [string]$tab.profile
-                    $arguments = New-Object System.Collections.Generic.List[string]
-                    # wt opens a new tab in the running window when one
-                    # exists, so every captured tab maps to new-tab and the
-                    # restored window keeps the snapshot's tab order.
-                    $arguments.Add('new-tab')
+                    $parts = New-Object System.Collections.Generic.List[string]
+                    $parts.Add('new-tab')
                     if (-not [string]::IsNullOrWhiteSpace($profileName)) {
-                        $arguments.Add('-p')
-                        $arguments.Add(('"{0}"' -f $profileName))
+                        $parts.Add('-p')
+                        $parts.Add(('"{0}"' -f $profileName))
                     }
                     if (-not [string]::IsNullOrWhiteSpace($cwd) -and (Test-Path -LiteralPath $cwd)) {
-                        $arguments.Add('-d')
-                        $arguments.Add(('"{0}"' -f $cwd))
+                        $parts.Add('-d')
+                        $parts.Add(('"{0}"' -f $cwd))
                     }
                     if (-not [string]::IsNullOrWhiteSpace([string]$tab.title)) {
-                        $arguments.Add('--title')
-                        $arguments.Add(('"{0}"' -f [string]$tab.title))
+                        $parts.Add('--title')
+                        $parts.Add(('"{0}"' -f [string]$tab.title))
                     }
+                    $segments.Add(($parts -join ' '))
+                }
+            }
+            $opened = $segments.Count
+            if ($opened -gt 0) {
+                # Chunked so a very large session stays under the command
+                # line limit; chunks after the first still open new windows,
+                # which is the correct behaviour past a few thousand args.
+                $chunkSize = 20
+                for ($offset = 0; $offset -lt $segments.Count; $offset += $chunkSize) {
+                    $last = [Math]::Min($offset + $chunkSize - 1, $segments.Count - 1)
+                    $command = ($segments[$offset..$last] -join ' ; ')
                     try {
-                        Start-Process -FilePath $wtExe -ArgumentList ($arguments -join ' ')
-                        $opened++
-                        Start-Sleep -Milliseconds 350
+                        Start-Process -FilePath $wtExe -ArgumentList $command
+                        Start-Sleep -Milliseconds 400
                     } catch {
-                        Write-SRLog -Level WARN -Message ('Could not open a Windows Terminal tab: {0}' -f $_.Exception.Message)
+                        Write-SRLog -Level WARN -Message ('Could not open Windows Terminal tabs: {0}' -f $_.Exception.Message)
+                        $opened = 0
+                        break
                     }
                 }
             }
