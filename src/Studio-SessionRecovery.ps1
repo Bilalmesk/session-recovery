@@ -2514,6 +2514,24 @@ function Update-StudioSnapshotDetails {
         }
         $lines.Add('')
     }
+
+    # Unsaved-work radar: call out the apps whose windows carried dirty
+    # markers when the snapshot was taken, so a crash victim knows exactly
+    # which apps to check for auto-recovered drafts.
+    try {
+        $unsavedApps = @($snapshot.apps | Where-Object {
+            $p = $_.PSObject.Properties['unsavedWindows']
+            ($null -ne $p) -and ([int]$p.Value -gt 0)
+        })
+        if ($unsavedApps.Count -gt 0) {
+            $lines.Add((T 'DetailUnsavedHeader' 'UNSAVED WORK'))
+            foreach ($unsavedApp in $unsavedApps) {
+                $lines.Add(((T 'DetailUnsavedLine' '  {0}  ({1} window(s) with unsaved changes)') -f ([string]$unsavedApp.name), [int]$unsavedApp.unsavedWindows))
+            }
+            $lines.Add('')
+        }
+    } catch { }
+
     $lines.Add((T 'DetailApplications' 'APPLICATIONS'))
     if ($stats.Apps -eq 0) {
         $lines.Add((T 'DetailNoneCaptured' '  (none captured)'))

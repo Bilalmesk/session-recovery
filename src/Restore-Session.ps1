@@ -570,6 +570,14 @@ if ($DryRun) {
     Write-Output ('Captured: {0} ({1})' -f $entry.CapturedAt.ToString('g'), (Format-RSAge -CapturedAt $entry.CapturedAt))
     Write-Output ('Contents: {0} app(s), {1} folder(s), {2} browser(s), {3} tab(s)' -f $stats.Apps, $stats.Folders, $stats.Browsers, $stats.Tabs)
     Write-Output ('Tab mode: {0}' -f $TabMode)
+    $unsavedApps = @($planAll.apps | Where-Object {
+        $p = $_.PSObject.Properties['unsavedWindows']
+        ($null -ne $p) -and ([int]$p.Value -gt 0)
+    })
+    if ($unsavedApps.Count -gt 0) {
+        Write-Output ('Unsaved work: {0} app(s) open first - {1}' -f
+            $unsavedApps.Count, (($unsavedApps | ForEach-Object { $_.name }) -join ', '))
+    }
     try {
         $preview = Get-SRRestorePreview -Plan $planAll
         Write-Output ('Preview: {0} already running, {1} will start, {2} missing' -f $preview.Running, $preview.WillStart, $preview.Missing)
@@ -1575,6 +1583,18 @@ function Update-RSSelection {
                 $script:rsFooterPreview = ((T 'RstPreview' '{0} running, {1} to start') -f $preview.Running, $preview.WillStart)
             }
         } catch { }
+        # Unsaved-work radar: make the flag visible before the user commits.
+        try {
+            $unsavedCount = @($selected.Snapshot.apps | Where-Object {
+                $p = $_.PSObject.Properties['unsavedWindows']
+                ($null -ne $p) -and ([int]$p.Value -gt 0)
+            }).Count
+            if ($unsavedCount -gt 0) {
+                $unsavedNote = ((T 'RstUnsavedShort' '{0} with unsaved work') -f $unsavedCount)
+                if ($null -eq $script:rsFooterPreview) { $script:rsFooterPreview = $unsavedNote }
+                else { $script:rsFooterPreview = ($script:rsFooterPreview + '  ·  ' + $unsavedNote) }
+            }
+        } catch { }
         Update-RSFooterStatus
     } finally {
         $script:rsUpdating = $false
@@ -1738,6 +1758,24 @@ $restoreButton.Add_Click({
     } finally {
         $script:rsRestoring = $false
     }
+
+    # The unsaved-work radar's payoff: tell the user exactly which restored
+    # apps had documents open with unsaved changes, so recovery is the first
+    # thing they check instead of a surprise discovered later.
+    try {
+        $restoredUnsaved = @($entry.Snapshot.apps | Where-Object {
+            $p = $_.PSObject.Properties['unsavedWindows']
+            ($null -ne $p) -and ([int]$p.Value -gt 0)
+        })
+        if ($restoredUnsaved.Count -gt 0) {
+            $results += [pscustomobject]@{
+                Target  = ''
+                Started = $false
+                Message = ((T 'RstUnsavedNote' '{0} app(s) had windows with unsaved changes and were opened first. Check them for auto-recovered drafts.') -f
+                    (($restoredUnsaved | ForEach-Object { $_.name }) -join ', '))
+            }
+        }
+    } catch { }
 
     # After a crash, point straight at the AutoRecover files Office kept.
     try {

@@ -22,7 +22,7 @@ winget install --id Bilalmesk.SessionRecovery
 ```
 
 > [!IMPORTANT]
-> It reopens apps and tabs. It **cannot** recover unsaved documents, passwords or form data.
+> It reopens apps and tabs. It **cannot** recover unsaved documents, passwords or form data - but its **unsaved-work radar** tells you exactly which apps had windows with unsaved changes when the crash hit, opens those apps first, and points you at Office AutoRecover drafts.
 
 ## ✨ Features
 
@@ -37,6 +37,7 @@ winget install --id Bilalmesk.SessionRecovery
 | 🔒 **Exclusions & pinning** | Keep apps, folders or URLs out of snapshots; pin snapshots forever |
 | 📝 **Snapshot notes** | Searchable note on each snapshot; included in kits, removed with the snapshot |
 | 🕵️ **Privacy scan** | Finds sensitive apps and sites from names and tab URLs, never page content |
+| 📝 **Unsaved-work radar** | Detects apps whose windows carried unsaved-change markers, opens them first on restore, and flags them in the Studio |
 | 🧳 **Recovery Kit** | Move snapshots, notes and exclusions between PCs in one `.srkit` file |
 | 📊 **Recovery insights** | Local counts for snapshots, apps, sites, pins, notes and storage |
 | 🩺 **Recovery timeline** | Restarts, power loss and blue screens from the last 30 days, read from the local event log |

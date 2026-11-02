@@ -1936,6 +1936,63 @@ Describe 'Auto snapshot resource guards' {
     }
 }
 
+Describe 'Unsaved-work radar' {
+    It 'detects the dirty markers real editors put in titles' {
+        Test-SRTitleUnsavedWork -Title ([string][char]0x25CF + ' main.ts - repo - Visual Studio Code') | Should -BeTrue
+        Test-SRTitleUnsavedWork -Title ([string][char]0x2022 + ' main.py - Sublime Text') | Should -BeTrue
+        Test-SRTitleUnsavedWork -Title '*draft.txt - Notepad++' | Should -BeTrue
+        Test-SRTitleUnsavedWork -Title 'report.doc*' | Should -BeTrue
+        Test-SRTitleUnsavedWork -Title '[+] main.c - VIM' | Should -BeTrue
+        Test-SRTitleUnsavedWork -Title 'main.c [+] - VIM' | Should -BeTrue
+        Test-SRTitleUnsavedWork -Title '*scratch*' | Should -BeTrue
+    }
+
+    It 'leaves clean titles alone' {
+        Test-SRTitleUnsavedWork -Title 'file.txt - Notepad++' | Should -BeFalse
+        Test-SRTitleUnsavedWork -Title 'main.ts - Visual Studio Code' | Should -BeFalse
+        Test-SRTitleUnsavedWork -Title '5 * 3 - Calculator' | Should -BeFalse
+        Test-SRTitleUnsavedWork -Title 'Session Recovery - Settings' | Should -BeFalse
+        Test-SRTitleUnsavedWork -Title '*' | Should -BeFalse
+        Test-SRTitleUnsavedWork -Title '**' | Should -BeFalse
+        Test-SRTitleUnsavedWork -Title '' | Should -BeFalse
+    }
+
+    It 'opens unsaved-work apps first, after launchOrder dependencies' {
+        $apps = @(
+            [pscustomobject]@{ name = 'Slack'; exe = 'exe-slack' }
+            [pscustomobject]@{ name = 'VpnClient'; exe = 'exe-vpn' }
+            [pscustomobject]@{ name = 'Editor'; exe = 'exe-editor'; unsavedWindows = 2 }
+            [pscustomobject]@{ name = 'Browser'; exe = 'exe-browser' }
+        )
+        $order = @(Get-SRLaunchOrder -Apps $apps -LaunchOrder @('VpnClient'))
+        (@($order | ForEach-Object { $_.name }) -join '>') | Should -Be 'VpnClient>Editor>Slack>Browser'
+    }
+
+    It 'keeps capture order when nothing is flagged' {
+        $apps = @(
+            [pscustomobject]@{ name = 'A'; exe = 'exe-a' }
+            [pscustomobject]@{ name = 'B'; exe = 'exe-b' }
+        )
+        $order = @(Get-SRLaunchOrder -Apps $apps -LaunchOrder @())
+        (@($order | ForEach-Object { $_.name }) -join '>') | Should -Be 'A>B'
+    }
+
+    It 'treats a dirty-to-saved transition as a real change in the state hash' {
+        $base = {
+            param($unsaved)
+            [pscustomobject]@{
+                apps          = @([pscustomobject]@{ exe = 'exe-editor'; windows = @(@{ title = 'x' }); unsavedWindows = $unsaved })
+                explorer      = @()
+                browsers      = @()
+                devWorkspaces = @()
+            }
+        }
+        $dirty = Get-SRSnapshotStateHash -Snapshot (& $base 2)
+        $clean = Get-SRSnapshotStateHash -Snapshot (& $base 0)
+        $dirty | Should -Not -Be $clean
+    }
+}
+
 Describe 'Select-SRRecentlyClosedUrls' {
     BeforeAll {
         $script:nowMs = ([DateTimeOffset]::UtcNow).ToUnixTimeMilliseconds()

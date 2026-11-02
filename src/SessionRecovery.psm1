@@ -1725,6 +1725,85 @@ function Open-SRFolder {
 # Application and Explorer capture
 # ---------------------------------------------------------------------------
 
+function Test-SRTitleUnsavedWork {
+    # True when a window title carries a dirty-document marker. Editors and
+    # IDEs signal "this document has unsaved changes" in the title, and that
+    # signal is the only honest trace a crash leaves behind: the app cannot
+    # have its buffers recovered by anyone else, but the user deserves to know
+    # exactly which apps to check first.
+    #
+    # Markers seen in the wild:
+    #   VS Code   "● main.ts - repo - Visual Studio Code"
+    #   Sublime   "• main.py - Sublime Text"
+    #   Notepad++ "*draft.txt - Notepad++" / "draft.txt [*]"
+    #   Emacs     "*scratch*"
+    #   vim       "[+] main.c - VIM"
+    #
+    # Deliberately conservative: the marker must sit at an edge of the title
+    # next to real text. "5 * 3 - Calculator" stays clean, and a title made
+    # only of markers does not count.
+    param([string]$Title)
+    if ([string]::IsNullOrWhiteSpace($Title)) { return $false }
+    $t = $Title.Trim()
+    if ($t.Length -lt 2) { return $false }
+    # Leading marker followed by text that is not another marker.
+    if ($t -match '^[*●•][^\s*●•]') { return $true }
+    # Leading marker, a space, then text ("● main.ts - ...").
+    if ($t -match '^[*●•]\s+[^\s*●•]') { return $true }
+    # Trailing marker right after text ("draft.txt*" / "draft.txt [*]").
+    if ($t -match '[^\s*●•]\s*\[\+\]$') { return $true }
+    # vim puts its dirty marker right after the buffer name, mid-title
+    # ("main.c [+] - VIM"), standing alone as a token.
+    if ($t -match '(?:^|\s)\[\+\](?:\s|$)') { return $true }
+    if ($t -match '[^\s*●•][*●•]$') { return $true }
+    return $false
+}
+
+function Get-SRLaunchOrder {
+    # Pure launch sequencing for a restore: apps named in launchOrder first
+    # (a VPN or database the rest depends on), then apps whose snapshot shows
+    # they had unsaved work, then everything else. Within each group the
+    # capture order is kept. Used by Invoke-SRRestore so the order is
+    # testable without launching anything.
+    param(
+        [object[]]$Apps = @(),
+        [string[]]$LaunchOrder = @()
+    )
+    $all = @(@($Apps) | Where-Object { $null -ne $_ })
+    if (@($all).Count -eq 0) { return @() }
+
+    $isListed = {
+        param($app)
+        $leaf = ([string]$app.name).ToLowerInvariant()
+        foreach ($name in @($LaunchOrder)) {
+            $listed = ([string]$name).ToLowerInvariant()
+            if ($leaf -eq $listed) { return $true }
+            if ([string]$app.exe -like ('*\' + $name)) { return $true }
+        }
+        return $false
+    }
+    $hasUnsaved = {
+        param($app)
+        try {
+            $property = $app.PSObject.Properties['unsavedWindows']
+            return ($null -ne $property -and [int]$property.Value -gt 0)
+        } catch { return $false }
+    }
+
+    return @(
+        if (@($LaunchOrder).Count -gt 0) {
+            foreach ($name in @($LaunchOrder)) {
+                $target = ([string]$name).ToLowerInvariant()
+                $all | Where-Object {
+                    (([string]$_.name).ToLowerInvariant() -eq $target) -or ([string]$_.exe -like ('*\' + $name))
+                }
+            }
+        }
+        $all | Where-Object { -not (& $isListed $_) -and (& $hasUnsaved $_) }
+        $all | Where-Object { -not (& $isListed $_) -and -not (& $hasUnsaved $_) }
+    )
+}
+
 function Get-SRApplications {
     param(
         [Parameter(Mandatory = $true)]$Windows,
@@ -1807,6 +1886,16 @@ function Get-SRApplications {
         # Store a plain array. PowerShell 5.1's @() can throw an
         # "Argument types do not match" error for generic List<object> values.
         $entry.windows = $entry.windows.ToArray()
+
+        # Unsaved-work radar: count windows whose title carries a dirty
+        # marker. Restore opens these apps first and the Studio flags them,
+        # because this is the closest an outside tool can honestly get to
+        # "you had unsaved documents here".
+        $dirtyCount = 0
+        foreach ($window in @($entry.windows)) {
+            if (Test-SRTitleUnsavedWork -Title ([string]$window.title)) { $dirtyCount++ }
+        }
+        $entry | Add-Member -NotePropertyName unsavedWindows -NotePropertyValue ([int]$dirtyCount) -Force
 
         # Remember where this application's main window lived. Prefer a
         # restored (non-minimized) window: minimized windows report the
@@ -4538,7 +4627,14 @@ function Get-SRSnapshotStateHash {
     param([Parameter(Mandatory = $true)]$Snapshot)
     $parts = New-Object System.Collections.Generic.List[string]
     foreach ($app in @($Snapshot.apps)) {
-        $parts.Add('a:' + [string]$app.exe + ':' + @($app.windows).Count)
+        # Unsaved-work count is part of the fingerprint: a document going from
+        # dirty to saved is a real change worth a new snapshot.
+        $unsaved = 0
+        try {
+            $unsavedProperty = $app.PSObject.Properties['unsavedWindows']
+            if ($null -ne $unsavedProperty) { $unsaved = [int]$unsavedProperty.Value }
+        } catch { }
+        $parts.Add('a:' + [string]$app.exe + ':' + @($app.windows).Count + ':' + $unsaved)
     }
     foreach ($folder in @($Snapshot.explorer)) { $parts.Add('f:' + [string]$folder) }
     foreach ($browser in @($Snapshot.browsers)) {
@@ -6723,25 +6819,7 @@ function Invoke-SRRestore {
         }
     } catch { }
 
-    $orderedApps = @($Plan.apps | Where-Object { $null -ne $_ })
-    if (@($launchOrder).Count -gt 0) {
-        $orderedApps = @(
-            # Listed apps in launchOrder sequence, then everything else.
-            foreach ($name in @($launchOrder)) {
-                $leaf = ([string]$name).ToLowerInvariant()
-                $orderedApps | Where-Object { (([string]$_.name).ToLowerInvariant() -eq $leaf) -or ([string]$_.exe -like ('*\' + $name)) }
-            }
-            $orderedApps | Where-Object {
-                $app = $_
-                $leaf = ([string]$app.name).ToLowerInvariant()
-                $listed = $false
-                foreach ($name in @($launchOrder)) {
-                    if (([string]$name).ToLowerInvariant() -eq $leaf) { $listed = $true }
-                }
-                -not $listed
-            }
-        )
-    }
+    $orderedApps = @(Get-SRLaunchOrder -Apps @($Plan.apps) -LaunchOrder $launchOrder)
 
     $total = 0
     foreach ($app in @($orderedApps)) { $total++ }
