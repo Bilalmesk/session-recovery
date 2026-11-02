@@ -1213,6 +1213,7 @@ function Get-SRDefaultConfig {
         autoExportFolder        = ''
         captureThumbnails       = $false
         redactUrls              = $true
+        redactUrlMode           = 'Full'
         compressSnapshots       = $false
         encryptSnapshots        = $false
         eventSnapshots          = $true
@@ -4003,29 +4004,129 @@ function Remove-SRThumbnails {
     } catch { }
 }
 
+function Test-SRSensitiveQueryName {
+    # Names that carry a credential in a query string. Used by the Safe
+    # redaction mode, which keeps ordinary parameters (deep links, search ids,
+    # YouTube's ?t= offset) but never writes these values to disk.
+    param([string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
+    # Deliberately narrow. Short, ambiguous names like 't', 'u', 'state' and
+    # 'hl' are ordinary deep-link parameters, not credentials, and redacting
+    # them would break the page a restore is meant to reopen.
+    return ($Name -match '(?i)^(access_?token|refresh_?token|id_?token|token|auth(?:orization)?|oauth|session_?id|sid|sig|signature|api_?key|secret|password|passwd|pwd|code|otp|nonce|jwt|bearer|ticket|saml|assertion|assertion_?data)$' -or
+        $Name -match '(?i)(token|secret|password|passwd|api_?key|signature|credential)')
+}
+
 function Redact-SRUrl {
-    # Strips query strings and fragments so tokens never reach disk.
-    param([string]$Url)
+    # Keeps credentials out of snapshots.
+    #   Full (default) strips the whole query string and fragment, so nothing
+    #                  site-specific survives and deep links are lost.
+    #   Safe           keeps the query string but blanks the value of any
+    #                  parameter that looks like a credential, so a restore
+    #                  still reopens the right page.
+    # The fragment is always dropped: it commonly carries OAuth tokens and is
+    # never sent to the server.
+    param(
+        [string]$Url,
+        [ValidateSet('Full', 'Safe')][string]$Mode = 'Full'
+    )
     if ([string]::IsNullOrWhiteSpace($Url)) { return $Url }
     $value = [string]$Url
     $hashIndex = $value.IndexOf('#')
     if ($hashIndex -ge 0) { $value = $value.Substring(0, $hashIndex) }
     $queryIndex = $value.IndexOf('?')
-    if ($queryIndex -ge 0) { $value = $value.Substring(0, $queryIndex) }
-    return $value
+    if ($queryIndex -lt 0) { return $value }
+    $path = $value.Substring(0, $queryIndex)
+    if ($Mode -ne 'Safe') { return $path }
+
+    $query = $value.Substring($queryIndex + 1)
+    if ([string]::IsNullOrEmpty($query)) { return $path }
+    $parts = New-Object System.Collections.Generic.List[string]
+    foreach ($pair in $query.Split('&')) {
+        if ([string]::IsNullOrEmpty($pair)) { continue }
+        $equals = $pair.IndexOf('=')
+        $name = if ($equals -ge 0) { $pair.Substring(0, $equals) } else { $pair }
+        if (Test-SRSensitiveQueryName -Name $name) {
+            $parts.Add(('{0}=REDACTED' -f $name))
+        } else {
+            $parts.Add($pair)
+        }
+    }
+    if ($parts.Count -eq 0) { return $path }
+    return ($path + '?' + ($parts -join '&'))
+}
+
+function ConvertTo-SRTabMatchKey {
+    # Identity used to decide whether a tab is already open. Query strings and
+    # fragments are ignored, because a snapshot stores redacted URLs while the
+    # browser's live session still holds "?utm_source=..." for the same tab,
+    # and a trailing slash or host-case difference must not create a duplicate.
+    param([string]$Url)
+    if ([string]::IsNullOrWhiteSpace($Url)) { return '' }
+    $value = Redact-SRUrl -Url ([string]$Url).Trim() -Mode 'Full'
+    $value = $value -replace '/+$', ''
+    return $value.ToLowerInvariant()
+}
+
+function Select-SRMissingTabs {
+    # Captured tabs minus the ones the browser already has open. Reopening a tab
+    # that is already on screen is what makes a crash restore end up with every
+    # page twice, so the diff is applied whenever a live session was readable.
+    param(
+        [object[]]$Captured = @(),
+        [object[]]$Live = @()
+    )
+    $liveKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($tab in @($Live)) {
+        if ($null -eq $tab) { continue }
+        $key = ConvertTo-SRTabMatchKey -Url ([string]$tab.url)
+        if ($key) { [void]$liveKeys.Add($key) }
+    }
+
+    $result = New-Object System.Collections.Generic.List[object]
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($tab in @($Captured)) {
+        if ($null -eq $tab) { continue }
+        $key = ConvertTo-SRTabMatchKey -Url ([string]$tab.url)
+        if (-not $key) { continue }
+        if ($liveKeys.Contains($key)) { continue }
+        if (-not $seen.Add($key)) { continue }
+        $result.Add($tab)
+    }
+    return $result.ToArray()
 }
 
 function Invoke-SRUrlRedaction {
-    param([Parameter(Mandatory = $true)]$Snapshot)
+    param(
+        [Parameter(Mandatory = $true)]$Snapshot,
+        [ValidateSet('Full', 'Safe')][string]$Mode = 'Full'
+    )
     foreach ($browser in @($Snapshot.browsers)) {
         foreach ($profile in @($browser.profiles)) {
             foreach ($tab in @($profile.tabs)) {
                 $urlProperty = $tab.PSObject.Properties['url']
                 if ($null -ne $urlProperty) {
-                    $tab.url = Redact-SRUrl ([string]$urlProperty.Value)
+                    $tab.url = Redact-SRUrl -Url ([string]$urlProperty.Value) -Mode $Mode
                 }
             }
         }
+    }
+    # App command lines carry URLs too: Electron and IDE windows are often
+    # opened with a document or deep link that holds a token, and the argument
+    # list is written verbatim. Apply the same rule to any http(s) argument.
+    foreach ($app in @($Snapshot.apps)) {
+        $argsProperty = $app.PSObject.Properties['args']
+        if ($null -eq $argsProperty -or $null -eq $argsProperty.Value) { continue }
+        $redacted = New-Object System.Collections.Generic.List[string]
+        foreach ($argument in @($argsProperty.Value)) {
+            $value = [string]$argument
+            if ($value -match '^(?i)https?://') {
+                $redacted.Add((Redact-SRUrl -Url $value -Mode $Mode))
+            } else {
+                $redacted.Add($value)
+            }
+        }
+        $app.args = @($redacted.ToArray())
     }
 }
 
@@ -5135,21 +5236,42 @@ function New-SRSnapshot {
         }
     }
 
-    # Privacy: strip query strings and fragments from captured URLs unless
-    # the user turned redaction off.
+    # Privacy: keep query strings and fragments containing credentials out of
+    # the snapshot unless the user turned redaction off. 'redactUrls' keeps its
+    # historical true/false meaning (Full strip); 'redactUrlMode' selects the
+    # gentler Safe mode that only blanks credential-looking parameters.
     $redactUrls = $true
     try {
         $redactProperty = $config.PSObject.Properties['redactUrls']
         if ($null -ne $redactProperty) { $redactUrls = [bool]$redactProperty.Value }
     } catch { }
     if ($redactUrls) {
+        $redactMode = 'Full'
+        try {
+            $modeProperty = $config.PSObject.Properties['redactUrlMode']
+            if ($null -ne $modeProperty -and [string]$modeProperty.Value -match '(?i)^safe$') { $redactMode = 'Safe' }
+        } catch { }
         foreach ($browser in $browsers) {
             foreach ($profile in @($browser.profiles)) {
                 foreach ($tab in @($profile.tabs)) {
                     $urlProperty = $tab.PSObject.Properties['url']
-                    if ($null -ne $urlProperty) { $tab.url = Redact-SRUrl ([string]$urlProperty.Value) }
+                    if ($null -ne $urlProperty) { $tab.url = Redact-SRUrl -Url ([string]$urlProperty.Value) -Mode $redactMode }
                 }
             }
+        }
+        foreach ($app in $apps) {
+            $argsProperty = $app.PSObject.Properties['args']
+            if ($null -eq $argsProperty -or $null -eq $argsProperty.Value) { continue }
+            $redactedArgs = New-Object System.Collections.Generic.List[string]
+            foreach ($argument in @($argsProperty.Value)) {
+                $value = [string]$argument
+                if ($value -match '^(?i)https?://') {
+                    $redactedArgs.Add((Redact-SRUrl -Url $value -Mode $redactMode))
+                } else {
+                    $redactedArgs.Add($value)
+                }
+            }
+            $app.args = @($redactedArgs.ToArray())
         }
     }
 
@@ -5856,6 +5978,30 @@ function Restore-SRBrowser {
     foreach ($profile in @($Browser.profiles)) { $capturedCount += @($profile.tabs).Count }
     $profiles = @(Get-SRBrowserProfileState -Browser $Browser -PreferLiveTabs:($capturedCount -eq 0))
 
+    # When the browser is already up, its live session is the "already open"
+    # list. That is the crash case: the browser restores its own tabs on
+    # launch, then Session Recovery reopens the same set on top and every page
+    # appears twice. Only the tabs that are genuinely missing get reopened.
+    $liveTabs = New-Object System.Collections.Generic.List[object]
+    if ($isRunning) {
+        foreach ($profile in @($Browser.profiles)) {
+            if (-not $profile.path -or -not (Test-Path -LiteralPath $profile.path)) { continue }
+            $live = $null
+            try {
+                if ($Browser.kind -eq 'chromium') {
+                    $live = Get-SRChromiumSessionTabs -ProfileDirectory $profile.path
+                } elseif ($Browser.kind -eq 'firefox') {
+                    $live = Get-SRFirefoxTabs -ProfileDirectory $profile.path
+                }
+            } catch {
+                Write-SRLog -Level DEBUG -Message ("Could not read the live session for {0}: {1}" -f $profile.path, $_.Exception.Message)
+            }
+            if ($null -eq $live) { continue }
+            foreach ($tab in @($live.tabs)) { $liveTabs.Add($tab) }
+        }
+    }
+    $liveTabsRead = ($liveTabs.Count -gt 0)
+
     if ($Browser.kind -eq 'firefox') {
         $profile = $profiles | Select-Object -First 1
         $tabs = @()
@@ -5865,8 +6011,18 @@ function Restore-SRBrowser {
         if ($null -ne $profile) { $preference = $profile.restoreOnStartup }
         $nativePreferred = ($preference -eq 3)
 
+        # Tabs already on screen are never reopened.
+        if ($liveTabsRead) { $tabs = @(Select-SRMissingTabs -Captured $tabs -Live $liveTabs.ToArray()) }
+        if ($isRunning -and $liveTabsRead -and $tabs.Count -eq 0) {
+            $results.Add([pscustomobject]@{ Started = $false; Message = 'Firefox: every captured tab is already open.' })
+            return $results.ToArray()
+        }
+
         $action = $TabMode
         if ($action -eq 'Smart') {
+            # Captured tabs stay the source of truth in Smart mode: the browser's
+            # own restore would reopen its latest session, which is not
+            # necessarily the snapshot the user picked.
             if ($tabs.Count -gt 0) { $action = 'Captured' }
             else { $action = 'Native' }
         } elseif ($action -eq 'Captured' -and $tabs.Count -eq 0) {
@@ -5931,8 +6087,22 @@ function Restore-SRBrowser {
         $tabs = @($profile.tabs | Where-Object { Test-SRRestorableUrl -Url $_.url })
         $nativePreferred = ($profile.restoreOnStartup -eq 1)
 
+        # Tabs the browser already shows are never reopened. Without this a
+        # crash restore doubles every tab: Chromium restores its own session on
+        # launch, then this loop put the same URLs on top again.
+        if ($liveTabsRead) { $tabs = @(Select-SRMissingTabs -Captured $tabs -Live $liveTabs.ToArray()) }
+
+        if ($isRunning -and $liveTabsRead -and $tabs.Count -eq 0) {
+            $results.Add([pscustomobject]@{ Started = $false; Message = ("{0}: every captured tab is already open in profile '{1}'." -f $Browser.name, $profile.displayName) })
+            continue
+        }
+
         $action = $TabMode
         if ($action -eq 'Smart') {
+            # Captured tabs stay the source of truth in Smart mode: the
+            # browser's own restore would reopen its latest session, which is
+            # not necessarily the snapshot the user picked. Duplicates are
+            # handled by the diff above instead of by switching modes.
             if ($tabs.Count -gt 0) { $action = 'Captured' }
             else { $action = 'Native' }
         } elseif ($action -eq 'Captured' -and $tabs.Count -eq 0) {

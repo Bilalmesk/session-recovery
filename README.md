@@ -6,7 +6,7 @@
 
 ![Windows 10/11](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?logo=windows&logoColor=white)
 ![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-5391FE?logo=powershell&logoColor=white)
-![Version](https://img.shields.io/badge/version-3.0.3-8B5CF6)
+![Version](https://img.shields.io/badge/version-3.0.4-8B5CF6)
 ![Local only](https://img.shields.io/badge/privacy-100%25%20local-22C55E)
 
 [Install](#-install) · [Restore](#-restore) · [Configure](#%EF%B8%8F-configure) · [Troubleshoot](#-troubleshooting) · [Uninstall](#-uninstall)
@@ -133,6 +133,8 @@ The restore window uses the same layout, cards and colour theme as the Studio, a
 | `Native` | Uses the browser's own session restore |
 | `None` | Skips browsers |
 
+Whatever the mode, a tab that is already open is never reopened. When the browser is still running, restore reads its live session, compares it with the snapshot and opens only the missing tabs. After a crash this is the difference between getting the desktop back and getting every page twice, because browsers often restore their own session on first launch. If the live session cannot be read, restore falls back to reopening every captured tab. Tab identity ignores query strings, host case and trailing slashes, so a redacted snapshot URL still matches the live tab.
+
 <details>
 <summary><b>Command line</b></summary>
 
@@ -203,6 +205,7 @@ Use the Studio **Settings** page, or edit `%LOCALAPPDATA%\SessionRecovery\config
   "encryptSnapshots": false,
   "compressSnapshots": false,
   "redactUrls": true,
+  "redactUrlMode": "Full",
   "hibernateGuard": true,
   "keepHibernateCheckpoints": 3,
   "excludeApps": ["KeePass*"],
@@ -235,7 +238,8 @@ Use the Studio **Settings** page, or edit `%LOCALAPPDATA%\SessionRecovery\config
 | `theme` | `Aurora` | `Aurora`, `Daylight`, `Midnight`, `Forest`, `Ember`, `Neon`, `Sakura`, `Paper`, `Synthwave`, `Voltage`, `Frostbite`, `Magma`, `Aqua` or `Solar` |
 | `encryptSnapshots` | `false` | Seal snapshots with DPAPI for this Windows user |
 | `compressSnapshots` | `false` | Write gzip-compressed snapshots |
-| `redactUrls` | `true` | Strip URL query strings and fragments before writing |
+| `redactUrls` | `true` | Redact URL query strings and fragments before writing |
+| `redactUrlMode` | `Full` | `Full` strips the whole query string; `Safe` keeps ordinary parameters and blanks credential-looking values |
 | `hibernateGuard` | `true` | Save and pin a checkpoint whenever Windows suspends |
 | `keepHibernateCheckpoints` | `3` | Number of hibernate/suspend checkpoints kept pinned |
 | `excludeApps` / `excludeFolders` / `excludeUrls` | `[]` | Case-insensitive wildcards |
@@ -305,6 +309,11 @@ Each snapshot also records the PC facts that affect placement — machine name, 
 
 - Everything stays on your PC: no extension, no debugging port and no telemetry. The app makes no network requests unless you check for or download an update.
 - Snapshots hold executable paths, window titles, folder paths and URLs. They are plaintext by default; enable `encryptSnapshots` for DPAPI protection. Snapshot notes are always plaintext in `config.json`, and a Recovery Kit is a plain ZIP unless the snapshots inside are encrypted. Use BitLocker or account permissions on shared PCs.
+- URLs are redacted before they are written, for browser tabs and for URL-shaped arguments in captured command lines. Two modes, set with `redactUrlMode`:
+  - `Full` (default) drops the entire query string and fragment, so search terms, deep links and tokens never reach disk. The cost is that a restore reopens the site, not the exact page.
+  - `Safe` keeps ordinary parameters so the exact page comes back, and blanks only values whose name looks like a credential (`token`, `secret`, `api_key`, `password`, `code`, `sid`, `signature` and similar). Fragments are always removed.
+  - Both modes are bypassed when `redactUrls` is `false`. `excludeUrls` wildcards match the raw URL first, so an excluded domain is never captured at all.
+  - Window titles and non-URL command-line arguments are still stored verbatim — a window title can contain a document name.
 - To back up a session, copy its JSON and restore it elsewhere with `-SnapshotPath`.
 
 | Path (under `%LOCALAPPDATA%\SessionRecovery`) | Contents |

@@ -17,7 +17,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-$script:AppVersion = '3.0.3'
+$script:AppVersion = '3.0.4'
 $script:ScriptDir = $PSScriptRoot
 $script:AppDir = if ($env:SESSIONRECOVERY_HOST_EXE) { Split-Path -Parent $env:SESSIONRECOVERY_HOST_EXE } else { $PSScriptRoot }
 $script:HostExe = $null
@@ -3554,7 +3554,7 @@ $preRestoreHint = New-StudioLabel -Text (T 'SetPreRestoreHint' 'Undo last restor
 $restoreCard.Controls.Add($preRestoreHint)
 
 # Card: browser capture
-$browserCard = New-StudioSettingsCard -Title 'Browser capture' -Description 'Chrome, Edge, Brave and other Chromium browsers use a safe live fallback when their session files are empty.' -Height 264 -WrapDescription
+$browserCard = New-StudioSettingsCard -Title 'Browser capture' -Description 'Chrome, Edge, Brave and other Chromium browsers use a safe live fallback when their session files are empty.' -Height 330 -WrapDescription
 $settingsFlow.Controls.Add($browserCard)
 $settingsCards.Add($browserCard)
 
@@ -3576,6 +3576,14 @@ $redactLabel = New-StudioLabel -Text 'Strip query strings from captured URLs' -X
 $browserCard.Controls.Add($redactLabel)
 $redactHint = New-StudioLabel -Text 'Tokens and search terms in ?query strings never reach the snapshot files.' -X 76 -Y 222 -Width 440 -Height 18 -Font $script:FontBodySmall -Color $script:P.Subtle
 $browserCard.Controls.Add($redactHint)
+
+$toggleRedactSafe = New-StudioToggle -X 20 -Y 250 -Checked $false
+$browserCard.Controls.Add($toggleRedactSafe)
+$redactSafeLabel = New-StudioLabel -Text 'Keep the rest of the address bar' -X 76 -Y 254 -Width 420 -Height 20 -Font $script:FontBody -Color $script:P.Text
+$browserCard.Controls.Add($redactSafeLabel)
+$redactSafeHint = New-StudioLabel -Text 'Keeps ?page= and search parameters so a restore reopens the same page, and only blanks values that look like tokens or passwords. Fragments are still always removed.' -X 76 -Y 274 -Width 440 -Height 32 -Font $script:FontBodySmall -Color $script:P.Subtle
+$browserCard.Controls.Add($redactSafeHint)
+$toggleRedactSafe.Add_CheckedChanged({ $redactSafeHint.ForeColor = if ($toggleRedactSafe.Checked) { $script:P.Subtle } else { $script:P.DisabledText } })
 
 $lookbackLabel = New-StudioLabel -Text 'HISTORY LOOKBACK' -X 560 -Y 76 -Width 180 -Height 16 -Font $script:FontMono -Color $script:P.Subtle
 $browserCard.Controls.Add($lookbackLabel)
@@ -3836,6 +3844,9 @@ function Load-StudioSettings {
     $toggleApprox.Checked = [bool]$script:Config.captureApproximateTabs
     $redactProperty = $script:Config.PSObject.Properties['redactUrls']
     $toggleRedact.Checked = if ($null -ne $redactProperty) { [bool]$redactProperty.Value } else { $true }
+    $redactModeProperty = $script:Config.PSObject.Properties['redactUrlMode']
+    $toggleRedactSafe.Checked = ($null -ne $redactModeProperty -and [string]$redactModeProperty.Value -match '(?i)^safe$')
+    $toggleRedactSafe.Enabled = $toggleRedact.Checked
     $eventsProperty = $script:Config.PSObject.Properties['eventSnapshots']
     $toggleEvents.Checked = if ($null -ne $eventsProperty) { [bool]$eventsProperty.Value } else { $true }
     $hibernateProperty = $script:Config.PSObject.Properties['hibernateGuard']
@@ -3895,6 +3906,7 @@ function Save-StudioSettings {
         $config.captureBrowserTabs = [bool]$toggleCaptureBrowsers.Checked
         $config.captureApproximateTabs = [bool]$toggleApprox.Checked
         $config.redactUrls = [bool]$toggleRedact.Checked
+        $config.redactUrlMode = if ($toggleRedactSafe.Checked) { 'Safe' } else { 'Full' }
         $config.eventSnapshots = [bool]$toggleEvents.Checked
         $config.hibernateGuard = [bool]$toggleHibernate.Checked
         $config.captureDevWorkspaces = [bool]$toggleDev.Checked

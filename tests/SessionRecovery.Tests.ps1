@@ -174,6 +174,108 @@ Describe 'Redact-SRUrl' {
     It 'survives empty input' {
         Redact-SRUrl '' | Should -Be ''
     }
+
+    Context 'Safe mode' {
+        It 'keeps ordinary deep-link parameters' {
+            Redact-SRUrl -Url 'https://docs.example.com/d/1?page=3&tab=notes' -Mode Safe |
+                Should -Be 'https://docs.example.com/d/1?page=3&tab=notes'
+        }
+
+        It 'blanks credential-looking values but keeps the parameter name' {
+            Redact-SRUrl -Url 'https://docs.example.com/d/1?token=abc&hl=en' -Mode Safe |
+                Should -Be 'https://docs.example.com/d/1?token=REDACTED&hl=en'
+        }
+
+        It 'does not redact an ordinary short parameter such as a timestamp' {
+            Redact-SRUrl -Url 'https://video.example.com/watch?v=abc&t=42' -Mode Safe |
+                Should -Be 'https://video.example.com/watch?v=abc&t=42'
+        }
+
+        It 'always drops the fragment, which is where OAuth tokens live' {
+            Redact-SRUrl -Url 'https://example.com/cb?code=x#access_token=secret' -Mode Safe |
+                Should -Not -Match 'access_token=secret'
+        }
+
+        It 'still strips everything in the default Full mode' {
+            Redact-SRUrl -Url 'https://example.com/page?page=3' | Should -Be 'https://example.com/page'
+        }
+    }
+}
+
+Describe 'Invoke-SRUrlRedaction' {
+    It 'redacts tab URLs and URL-shaped application arguments' {
+        $snapshot = [pscustomobject]@{
+            apps     = @(
+                [pscustomobject]@{
+                    exe  = 'C:\app.exe'
+                    args = @('https://example.com/invite?token=secret', 'C:\file.txt')
+                }
+            )
+            browsers = @(
+                [pscustomobject]@{
+                    profiles = @(
+                        [pscustomobject]@{
+                            tabs = @([pscustomobject]@{ url = 'https://example.com/a?token=secret' })
+                        }
+                    )
+                }
+            )
+        }
+
+        Invoke-SRUrlRedaction -Snapshot $snapshot
+
+        $snapshot.browsers[0].profiles[0].tabs[0].url | Should -Be 'https://example.com/a'
+        $snapshot.apps[0].args[0] | Should -Be 'https://example.com/invite' -Because 'command lines reach disk verbatim too'
+        $snapshot.apps[0].args[1] | Should -Be 'C:\file.txt' -Because 'plain paths must not be rewritten'
+    }
+}
+
+Describe 'ConvertTo-SRTabMatchKey' {
+    It 'ignores query strings, fragments, host case and trailing slashes' {
+        ConvertTo-SRTabMatchKey 'https://Example.com/Path/?utm_source=x#top' |
+            Should -Be (ConvertTo-SRTabMatchKey 'https://example.com/Path')
+    }
+
+    It 'still separates different paths' {
+        ConvertTo-SRTabMatchKey 'https://example.com/a' |
+            Should -Not -Be (ConvertTo-SRTabMatchKey 'https://example.com/b')
+    }
+}
+
+Describe 'Select-SRMissingTabs' {
+    It 'drops captured tabs the browser already has open' {
+        $captured = @(
+            [pscustomobject]@{ url = 'https://a.example/one' },
+            [pscustomobject]@{ url = 'https://a.example/two' }
+        )
+        $live = @([pscustomobject]@{ url = 'https://a.example/one' })
+        $missing = @(Select-SRMissingTabs -Captured $captured -Live $live)
+        $missing.Count | Should -Be 1
+        $missing[0].url | Should -Be 'https://a.example/two'
+    }
+
+    It 'matches despite redaction, tracking parameters and a trailing slash' {
+        $captured = @([pscustomobject]@{ url = 'https://a.example/one' })
+        $live = @([pscustomobject]@{ url = 'https://A.example/one/?utm_source=newsletter' })
+        @(Select-SRMissingTabs -Captured $captured -Live $live).Count |
+            Should -Be 0 -Because 'a crash restore must not open the same page twice'
+    }
+
+    It 'returns every captured tab when nothing is live' {
+        $captured = @(
+            [pscustomobject]@{ url = 'https://a.example/one' },
+            [pscustomobject]@{ url = 'https://a.example/two' }
+        )
+        @(Select-SRMissingTabs -Captured $captured -Live @()).Count | Should -Be 2
+    }
+
+    It 'does not repeat a URL that appears twice in the capture' {
+        $captured = @(
+            [pscustomobject]@{ url = 'https://a.example/one' },
+            [pscustomobject]@{ url = 'https://a.example/one?x=1' }
+        )
+        @(Select-SRMissingTabs -Captured $captured -Live @()).Count | Should -Be 1
+    }
 }
 
 Describe 'ConvertFrom-SRFileUri' {
@@ -654,6 +756,45 @@ Describe 'Installer payload' {
             $name = Split-Path $file.Source -Leaf
             $removals | Should -Contain $name -Because "$name must be replaced on upgrade"
         }
+    }
+}
+
+Describe 'Release version consistency' {
+    It 'keeps the source, installer and winget manifests on the same version' {
+        $readme = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\README.md') -Raw
+        $badge = [regex]::Match($readme, 'version-(\d+\.\d+\.\d+)-').Groups[1].Value
+        $badge | Should -Not -BeNullOrEmpty
+
+        $studio = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\Studio-SessionRecovery.ps1') -Raw
+        $studioVersion = [regex]::Match($studio, "AppVersion\s*=\s*'(\d+\.\d+\.\d+)'").Groups[1].Value
+        $restore = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\Restore-Session.ps1') -Raw
+        $restoreVersion = [regex]::Match($restore, "AppVersion\s*=\s*'(\d+\.\d+\.\d+)'").Groups[1].Value
+
+        $wixproj = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\installer\SessionRecovery.Installer.wixproj') -Raw
+        $wixVersion = [regex]::Match($wixproj, '>(\d+\.\d+\.\d+)<').Groups[1].Value
+
+        $installer = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\packaging\winget\SessionRecovery.installer.yaml') -Raw
+        $wingetVersion = [regex]::Match($installer, 'PackageVersion:\s*(\d+\.\d+\.\d+)').Groups[1].Value
+        $versionFile = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\packaging\winget\SessionRecovery.version.yaml') -Raw
+        $versionFileVersion = [regex]::Match($versionFile, 'PackageVersion:\s*(\d+\.\d+\.\d+)').Groups[1].Value
+        $locale = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\packaging\winget\SessionRecovery.locale.en-US.yaml') -Raw
+        $localeVersion = [regex]::Match($locale, 'PackageVersion:\s*(\d+\.\d+\.\d+)').Groups[1].Value
+
+        $studioVersion | Should -Be $badge
+        $restoreVersion | Should -Be $badge
+        $wixVersion | Should -Be $badge
+        $wingetVersion | Should -Be $badge
+        $versionFileVersion | Should -Be $badge
+        $localeVersion | Should -Be $badge
+    }
+
+    It 'points the winget installer URL at the matching release tag' {
+        $installer = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\packaging\winget\SessionRecovery.installer.yaml') -Raw
+        $url = [regex]::Match($installer, 'InstallerUrl:\s*(\S+)').Groups[1].Value
+        $msi = Split-Path $url -Leaf
+        $version = [regex]::Match($installer, 'PackageVersion:\s*(\d+\.\d+\.\d+)').Groups[1].Value
+        $msi | Should -Be ("SessionRecovery-{0}.msi" -f $version)
+        $url | Should -Match ("/download/v{0}/" -f [regex]::Escape($version))
     }
 }
 
