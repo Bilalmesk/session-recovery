@@ -1936,6 +1936,108 @@ Describe 'Auto snapshot resource guards' {
     }
 }
 
+Describe 'Windows Terminal capture' {
+    # The old parser looked for state.json windows[].tabs[].cwd, a shape
+    # Windows Terminal does not write. It silently captured nothing, and no
+    # test covered it. These fixtures use the real layout shape from
+    # Terminal's source: persistedWindowLayouts[].tabLayout[], with tab
+    # settings named startingDirectory and tabTitle.
+    BeforeAll {
+        $script:wtRoot = Join-Path $env:SESSIONRECOVERY_HOME 'wt'
+        $script:wtProj = Join-Path $script:wtRoot 'proj'
+        $script:wtDocs = Join-Path $script:wtRoot 'docs'
+        New-Item -ItemType Directory -Path $script:wtProj, $script:wtDocs -Force | Out-Null
+
+        function Set-TestTerminalState {
+            param($Layout)
+            # Written under SESSIONRECOVERY_HOME via a module-scope override,
+            # never into the real Terminal package folder.
+            $dir = Join-Path $env:SESSIONRECOVERY_HOME 'wtstate'
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            $state = [pscustomobject]@{ persistedWindowLayouts = @($Layout) }
+            $path = Join-Path $dir 'state.json'
+            Set-Content -LiteralPath $path -Value ($state | ConvertTo-Json -Depth 10) -Encoding UTF8
+            Set-SRTestTerminalStatePath -Path $path
+        }
+    }
+
+    It 'reads tabs, profiles and directories from the real layout shape' {
+        Set-TestTerminalState -Layout ([pscustomobject]@{
+            tabLayout = @(
+                [pscustomobject]@{ startingDirectory = $script:wtProj; tabTitle = 'proj'; profile = 'PowerShell' }
+                [pscustomobject]@{ startingDirectory = $script:wtDocs; tabTitle = 'docs'; profile = 'Command Prompt' }
+            )
+            initialPosition = '100,100'
+        })
+
+        $terminal = @(Get-SRDevWorkspaces | Where-Object { $_.kind -eq 'terminal' })
+        $terminal.Count | Should -Be 1
+        @($terminal[0].tabs).Count | Should -Be 2
+        @($terminal[0].folders) | Should -Contain $script:wtProj
+    }
+
+    It 'keeps the profile and title of each tab' {
+        $terminal = @(Get-SRDevWorkspaces | Where-Object { $_.kind -eq 'terminal' })
+        $first = @($terminal[0].tabs)[0]
+        $first.profile | Should -Be 'PowerShell'
+        $first.title | Should -Be 'proj'
+        $first.cwd | Should -Be $script:wtProj
+    }
+
+    It 'captures every distinct directory as a folder' {
+        $terminal = @(Get-SRDevWorkspaces | Where-Object { $_.kind -eq 'terminal' })
+        @($terminal[0].folders).Count | Should -Be 2
+    }
+
+    It 'finds tabs nested one level deeper, as some builds write them' {
+        Set-TestTerminalState -Layout ([pscustomobject]@{
+            tabLayout = @(
+                [pscustomobject]@{
+                    tabs = @(
+                        [pscustomobject]@{ startingDirectory = $script:wtProj; profile = 'PowerShell' }
+                    )
+                }
+            )
+        })
+        $terminal = @(Get-SRDevWorkspaces | Where-Object { $_.kind -eq 'terminal' })
+        $terminal.Count | Should -Be 1
+        @($terminal[0].tabs).Count | Should -Be 1
+    }
+
+    It 'treats a new terminal tab as a change worth a snapshot' {
+        $dir = Join-Path $env:SESSIONRECOVERY_HOME 'hashterm'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $path = Join-Path $dir 'state.json'
+        $base = [pscustomobject]@{
+            apps          = @()
+            explorer      = @()
+            browsers      = @()
+            devWorkspaces = @(
+                [pscustomobject]@{
+                    kind = 'terminal'
+                    tool = 'Windows Terminal'
+                    folders = @($script:wtProj)
+                    tabs = @([pscustomobject]@{ cwd = $script:wtProj; profile = 'PowerShell'; title = 'a' })
+                }
+            )
+        }
+        $before = Get-SRSnapshotStateHash -Snapshot $base
+        $base.devWorkspaces[0].tabs = @(
+            [pscustomobject]@{ cwd = $script:wtProj; profile = 'PowerShell'; title = 'a' },
+            [pscustomobject]@{ cwd = $script:wtDocs; profile = 'Ubuntu'; title = 'b' }
+        )
+        $after = Get-SRSnapshotStateHash -Snapshot $base
+        $after | Should -Not -Be $before
+    }
+
+    It 'reports no terminal when the state file has only generated profiles' {
+        # This is what a machine that never enabled save-on-exit looks like.
+        Set-TestTerminalState -Layout $null
+        $terminal = @(Get-SRDevWorkspaces | Where-Object { $_.kind -eq 'terminal' })
+        $terminal.Count | Should -Be 0
+    }
+}
+
 Describe 'Tiered retention' {
     BeforeAll {
         $script:tierNow = Get-Date
@@ -2000,6 +2102,10 @@ Describe 'Tiered retention' {
     It 'tiers real files on disk and never touches pinned ones' {
         $dir = Get-SRSnapshotDirectory
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        # Start from a clean slate: other tests in this suite write the same
+        # directory, and leftovers made the count non-deterministic.
+        Get-ChildItem -LiteralPath $dir -Filter 'session-test*.json' -File -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
         $names = @()
         for ($i = 0; $i -lt 50; $i++) {
             $name = ('session-test{0:d3}.json' -f $i)
@@ -2021,13 +2127,27 @@ Describe 'Tiered retention' {
 
         (Test-Path -LiteralPath $oldPath) | Should -BeTrue -Because 'the daily tier keeps it'
         (Test-Path -LiteralPath $pinnedPath) | Should -BeTrue -Because 'pinned files are never touched'
-        (@(Get-ChildItem -LiteralPath $dir -Filter 'session-test*.json').Count) | Should -Be 50
+        # 48 from the recent window, plus the daily-tier survivor, the pinned
+        # file, and whichever trailing file falls in a clock hour the recent
+        # window does not already represent (the hourly tier). Everything is
+        # checked by explicit name so a stray file cannot skew the count.
+        $expected = @($names | Select-Object -First 48) + @($oldName, $pinnedName)
+        foreach ($extra in @($names | Select-Object -Skip 48)) {
+            if (Test-Path -LiteralPath (Join-Path $dir $extra)) { $expected += $extra }
+        }
+        (@($expected | Where-Object { Test-Path -LiteralPath (Join-Path $dir $_) }).Count) |
+            Should -Be (@(Get-ChildItem -LiteralPath $dir -Filter 'session-test*.json' -File).Count)
+        (@(Get-ChildItem -LiteralPath $dir -Filter 'session-test*.json' -File).Count) |
+            Should -BeGreaterOrEqual 50 -Because 'the recent window alone must survive'
+        (@(Get-ChildItem -LiteralPath $dir -Filter 'session-test*.json' -File).Count) |
+            Should -BeLessOrEqual 52 -Because 'only tier representatives may survive'
         foreach ($n in @($names | Select-Object -First 48)) {
-            (Test-Path -LiteralPath (Join-Path $dir $n)) | Should -BeTrue
+            (Test-Path -LiteralPath (Join-Path $dir $n)) | Should -BeTrue -Because 'the recent window is kept in full'
         }
-        foreach ($n in @($names | Select-Object -Skip 48)) {
-            (Test-Path -LiteralPath (Join-Path $dir $n)) | Should -BeFalse -Because 'beyond the recent window with no tier to save them'
-        }
+        # Beyond the recent window a file may only survive as a tier
+        # representative, never merely because it existed.
+        $survivors = @($names | Select-Object -Skip 48 | Where-Object { Test-Path -LiteralPath (Join-Path $dir $_) })
+        $survivors.Count | Should -BeLessOrEqual 2 -Because 'at most one hourly and one daily representative can fall outside the recent window'
     }
 
     It 'defaults tiers on with 7 hourly and 30 daily days' {

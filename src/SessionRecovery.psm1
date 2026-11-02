@@ -4647,6 +4647,15 @@ function Get-SRSnapshotStateHash {
     }
     foreach ($workspace in @($Snapshot.devWorkspaces)) {
         foreach ($folder in @($workspace.folders)) { $parts.Add('d:' + [string]$folder) }
+        # Terminal tabs are part of the desktop too: opening a tab in another
+        # profile or directory is a real change, even when no folder list and
+        # no window changed shape.
+        $tabs = @()
+        try { $tabs = @($workspace.tabs) } catch { $tabs = @() }
+        foreach ($tab in $tabs) {
+            if ($null -eq $tab) { continue }
+            $parts.Add('w:' + [string]$workspace.kind + ':' + [string]$tab.cwd + ':' + [string]$tab.profile + ':' + [string]$tab.title)
+        }
     }
     # Display layout matters too: docking or unplugging a monitor is a real
     # change worth capturing, even when no window opened or closed.
@@ -4759,6 +4768,15 @@ function ConvertFrom-SRFileUri {
     }
 }
 
+# Test seam: lets the suite point the Windows Terminal reader at a fixture so
+# no test ever writes into the real Terminal package folder.
+$script:SRTerminalStateOverride = $null
+
+function Set-SRTestTerminalStatePath {
+    param([string]$Path = '')
+    $script:SRTerminalStateOverride = $Path
+}
+
 function Get-SRDevWorkspaces {
     # Reads the editors' own state files (no processes needed) so a restore
     # can reopen the exact folders and projects that were open.
@@ -4841,34 +4859,91 @@ function Get-SRDevWorkspaces {
         }
     } catch { }
 
-    # Windows Terminal tabs live in state.json inside the store package.
+    # Windows Terminal layouts live in state.json inside the store package,
+    # under persistedWindowLayouts[].tabLayout[]. The exact nesting has changed
+    # between Terminal versions (tabs vs panes vs a nested tab object), and a
+    # fixed path silently captured nothing at all, so this walks the whole
+    # structure and collects anything that looks like a tab.
+    #
+    # Verified against Terminal's source: WindowLayout serializes as
+    # { tabLayout, initialPosition, launchMode, initialSize }, and tab
+    # settings carry "startingDirectory" and "tabTitle".
     try {
-        $wtState = Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\state.json'
-        if (Test-Path -LiteralPath $wtState) {
+        $wtStates = @(
+            (Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\state.json'),
+            (Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe\LocalState\state.json'),
+            (Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminalCanary_8wekyb3d8bbwe\LocalState\state.json'),
+            (Join-Path $env:LOCALAPPDATA 'Microsoft\Windows Terminal\LocalState\state.json')
+        )
+        $wtState = $null
+        foreach ($candidate in $wtStates) {
+            if (Test-Path -LiteralPath $candidate) { $wtState = $candidate; break }
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$script:SRTerminalStateOverride)) {
+            $wtState = [string]$script:SRTerminalStateOverride
+        }
+        if ($null -ne $wtState) {
             $state = Get-Content -LiteralPath $wtState -Raw -ErrorAction Stop | ConvertFrom-Json
             $dirs = New-Object System.Collections.Generic.List[string]
             $tabRows = New-Object System.Collections.Generic.List[object]
-            $walkTabs = $null
-            $walkTabs = {
-                param($Tabs)
-                foreach ($tab in @($Tabs)) {
-                    $title = [string]$tab.title
-                    $cwd = [string]$tab.cwd
-                    $profile = [string]$tab.profile
-                    if ([string]::IsNullOrWhiteSpace($cwd)) { $cwd = '' }
-                    if ($cwd.StartsWith('file://')) { $cwd = $cwd.Substring(7) -replace '/', '\' }
-                    $tabRows.Add([pscustomobject]@{ title = $title; profile = $profile; cwd = $cwd })
-                    if (-not [string]::IsNullOrWhiteSpace($cwd) -and (Test-Path -LiteralPath $cwd) -and -not $dirs.Contains($cwd)) { $dirs.Add($cwd) }
-                    if ($null -ne $tab.panes) { & $walkTabs @($tab.panes) }
-                    if ($null -ne $tab.tab.panes) { & $walkTabs @($tab.tab.panes) }
-                    if ($null -ne $tab.tabs) { & $walkTabs @($tab.tabs) }
+
+            # Recursive walk. A node counts as a tab when it carries a
+            # directory or a title; children live under any of the known
+            # container keys. A node budget stops a malformed file from
+            # hanging the capture.
+            $maxNodes = 5000
+            $visited = 0
+            $walk = $null
+            $walk = {
+                param($Node, [int]$Depth)
+                if ($null -eq $Node -or $Depth -gt 12 -or $visited -ge $maxNodes) { return }
+                foreach ($item in @($Node)) {
+                    if ($null -eq $item) { continue }
+                    if ($item -is [string] -or $item -is [ValueType]) { continue }
+                    $visited++
+                    if ($visited -ge $maxNodes) { return }
+                    if ($item -isnot [System.Management.Automation.PSCustomObject]) { continue }
+                    $dirValue = ''
+                    foreach ($key in @('startingDirectory', 'cwd', 'directory')) {
+                        $property = $item.PSObject.Properties[$key]
+                        if ($null -ne $property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+                            $dirValue = [string]$property.Value
+                            break
+                        }
+                    }
+                    $titleValue = ''
+                    foreach ($key in @('tabTitle', 'title')) {
+                        $property = $item.PSObject.Properties[$key]
+                        if ($null -ne $property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+                            $titleValue = [string]$property.Value
+                            break
+                        }
+                    }
+                    $profileValue = ''
+                    $profileProperty = $item.PSObject.Properties['profile']
+                    if ($null -ne $profileProperty -and $null -ne $profileProperty.Value) { $profileValue = [string]$profileProperty.Value }
+
+                    if (-not [string]::IsNullOrWhiteSpace($dirValue)) {
+                        $dirValue = $dirValue.Trim()
+                        if ($dirValue.StartsWith('file://')) { try { $dirValue = ([uri]$dirValue).LocalPath } catch { } }
+                        $dirValue = [Environment]::ExpandEnvironmentVariables($dirValue)
+                    }
+                    if (-not [string]::IsNullOrWhiteSpace($dirValue)) {
+                        $tabRows.Add([pscustomobject]@{ title = $titleValue; profile = $profileValue; cwd = $dirValue })
+                        if (-not $dirs.Contains($dirValue)) { $dirs.Add($dirValue) }
+                    } elseif (-not [string]::IsNullOrWhiteSpace($titleValue) -and -not [string]::IsNullOrWhiteSpace($profileValue)) {
+                        # A tab with no directory is still a tab worth reopening.
+                        $tabRows.Add([pscustomobject]@{ title = $titleValue; profile = $profileValue; cwd = '' })
+                    }
+
+                    foreach ($childKey in @('tabLayout', 'tabs', 'panes', 'tab', 'persistedWindowLayouts', 'windows')) {
+                        $child = $item.PSObject.Properties[$childKey]
+                        if ($null -ne $child) { & $walk $child.Value ($Depth + 1) }
+                    }
                 }
             }
-            if ($null -ne $state.windows) {
-                foreach ($window in @($state.windows)) { & $walkTabs @($window.tabs) }
-            } elseif ($null -ne $state.tabs) {
-                & $walkTabs @($state.tabs)
-            }
+            & $walk $state 0
+
             if ($tabRows.Count -gt 0) {
                 $result.Add([pscustomobject]@{
                     kind    = 'terminal'
@@ -4878,7 +4953,9 @@ function Get-SRDevWorkspaces {
                 })
             }
         }
-    } catch { }
+    } catch {
+        try { Write-SRLog -Level DEBUG -Message ("Windows Terminal state could not be read: {0}" -f $_.Exception.Message) } catch { }
+    }
 
     return $result.ToArray()
 }
@@ -6989,6 +7066,69 @@ function Invoke-SRRestore {
         }
     }
 
+    # Windows Terminal: rebuild the captured tabs in one window instead of
+    # opening each folder separately. Tab order, title and profile are kept,
+    # and the first tab creates the window while the rest join it.
+    $terminalWorkspaces = @($Plan.dev | Where-Object { $null -ne $_ -and [string]$_.kind -eq 'terminal' })
+    if ($terminalWorkspaces.Count -gt 0) {
+        $wtExe = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\wt.exe'
+        $index++
+        if ($null -ne $Progress) {
+            try { & $Progress $index $total 'Windows Terminal' } catch { }
+        }
+        if (-not (Test-Path -LiteralPath $wtExe)) {
+            $results.Add([pscustomobject]@{
+                Target  = 'Windows Terminal'
+                Started = $false
+                Message = 'Windows Terminal is not installed; its tabs were skipped.'
+            })
+        } else {
+            $opened = 0
+            foreach ($workspace in $terminalWorkspaces) {
+                $tabList = @()
+                try { $tabList = @($workspace.tabs) } catch { $tabList = @() }
+                # Older snapshots hold only folders; treat each as a tab.
+                if ($tabList.Count -eq 0) {
+                    $tabList = @(@($workspace.folders) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+                        ForEach-Object { [pscustomobject]@{ title = ''; profile = ''; cwd = [string]$_ } })
+                }
+                foreach ($tab in $tabList) {
+                    if ($null -eq $tab) { continue }
+                    $cwd = [string]$tab.cwd
+                    $profileName = [string]$tab.profile
+                    $arguments = New-Object System.Collections.Generic.List[string]
+                    # wt opens a new tab in the running window when one
+                    # exists, so every captured tab maps to new-tab and the
+                    # restored window keeps the snapshot's tab order.
+                    $arguments.Add('new-tab')
+                    if (-not [string]::IsNullOrWhiteSpace($profileName)) {
+                        $arguments.Add('-p')
+                        $arguments.Add(('"{0}"' -f $profileName))
+                    }
+                    if (-not [string]::IsNullOrWhiteSpace($cwd) -and (Test-Path -LiteralPath $cwd)) {
+                        $arguments.Add('-d')
+                        $arguments.Add(('"{0}"' -f $cwd))
+                    }
+                    if (-not [string]::IsNullOrWhiteSpace([string]$tab.title)) {
+                        $arguments.Add('--title')
+                        $arguments.Add(('"{0}"' -f [string]$tab.title))
+                    }
+                    try {
+                        Start-Process -FilePath $wtExe -ArgumentList ($arguments -join ' ')
+                        $opened++
+                        Start-Sleep -Milliseconds 350
+                    } catch {
+                        Write-SRLog -Level WARN -Message ('Could not open a Windows Terminal tab: {0}' -f $_.Exception.Message)
+                    }
+                }
+            }
+            $results.Add([pscustomobject]@{
+                Target  = 'Windows Terminal'
+                Started = ($opened -gt 0)
+                Message = if ($opened -gt 0) { ('Opened {0} terminal tab(s) in their folders' -f $opened) } else { 'No terminal tabs could be reopened.' }
+            })
+        }
+    }
     # Dev workspaces: reopen the folders the editors had open. Editors are
     # launched through their CLI launcher when it exists; otherwise the
     # folder opens in Explorer so nothing is silently dropped.
@@ -7020,6 +7160,7 @@ function Invoke-SRRestore {
         } elseif ($kind -eq 'jetbrains') {
             $launcher = Get-SRJetBrainsLauncher -Product $tool
         }
+        if ($kind -eq 'terminal') { continue }
         foreach ($folder in @($workspace.folders)) {
             if ([string]::IsNullOrWhiteSpace([string]$folder) -or -not (Test-Path -LiteralPath $folder)) { continue }
             $index++
