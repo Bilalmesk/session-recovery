@@ -18,11 +18,11 @@ UpgradeBehavior: uninstallPrevious
 Installers:
   - Architecture: x64
     InstallerUrl: https://github.com/Bilalmesk/session-recovery/releases/download/v3.0.4/SessionRecovery-3.0.4.msi
-    InstallerSha256: 9E1CB39F75E27A4D3C94BD1C062DF917DD9E05275A746384848D93A15A7BF9B4
+    InstallerSha256: 654AEB782F4BEB2B25E5675217CFD739FBFB86F29001DF983929541071CBF809
     AppsAndFeaturesEntries:
       - DisplayName: Session Recovery
         DisplayVersion: 3.0.4
         Publisher: Bilalmesk
-        ProductCode: '{16AC1F40-8DB9-4D29-89D6-639487FAF8FE}'
+        ProductCode: '{C9EA17F0-9827-4316-8AD2-5B8B9A291F25}'
 ManifestType: installer
 ManifestVersion: 1.12.0
