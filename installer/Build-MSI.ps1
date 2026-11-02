@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 <#
     Build-MSI.ps1
     Builds the per-user Session Recovery MSI with WiX.
@@ -13,7 +13,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string]$Version = '3.0.3',
+    [string]$Version = '3.0.4',
     [switch]$NoRestore
 )
 
@@ -75,8 +75,25 @@ Session Recovery {0}
 Reopen the apps, File Explorer folders and browser tabs that were open before
 a crash, power cut or unexpected restart.
 
-What's new in 3.0.3
+What's new in 3.0.4
 -------------------
+- Restore no longer opens every tab twice after a crash. When the browser is
+  already running, restore reads its live session, compares it with the
+  snapshot, and reopens only the tabs that are genuinely missing. A restore
+  where everything is already open now opens nothing instead of duplicating
+  the window.
+- URL redaction covers application command lines as well as browser tabs, so
+  a deep link passed to an app or IDE is no longer written to disk verbatim.
+- New optional "keep the rest of the address bar" mode: it keeps ordinary
+  parameters so a restore reopens the same page, and blanks only values that
+  look like tokens, API keys or passwords. Fragments are always removed.
+  The default stays the strict full strip.
+- Tab matching ignores tracking parameters, host case and trailing slashes, so
+  the same page is recognised even when the snapshot stores a redacted URL.
+- Version 3.0.4.
+
+Also in 3.0.3
+-------------
 - The About page was rebuilt. It now shows the version, the installation
   folders, current snapshot count, privacy notes, and the update check, each in
   a single card with labels that fit in all nine languages.
@@ -85,7 +102,6 @@ What's new in 3.0.3
   is gone.
 - The wheel now scrolls the page everywhere, not only over the gaps between
   cards, and a click never scrolls the page out from under you.
-- Version 3.0.3.
 
 Also in 3.0.2
 -------------

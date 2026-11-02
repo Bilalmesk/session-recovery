@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -15,8 +15,8 @@ using WinFormsTimer = System.Windows.Forms.Timer;
 [assembly: AssemblyDescription("Session Recovery desktop host")]
 [assembly: AssemblyProduct("Session Recovery")]
 [assembly: AssemblyCompany("Bilalmesk")]
-[assembly: AssemblyVersion("3.0.3.0")]
-[assembly: AssemblyFileVersion("3.0.3.0")]
+[assembly: AssemblyVersion("3.0.4.0")]
+[assembly: AssemblyFileVersion("3.0.4.0")]
 
 namespace SessionRecoveryLauncher
 {
