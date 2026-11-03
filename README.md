@@ -42,7 +42,8 @@ winget install --id Bilalmesk.SessionRecovery
 | 📊 **Recovery insights** | Local counts for snapshots, apps, sites, pins, notes and storage |
 | 🩺 **Recovery timeline** | Restarts, power loss and blue screens from the last 30 days, read from the local event log |
 | 🔍 **Compare snapshots** | Pick an older moment and see which apps, folders and tabs opened or closed since |
-| ⚙️ **Cross-PC snapshots** | Every snapshot records machine, displays, scale and language; restore explains what changed || 💤 **Hibernate checkpoints** | Pins the last three snapshots taken just before sleep or hibernate, and offers **Hibernate with checkpoint** from the tray or `--hibernate` |
+| ⚙️ **Cross-PC snapshots** | Every snapshot records machine, displays, scale and language; restore explains what changed |
+| 💤 **Hibernate checkpoints** | Pins the last three snapshots taken just before sleep or hibernate, and offers **Hibernate with checkpoint** from the tray or `--hibernate` |
 | ↩️ **Undo a restore** | Every restore first pins a safety snapshot of the current desktop, and **Undo last restore** brings it back in one click |
 | 🕘 **Restore history** | The Diagnostics page lists recent restores, their source and outcome, with an Undo button for each |
 | 🧹 **Storage health** | Finds unreadable snapshots, orphaned thumbnails and temp files, and cleans up while quarantining anything unreadable |
@@ -125,6 +126,12 @@ winget upgrade --id Bilalmesk.SessionRecovery
 
 The restore window uses the same layout, cards and colour theme as the Studio, and its labels are translated into all nine languages, including right-to-left Arabic.
 
+### Unsaved-work radar
+
+At capture time, each window title is checked for the dirty-document marker that editors put in the title: a leading `*`, `●` or `•` (VS Code `● main.ts`, Sublime `• main.py`, Notepad++ `*draft.txt`), a trailing `*` right after text, or a standalone `[+]` (vim, `main.c [+]`). Apps with such windows are recorded with a count, flagged in the Studio, and started first on restore (after anything listed in `launchOrder`).
+
+This is a heuristic on the title only. It tells you which apps to check first; it cannot see what was unsaved and cannot recover it. Apps that show no marker in their title are not flagged.
+
 ### Browser tab modes
 
 | Mode | Behavior |
@@ -201,6 +208,9 @@ Use the Studio **Settings** page, or edit `%LOCALAPPDATA%\SessionRecovery\config
 {
   "snapshotIntervalMinutes": 3,
   "keepSnapshots": 48,
+  "tieredRetention": true,
+  "keepHourlyDays": 7,
+  "keepDailyDays": 30,
   "keepSnapshotDays": 0,
   "promptOnLogon": "CrashOnly",
   "maxRestoreAgeHours": 72,
@@ -231,7 +241,8 @@ Use the Studio **Settings** page, or edit `%LOCALAPPDATA%\SessionRecovery\config
 | `tieredRetention` | `true` | Beyond the recent window, thin history to hourly then daily representatives instead of deleting |
 | `keepHourlyDays` | `7` | Days kept at one snapshot per clock hour |
 | `keepDailyDays` | `30` | Days kept at one snapshot per calendar day |
-| `keepSnapshotDays` | `0` | Age cleanup in days (`0` = off) |
+| `keepSnapshotDays` | `0` | Age cleanup in days (`0` = off). Applied before the tiers, so nothing older than this survives |
+| `launchOrder` | `[]` | App names or executable file names that start first on restore, in this order (for example a VPN or database other apps need) |
 | `promptOnLogon` | `CrashOnly` | `CrashOnly`, `Always`, `Never` |
 | `maxRestoreAgeHours` | `72` | Ignore older snapshots in the automatic prompt |
 | `restoreBrowsers` | `true` | `false` removes browsers from restore |
@@ -263,6 +274,31 @@ Use the Studio **Settings** page, or edit `%LOCALAPPDATA%\SessionRecovery\config
 - Exclusions affect **new snapshots only**; delete old files to remove earlier data.
 - If every tab of a browser profile is excluded, that profile is omitted.
 - Tray/MSI mode reads interval, retention and exclusions every cycle. In scheduled-task mode, re-run the installer to change the interval.
+
+</details>
+
+<details>
+<summary><b>Tiered history and storage</b></summary>
+
+- **Why:** a flat count of 48 snapshots at the default 3-minute interval covers about 2.4 hours. A crash the morning after a late night would find nothing to restore.
+- **The policy** (`tieredRetention`, on by default): the newest `keepSnapshots` files are kept in full. Older ones are thinned instead of deleted: the newest snapshot of each clock hour for `keepHourlyDays` (7), then the newest of each calendar day for `keepDailyDays` (30). Anything older than every tier is removed.
+- **Pinned snapshots** (including hibernate checkpoints) are never touched and do not count toward the budget.
+- **One rule everywhere:** the sweep that runs after every snapshot and the storage cleanup (`Control-SessionRecovery.ps1 -Command storage-cleanup`) use the same policy.
+- **`keepSnapshotDays`** runs first. With `keepSnapshotDays` set to 3, nothing older than 3 days survives, whatever the tiers say.
+- **Upgrading:** a `config.json` without `tieredRetention` gets it switched on. History builds up from now; snapshots that earlier flat retention already deleted cannot come back.
+- **Disk use:** with the defaults, up to about 246 snapshot files (48 + 168 hourly + 30 daily). `Diagnostics.ps1 -Json` reports this as `EstimatedStorage`, based on the average size of your current snapshots (8 KB each when there are none). The estimate counts snapshot files only, not thumbnails.
+- **Turn it off** by setting `tieredRetention` to `false` to go back to count-only retention.
+
+</details>
+
+<details>
+<summary><b>Developer workspaces and Windows Terminal</b></summary>
+
+- **Captured from each tool's own state files**, without reading process memory: VS Code and Cursor (open folders and workspaces from `storage.json`), JetBrains IDEs (recent projects, up to 5 per product) and Windows Terminal (`state.json`).
+- **Editors** reopen their folders through the editor's command-line launcher when it is found; otherwise the folder opens in Explorer so nothing is silently dropped.
+- **Terminal tabs** reopen in a single Windows Terminal window with each tab's profile, directory and title, in the captured order. Terminal's default `windowingBehavior` is `useNew`, so one launch per tab would give one window per tab; instead the tabs go out as one `wt` command joined with `;`, 20 tabs per command. A very large session therefore continues in a second window. A `;` in a path or title is escaped, and a `"` inside one is dropped because `wt` has no quote escape.
+- **Terminal capture depends on a Windows Terminal setting.** Terminal writes `persistedWindowLayouts` to `state.json` only when its `firstWindowPreference` is `persistedWindowLayout` (the default is `defaultProfile`), and it writes the layout when a window closes. By default no terminal tabs are captured, and even with the setting on, a crash leaves the layout from the last clean close. Editor folders are not affected.
+- **Check why** with `Diagnostics.ps1 -Json`: the `TerminalCapture` entry says whether Terminal is installed, what `firstWindowPreference` is set to, how many tabs were found, and what to change.
 
 </details>
 
@@ -316,6 +352,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $d -ReportPath "$env:TEMP\sr
 ```
 
 Reports contain paths, URLs and log lines, so review them before sharing.
+
+The JSON report also includes `TerminalCapture` (why Windows Terminal tabs are or are not being captured) and `EstimatedStorage` (how many snapshots tiered retention keeps and roughly how much disk they use). These two are in the report only; the Studio does not show them yet.
 
 The **Recovery timeline** card lists restarts, power loss and blue screens from the Windows event log over the last 30 days. It is read locally and nothing is uploaded; only the event types and timestamps are shown, never message contents.
 
@@ -376,6 +414,8 @@ Get-ScheduledTask -TaskName 'SessionRecovery-*' -ErrorAction SilentlyContinue | 
 - UWP/Store, elevated, tray-only and hidden windows are skipped; command-line switches are mostly dropped.
 - Pinned browser tabs reopen as normal tabs; internal/extension URLs and private windows are not guaranteed.
 - Age-based retention permanently deletes unpinned history.
+- Windows Terminal tabs are captured only when Terminal has saved a layout (`firstWindowPreference` set to `persistedWindowLayout`), and a crash leaves the layout from the last clean close.
+- Unsaved-work detection relies on a marker in the window title; apps without one are not flagged.
 - The tool is per-user.
 
 </details>
@@ -388,7 +428,8 @@ Get-ScheduledTask -TaskName 'SessionRecovery-*' -ErrorAction SilentlyContinue | 
 ## 👩‍💻 Development
 
 ```powershell
-# Build the MSI (needs .NET SDK 6+ and internet for WiX restore) → dist\SessionRecovery-3.0.0.msi
+# Build the MSI (needs .NET SDK 6+ and internet for WiX restore) → dist\SessionRecovery-<version>.msi
+# (the default version is set in installer\Build-MSI.ps1)
 powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\Build-MSI.ps1
 
 # Build the native host only
@@ -401,6 +442,15 @@ $env:SESSIONRECOVERY_HOME = Join-Path $PWD 'test-data'
 
 `dist\` is git-ignored; publish the MSI as a GitHub Release asset.
 
+Tests are Pester 5 and run in CI on every pull request: a parse check of every PowerShell source, the module tests, a UI layout audit in all nine languages, an MSI build and an installer smoke test. To run the module tests locally:
+
+```powershell
+Import-Module Pester -MinimumVersion 5.5 -Force
+Invoke-Pester -Path tests -Output Detailed
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full checklist, including the rule that every UI string exists in all nine languages.
+
 <details>
 <summary><b>Project layout</b></summary>
 
@@ -408,17 +458,24 @@ $env:SESSIONRECOVERY_HOME = Join-Path $PWD 'test-data'
 session-recovery/
 ├── Install-SessionRecovery.ps1     Installer and shortcuts
 ├── Uninstall-SessionRecovery.ps1   Uninstaller
+├── CONTRIBUTING.md                 Pull request checks and how to add a feature
 ├── assets/                         Brand icon and installer artwork
-├── installer/                      WiX MSI project, launcher and build scripts
+├── installer/                      WiX MSI project, launcher, build and signing scripts
+├── packaging/winget/               winget manifests
+├── tests/                          Pester suite, UI layout audit, installer smoke test
+├── .github/workflows/ci.yml        CI: parse check, tests, UI audit, MSI build, smoke test
 └── src/
     ├── SessionRecoveryLauncher.cs  Native host (no console windows)
     ├── Studio-SessionRecovery.ps1  Studio UI
     ├── StudioTheme.ps1             Shared theme catalog for Studio and restore
     ├── StudioControls.cs           Custom WinForms controls
-    ├── SessionRecovery.psm1        Capture, exclusions, browsers, diagnostics, restore engine
+    ├── Strings.ps1                 UI strings for all nine languages
+    ├── SessionRecovery.psm1        Capture, exclusions, browsers, retention, diagnostics, restore engine
     ├── Save-Session.ps1            One-shot snapshot
     ├── Restore-Session.ps1         Restore UI and selective CLI restore
     ├── Tray-SessionRecovery.ps1    Tray app and snapshot timer
+    ├── Control-SessionRecovery.ps1 Automation commands (status, workspaces, storage, undo)
+    ├── InstallManifest.ps1         Install manifest helpers shared by the installer and uninstaller
     ├── Diagnostics.ps1             Health report
     ├── Watch-Session.ps1           Legacy watcher (compatibility)
     └── RunHidden.vbs               Legacy launcher (compatibility)
