@@ -15,8 +15,8 @@ using WinFormsTimer = System.Windows.Forms.Timer;
 [assembly: AssemblyDescription("Session Recovery desktop host")]
 [assembly: AssemblyProduct("Session Recovery")]
 [assembly: AssemblyCompany("Bilalmesk")]
-[assembly: AssemblyVersion("3.0.5.0")]
-[assembly: AssemblyFileVersion("3.0.5.0")]
+[assembly: AssemblyVersion("3.0.6.0")]
+[assembly: AssemblyFileVersion("3.0.6.0")]
 
 namespace SessionRecoveryLauncher
 {

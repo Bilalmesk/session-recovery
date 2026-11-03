@@ -13,7 +13,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string]$Version = '3.0.5',
+    [string]$Version = '3.0.6',
     [switch]$NoRestore
 )
 
@@ -75,8 +75,31 @@ Session Recovery {0}
 Reopen the apps, File Explorer folders and browser tabs that were open before
 a crash, power cut or unexpected restart.
 
-What's new in 3.0.5
+What's new in 3.0.6
 -------------------
+- Event-driven snapshots: while the tray is running, opening, closing or
+  renaming a top-level window, locking or unlocking Windows, resuming from
+  sleep and low-battery transitions can trigger a capture instead of waiting
+  for the next periodic snapshot. Changes are debounced, and title-only
+  changes wait longer so a ticking clock or browser page does not cause a
+  capture every few seconds.
+- Pause is shared with every automatic driver. Pausing in the tray now writes
+  a marker that the scheduled task and legacy watcher honor, survives tray
+  restarts, and is shown in the Studio, Diagnostics and restore window.
+- Best-effort shutdown capture: Windows sign-out and shutdown get a final
+  snapshot attempt. Each attempt is recorded, and Diagnostics shows the last
+  20 outcomes so a missing final snapshot is visible instead of assumed.
+- Windows Terminal restore is more reliable: tabs reopen in one window with
+  the captured profile, folder and title, and large sessions are split into
+  safe commands without losing progress when a later chunk fails.
+- Diagnostics now explains why Windows Terminal tabs are or are not captured,
+  including the firstWindowPreference setting that must be enabled.
+- Fixed garbled accented text and bullets in the Studio, restore window and
+  RDP title matching on Windows PowerShell 5.1.
+- Version 3.0.6.
+
+Also in 3.0.5
+-------------
 - Restoring a snapshot no longer reopens tabs you closed long ago. Closing
   three tabs used to bring back everything visited that day, because every
   History row in the lookback window was treated as a closed tab. A tab is
