@@ -30,9 +30,9 @@ winget install --id Bilalmesk.SessionRecovery
 |---|---|
 | 📸 **Auto snapshots** | Periodic snapshots (3-minute default), logon and best-effort workspace/system events, with a searchable timeline |
 | 🪟 **Window-accurate restore** | Position, size and maximized state, clamped to your current monitors |
-| 🌐 **Browser tabs** | Chrome, Edge, Brave, Vivaldi, Opera, Opera GX, Chromium, Firefox; duplicates and window groups kept |
+| 🌐 **Browser tabs** | Chrome, Edge, Brave, Vivaldi, Opera, Opera GX, Chromium, Firefox; window groups kept, duplicate URLs reopened once (`deduplicateTabs`) |
 | 📁 **Explorer folders** | Reopened alongside your apps |
-| 🎬 **VLC playback** | Resumes within one snapshot interval of where you left off |
+| 🎬 **VLC playback** | Resumes within one snapshot interval of where you left off; paused players hold their position instead of drifting |
 | 🎯 **Selective restore** | Include/exclude by app, folder or browser with wildcards |
 | 🔒 **Exclusions & pinning** | Keep apps, folders or URLs out of snapshots; pin snapshots forever |
 | 📝 **Snapshot notes** | Searchable note on each snapshot; included in kits, removed with the snapshot |

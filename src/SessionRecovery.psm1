@@ -1429,6 +1429,7 @@ function Get-SRDefaultConfig {
         restoreBrowsers         = $true
         restoreWindowPositions  = $true
         defaultTabMode          = 'Smart'
+        deduplicateTabs         = $true
         captureBrowserTabs      = $true
         captureApproximateTabs  = $true
         captureMediaPlayers     = $true
@@ -3523,7 +3524,16 @@ function Get-SRMediaPositionEstimate {
         [int]$MaxDriftMinutes = 30,
         # When false, no position is returned unless it was actually observed.
         # A caller that cannot tolerate a wrong position sets this false.
-        [bool]$AllowUptimeGuess = $false
+        [bool]$AllowUptimeGuess = $false,
+        # True when the player's own saved position changed since the previous
+        # snapshot, meaning the player wrote it during this session and it is
+        # fresher than any dead reckoning.
+        [bool]$SavedPositionFresh = $false,
+        # CPU time the player consumed since the previous snapshot, in
+        # milliseconds, and the wall-clock seconds that delta spans. Negative
+        # values mean "not measured".
+        [double]$CpuDeltaMs = -1,
+        [double]$CpuIntervalSeconds = -1
     )
 
     $maxDrift = [timespan]::FromMinutes([Math]::Max(1, $MaxDriftMinutes))
@@ -3544,6 +3554,34 @@ function Get-SRMediaPositionEstimate {
     }
 
     if ($SameSession -and $null -ne $Previous) {
+        # A position the player itself wrote during this session outranks
+        # dead reckoning in either direction. The old rule only accepted it
+        # when it moved the position forward, which left a drifted estimate
+        # pinned past the end of the file even after the player reported the
+        # truth. A changed saved position was written during this session
+        # (players only write on stop or clean close), so it is fresh.
+        if ($SavedPositionFresh -and $SavedPositionMs -gt 0) {
+            if ($SavedPositionTrusted) {
+                return [pscustomobject]@{
+                    Known      = $true
+                    PositionMs = [int64]$SavedPositionMs
+                    AnchorMs   = [int64]$SavedPositionMs
+                    AnchorAt   = $Now
+                    FromPlayer = $true
+                }
+            }
+            # A player that ignores its own saved position starts such an
+            # input over from the beginning, so the dead-reckoned position we
+            # were carrying no longer describes anything.
+            return [pscustomobject]@{
+                Known      = $false
+                PositionMs = [int64]0
+                AnchorMs   = [int64]0
+                AnchorAt   = $Now
+                FromPlayer = $false
+            }
+        }
+
         $previousAnchorMs = [long]0
         $previousAnchorAt = $Now
         try {
@@ -3606,7 +3644,18 @@ function Get-SRMediaPositionEstimate {
         }
     }
 
-    $positionMs = $anchorMs + [int64](($Now - $anchorAt).TotalMilliseconds)
+    $advanceMs = [int64](($Now - $anchorAt).TotalMilliseconds)
+    if (-not $anchoredFromPlayer -and
+        $CpuDeltaMs -ge 0 -and $CpuIntervalSeconds -gt 0 -and
+        $CpuDeltaMs -lt ($CpuIntervalSeconds * 3)) {
+        # The player consumed essentially no CPU since the last snapshot, so
+        # it is paused. Dead reckoning treats wall-clock time as playback
+        # time, which would walk the position through the pause and eventually
+        # pin it past the end of the file. Freeze instead.
+        $advanceMs = 0
+        $anchorAt = $Now
+    }
+    $positionMs = $anchorMs + $advanceMs
     if ($positionMs -lt 0) { $positionMs = 0 }
 
     return [pscustomobject]@{
@@ -3735,6 +3784,20 @@ function Get-SRMediaPlayerMedia {
 
     $recents = Get-SRVlcRecentMedia
 
+    # Total CPU time across VLC processes. Playing burns CPU; a paused player
+    # does not. The delta between snapshots tells the two apart, which is the
+    # only playback evidence VLC 3.x exposes (no SMTC session, no UIA time
+    # label, no timestamp in the title - all verified on a live machine).
+    $vlcCpuMs = -1.0
+    try {
+        $totalCpu = [timespan]::Zero
+        $seenVlcProcess = $false
+        foreach ($process in @(Get-Process -Name vlc -ErrorAction SilentlyContinue)) {
+            try { $totalCpu += $process.TotalProcessorTime; $seenVlcProcess = $true } catch { }
+        }
+        if ($seenVlcProcess) { $vlcCpuMs = $totalCpu.TotalMilliseconds }
+    } catch { }
+
     foreach ($app in @($Apps)) {
         if ($null -eq $app) { continue }
         $leaf = ([string]$app.name).ToLowerInvariant()
@@ -3791,6 +3854,30 @@ function Get-SRMediaPlayerMedia {
             try { $durationSeconds = [double]$entry.durationSeconds } catch { $durationSeconds = $null }
         }
 
+        # A saved position that differs from the previous snapshot was written
+        # by VLC during this session, so it is fresh evidence.
+        $savedFresh = $false
+        if ($null -ne $entry) {
+            $previousSavedMs = [long]-1
+            try { $previousSavedMs = [long][double]$entry.savedPositionMs } catch { }
+            if ($previousSavedMs -ge 0 -and $previousSavedMs -ne $savedMs) { $savedFresh = $true }
+        }
+
+        # CPU the player burned since the previous snapshot, with the seconds
+        # that delta spans. Both negative when not measurable.
+        $cpuDeltaMs = -1.0
+        $cpuIntervalSeconds = -1.0
+        if ($vlcCpuMs -ge 0 -and $null -ne $entry) {
+            $previousCpuMs = -1.0
+            try { $previousCpuMs = [double]$entry.cpuMs } catch { }
+            if ($previousCpuMs -ge 0 -and $vlcCpuMs -ge $previousCpuMs) {
+                $cpuDeltaMs = $vlcCpuMs - $previousCpuMs
+                if ($lastSeen -gt [datetime]::MinValue -and $lastSeen -lt $now) {
+                    $cpuIntervalSeconds = ($now - $lastSeen).TotalSeconds
+                }
+            }
+        }
+
         $sameSession = ($null -ne $entry -and
             [string]$entry.file -eq $file -and
             $lastSeen -gt [datetime]::MinValue -and $lastSeen -lt $now -and
@@ -3804,7 +3891,8 @@ function Get-SRMediaPlayerMedia {
         # minute error in the field.
         $estimate = Get-SRMediaPositionEstimate -Now $now -Previous $entry -SameSession $sameSession `
             -SavedPositionMs $savedMs -SavedPositionTrusted ($resumeMode -eq 1) `
-            -PlayerStartTime $vlcStart -MaxDriftMinutes $MaxPositionDriftMinutes -AllowUptimeGuess $false
+            -PlayerStartTime $vlcStart -MaxDriftMinutes $MaxPositionDriftMinutes -AllowUptimeGuess $false `
+            -SavedPositionFresh $savedFresh -CpuDeltaMs $cpuDeltaMs -CpuIntervalSeconds $cpuIntervalSeconds
 
         if ($null -eq $durationSeconds) { $durationSeconds = Get-SRMediaDurationSeconds -Path $file }
 
@@ -3829,6 +3917,7 @@ function Get-SRMediaPlayerMedia {
                 lastSeenAt       = $now.ToString('o')
                 durationSeconds  = $durationSeconds
                 positionKnown    = $false
+                cpuMs            = $vlcCpuMs
             }
             $stateDirty = $true
             Write-SRLog -Level DEBUG -Message ("VLC media captured without a position (no anchor): {0}" -f $file)
@@ -3864,6 +3953,7 @@ function Get-SRMediaPlayerMedia {
             anchorAt         = $now.ToString('o')
             lastSeenAt       = $now.ToString('o')
             durationSeconds  = $durationSeconds
+            cpuMs            = $vlcCpuMs
         }
         $stateDirty = $true
         Write-SRLog -Level DEBUG -Message ("VLC media captured: {0} at {1}s" -f $file, $media.positionSeconds)
@@ -7314,6 +7404,12 @@ function Restore-SRBrowser {
     $results = New-Object System.Collections.Generic.List[object]
     if ($TabMode -eq 'None') { return $results.ToArray() }
 
+    $dedupeTabs = $true
+    try {
+        $dedupeProperty = (Get-SRConfig).PSObject.Properties['deduplicateTabs']
+        if ($null -ne $dedupeProperty) { $dedupeTabs = [bool]$dedupeProperty.Value }
+    } catch { }
+
     $exe = [string]$Browser.exe
     if ([string]::IsNullOrWhiteSpace($exe) -or -not (Test-Path -LiteralPath $exe)) {
         $results.Add([pscustomobject]@{ Started = $false; Message = "Browser executable not found: $($Browser.name)" })
@@ -7366,6 +7462,9 @@ function Restore-SRBrowser {
 
         # Tabs already on screen are never reopened.
         if ($liveTabsRead) { $tabs = @(Select-SRMissingTabs -Captured $tabs -Live $liveTabs.ToArray()) }
+        # The capture keeps every copy of a tab on purpose, but restoring three
+        # copies of the same page helps no one. One per URL, unless disabled.
+        if ($dedupeTabs) { $tabs = @(Select-SRMissingTabs -Captured $tabs -Live @()) }
         if ($isRunning -and $liveTabsRead -and $tabs.Count -eq 0) {
             $results.Add([pscustomobject]@{ Started = $false; Message = 'Firefox: every captured tab is already open.' })
             return $results.ToArray()
@@ -7444,6 +7543,9 @@ function Restore-SRBrowser {
         # crash restore doubles every tab: Chromium restores its own session on
         # launch, then this loop put the same URLs on top again.
         if ($liveTabsRead) { $tabs = @(Select-SRMissingTabs -Captured $tabs -Live $liveTabs.ToArray()) }
+        # The capture keeps every copy of a tab on purpose, but restoring three
+        # copies of the same page helps no one. One per URL, unless disabled.
+        if ($dedupeTabs) { $tabs = @(Select-SRMissingTabs -Captured $tabs -Live @()) }
 
         if ($isRunning -and $liveTabsRead -and $tabs.Count -eq 0) {
             $results.Add([pscustomobject]@{ Started = $false; Message = ("{0}: every captured tab is already open in profile '{1}'." -f $Browser.name, $profile.displayName) })

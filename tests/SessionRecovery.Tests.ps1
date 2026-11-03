@@ -1,4 +1,4 @@
-#requires -Modules @{ ModuleName = 'Pester'; ModuleVersion = '5.0' }
+﻿#requires -Modules @{ ModuleName = 'Pester'; ModuleVersion = '5.0' }
 <#
     SessionRecovery.Tests.ps1
     Pester tests for the Session Recovery module. Everything here is hermetic:
@@ -299,6 +299,83 @@ Describe 'Select-SRMissingTabs' {
             [pscustomobject]@{ url = 'https://a.example/one?x=1' }
         )
         @(Select-SRMissingTabs -Captured $captured -Live @()).Count | Should -Be 1
+    }
+}
+
+Describe 'Duplicate tabs on restore' {
+    # Field data: a real snapshot held the same GitHub URL three times in one
+    # Brave window (the user genuinely had the copies open). The capture is
+    # faithful, but a restore must not reopen all three.
+    BeforeEach {
+        Mock Get-SRConfig -ModuleName SessionRecovery { Get-SRDefaultConfig }
+        Mock Test-SRExeRunning -ModuleName SessionRecovery { $false }
+        Mock Start-SRDetached -ModuleName SessionRecovery { $null }
+        Mock Start-Sleep -ModuleName SessionRecovery { }
+        Mock Write-SRLog -ModuleName SessionRecovery { }
+        Mock Test-Path -ModuleName SessionRecovery {
+            param($LiteralPath, $PathType)
+            if ($PathType) {
+                Microsoft.PowerShell.Management\Test-Path -LiteralPath $LiteralPath -PathType $PathType
+            } else {
+                Microsoft.PowerShell.Management\Test-Path -LiteralPath $LiteralPath
+            }
+        }
+        Mock Test-Path -ModuleName SessionRecovery { $true } -ParameterFilter { $LiteralPath -like '*brave.exe' }
+    }
+
+    It 'reopens one copy of a URL the capture holds several times' {
+        $browser = [pscustomobject]@{
+            name = 'Brave'; kind = 'chromium'; exe = 'C:\fake\brave.exe'
+            profiles = @([pscustomobject]@{
+                directory = 'Default'; displayName = 'Work'; path = (Join-Path $TestDrive 'no-such-profile')
+                tabsSource = 'session-file'; restoreOnStartup = 5
+                tabs = @(
+                    [pscustomobject]@{ url = 'https://a.example/one'; title = 'one'; pinned = $false; windowId = 7 },
+                    [pscustomobject]@{ url = 'https://a.example/one'; title = 'one'; pinned = $false; windowId = 7 },
+                    [pscustomobject]@{ url = 'https://b.example/two'; title = 'two'; pinned = $false; windowId = 7 }
+                )
+            })
+        }
+        $result = @(Restore-SRBrowser -Browser $browser -TabMode 'Captured')
+        Should -Invoke Start-SRDetached -ModuleName SessionRecovery -Times 1 -Exactly -ParameterFilter {
+            @($Arguments).Count -eq 3 -and
+            @($Arguments)[0] -eq '--new-window' -and
+            @($Arguments)[1] -eq 'https://a.example/one' -and
+            @($Arguments)[2] -eq 'https://b.example/two'
+        }
+        $result[0].Started | Should -BeTrue
+    }
+
+    It 'keeps every copy when deduplication is disabled' {
+        Mock Get-SRConfig -ModuleName SessionRecovery {
+            $config = Get-SRDefaultConfig
+            $config.deduplicateTabs = $false
+            $config
+        }
+        $browser = [pscustomobject]@{
+            name = 'Brave'; kind = 'chromium'; exe = 'C:\fake\brave.exe'
+            profiles = @([pscustomobject]@{
+                directory = 'Default'; displayName = 'Work'; path = (Join-Path $TestDrive 'no-such-profile')
+                tabsSource = 'session-file'; restoreOnStartup = 5
+                tabs = @(
+                    [pscustomobject]@{ url = 'https://a.example/one'; title = 'one'; pinned = $false; windowId = 7 },
+                    [pscustomobject]@{ url = 'https://a.example/one'; title = 'one'; pinned = $false; windowId = 7 },
+                    [pscustomobject]@{ url = 'https://b.example/two'; title = 'two'; pinned = $false; windowId = 7 }
+                )
+            })
+        }
+        $null = Restore-SRBrowser -Browser $browser -TabMode 'Captured'
+        Should -Invoke Start-SRDetached -ModuleName SessionRecovery -Times 1 -Exactly -ParameterFilter {
+            @($Arguments).Count -eq 4 -and
+            @($Arguments)[0] -eq '--new-window' -and
+            @($Arguments)[1] -eq 'https://a.example/one' -and
+            @($Arguments)[2] -eq 'https://a.example/one' -and
+            @($Arguments)[3] -eq 'https://b.example/two'
+        }
+    }
+
+    It 'defaults deduplicateTabs to on' {
+        (Get-SRDefaultConfig).deduplicateTabs | Should -BeTrue
     }
 }
 
@@ -2794,6 +2871,78 @@ Describe 'Get-SRMediaPositionEstimate' {
         }
         $estimate = Get-SRMediaPositionEstimate -Now $script:now -Previous $previous -SameSession $true
         $estimate.PositionMs | Should -BeGreaterOrEqual 0
+    }
+
+    It 'replaces a drifted anchor with a fresh exact position, even backwards' {
+        # Field data: the estimate dead-reckoned to the end of the file and
+        # pinned itself at duration-5s (8603 s) while the viewer was really at
+        # 1:24:17. When VLC next wrote its exact position the old rule ignored
+        # it because it was smaller than the drifted estimate.
+        $previous = [pscustomobject]@{
+            anchorPositionMs = 8603000
+            anchorAt         = $script:now.AddMinutes(-3).ToString('o')
+            lastSeenAt       = $script:now.AddMinutes(-3).ToString('o')
+            savedPositionMs  = 0
+            positionKnown    = $true
+        }
+        $estimate = Get-SRMediaPositionEstimate -Now $script:now -Previous $previous -SameSession $true `
+            -SavedPositionMs 5057000 -SavedPositionTrusted $true -SavedPositionFresh $true
+        $estimate.Known | Should -BeTrue
+        $estimate.PositionMs | Should -Be 5057000 -Because 'an exact player position outranks dead reckoning in either direction'
+        $estimate.FromPlayer | Should -BeTrue
+    }
+
+    It 'reports no position when a non-resuming player rewrites its saved position' {
+        # qt-continue=2: VLC starts such an input over from the beginning, so
+        # the saved value no longer describes the current playback and the
+        # dead-reckoned position we were carrying is just as stale.
+        $previous = [pscustomobject]@{
+            anchorPositionMs = 8603000
+            anchorAt         = $script:now.AddMinutes(-3).ToString('o')
+            lastSeenAt       = $script:now.AddMinutes(-3).ToString('o')
+            savedPositionMs  = 0
+            positionKnown    = $true
+        }
+        $estimate = Get-SRMediaPositionEstimate -Now $script:now -Previous $previous -SameSession $true `
+            -SavedPositionMs 5057000 -SavedPositionTrusted $false -SavedPositionFresh $true
+        $estimate.Known | Should -BeFalse
+    }
+
+    It 'freezes the position while the player is paused' {
+        # Dead reckoning treats wall-clock time as playback time, which walked
+        # the position through pauses and eventually pinned it past the end of
+        # the file. No CPU burn means no playback, so nothing may advance.
+        $previous = [pscustomobject]@{
+            anchorPositionMs = 600000
+            anchorAt         = $script:now.AddMinutes(-40).ToString('o')
+            lastSeenAt       = $script:now.AddMinutes(-40).ToString('o')
+        }
+        $estimate = Get-SRMediaPositionEstimate -Now $script:now -Previous $previous -SameSession $true `
+            -CpuDeltaMs 12 -CpuIntervalSeconds 2400
+        $estimate.PositionMs | Should -Be 600000
+        $estimate.AnchorAt | Should -Be $script:now -Because 'the frozen position re-anchors at the current snapshot'
+    }
+
+    It 'advances the position when the player has been burning CPU' {
+        $previous = [pscustomobject]@{
+            anchorPositionMs = 600000
+            anchorAt         = $script:now.AddMinutes(-3).ToString('o')
+            lastSeenAt       = $script:now.AddMinutes(-3).ToString('o')
+        }
+        $estimate = Get-SRMediaPositionEstimate -Now $script:now -Previous $previous -SameSession $true `
+            -CpuDeltaMs 9000 -CpuIntervalSeconds 180
+        [Math]::Round($estimate.PositionMs / 1000) | Should -Be 780
+    }
+
+    It 'advances when CPU was not measurable, preserving the old behavior' {
+        $previous = [pscustomobject]@{
+            anchorPositionMs = 600000
+            anchorAt         = $script:now.AddMinutes(-3).ToString('o')
+            lastSeenAt       = $script:now.AddMinutes(-3).ToString('o')
+        }
+        $estimate = Get-SRMediaPositionEstimate -Now $script:now -Previous $previous -SameSession $true `
+            -CpuDeltaMs -1 -CpuIntervalSeconds -1
+        [Math]::Round($estimate.PositionMs / 1000) | Should -Be 780
     }
 }
 
