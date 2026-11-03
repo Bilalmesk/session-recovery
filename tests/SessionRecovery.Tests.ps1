@@ -1956,46 +1956,179 @@ Describe 'Retention wiring' {
     }
 
     It 'applies tiers through Save-SRSnapshot, not only through cleanup' {
+        # keepSnapshots is set low on purpose. With the default of 48 the
+        # seeded files all fit inside the recent window, so flat retention
+        # would keep them too and this test could never fail - which is what
+        # the first version of it did.
         $dir = Join-Path $env:SESSIONRECOVERY_HOME 'retention-savepath'
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
         $previousDir = Get-SRSnapshotDirectory
+        $configPath = Get-SRConfigPath
+        $backupConfig = if (Test-Path -LiteralPath $configPath) { Get-Content -LiteralPath $configPath -Raw } else { $null }
         Set-SRTestSnapshotDirectory -Path $dir
         try {
-        $now = Get-Date
-        # Real snapshots via the module so provenance exists and the legacy
-        # adoption pass cannot rewrite (and re-stamp) them, then backdated.
-        for ($i = 0; $i -lt 30; $i++) {
-            [void](Save-SRSnapshot -Force -Reason ('seed{0:d2}' -f $i))
-            $newest = @(Get-ChildItem -LiteralPath $dir -Filter 'session-*.json' -File |
-                Sort-Object LastWriteTime -Descending)[0]
-            [System.IO.File]::SetLastWriteTime($newest.FullName, $now.AddHours(-1 * $i))
-            Start-Sleep -Milliseconds 30
-        }
-        $before = @(Get-ChildItem -LiteralPath $dir -Filter 'session-*.json' -File)
-        $beforeHours = @($before | ForEach-Object { $_.LastWriteTime.ToString('yyyyMMdd-HH') } | Select-Object -Unique).Count
-        $beforeHours | Should -BeGreaterThan 10
+            $config = Get-SRConfig
+            $config.keepSnapshots = 5
+            $config.keepSnapshotDays = 0
+            $config.tieredRetention = $true
+            $config.keepHourlyDays = 7
+            $config.keepDailyDays = 30
+            Save-SRConfig -Config $config
 
-        [void](Save-SRSnapshot -Force -Reason 'after')
+            $now = Get-Date
+            # 40 snapshots across 40 distinct hours: far more than the recent
+            # window of 5, so flat retention would leave 5 and delete 35.
+            for ($i = 0; $i -lt 40; $i++) {
+                [void](Save-SRSnapshot -Force -Reason ('seed{0:d2}' -f $i))
+                $newest = @(Get-ChildItem -LiteralPath $dir -Filter 'session-*.json' -File |
+                    Sort-Object LastWriteTime -Descending)[0]
+                [System.IO.File]::SetLastWriteTime($newest.FullName, $now.AddHours(-1 * $i))
+                Start-Sleep -Milliseconds 25
+            }
+            $before = @(Get-ChildItem -LiteralPath $dir -Filter 'session-*.json' -File)
+            $before.Count | Should -Be 40
 
-        $after = @(Get-ChildItem -LiteralPath $dir -Filter 'session-*.json' -File)
-        $afterHours = @($after | ForEach-Object { $_.LastWriteTime.ToString('yyyyMMdd-HH') } | Select-Object -Unique).Count
-        # Flat retention would collapse to roughly one hour. The hourly tier
-        # must keep many distinct hours alive.
-        $afterHours | Should -BeGreaterThan 10 -Because 'hourly representatives are kept by the snapshot path'
+            [void](Save-SRSnapshot -Force -Reason 'after')
+
+            $after = @(Get-ChildItem -LiteralPath $dir -Filter 'session-*.json' -File)
+            $afterHours = @($after | ForEach-Object { $_.LastWriteTime.ToString('yyyyMMdd-HH') } | Select-Object -Unique).Count
+            # Flat retention with keep=5 would leave 5 files in ~5 hours.
+            # The hourly tier must keep one per clock hour, so nearly every
+            # seeded hour survives.
+            $afterHours | Should -BeGreaterThan 30 -Because 'hourly representatives are kept by the snapshot path'
+            $after.Count | Should -BeGreaterThan 30
         } finally {
             Set-SRTestSnapshotDirectory -Path $previousDir
+            if ($null -ne $backupConfig) {
+                Set-Content -LiteralPath $configPath -Value $backupConfig -Encoding UTF8 -NoNewline
+            }
         }
     }
 }
 
-Describe 'Terminal restore shape' {
-    It 'builds one command for all tabs instead of one launch per tab' {
-        # windowingBehavior defaults to useNew, so a launch per tab opened a
-        # window per tab. The restore must emit a single ';'-joined command.
-        $moduleText = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\SessionRecovery.psm1') -Raw
-        $moduleText | Should -Match '\$segments = New-Object'
-        $moduleText | Should -Match "-join ' ; '"
-        $moduleText | Should -Match 'windowingBehavior defaults'
+Describe 'Diagnostics: terminal capture and storage estimate' {
+    It 'reports the snapshot count tiering will keep' {
+        $config = Get-SRDefaultConfig
+        $estimate = Get-SREstimatedSnapshotStorage -Config $config -AverageSnapshotBytes 10000
+        $estimate.RecentCount | Should -Be 48
+        $estimate.HourlyCount | Should -Be 168 -Because '7 days of hourly representatives'
+        $estimate.DailyCount | Should -Be 30
+        $estimate.TotalCount | Should -Be 246
+        $estimate.TotalMB | Should -BeGreaterThan 0
+    }
+
+    It 'drops the tier counts when tiering is off' {
+        $config = Get-SRDefaultConfig
+        $config.tieredRetention = $false
+        $estimate = Get-SREstimatedSnapshotStorage -Config $config -AverageSnapshotBytes 10000
+        $estimate.HourlyCount | Should -Be 0
+        $estimate.DailyCount | Should -Be 0
+        $estimate.TotalCount | Should -Be 48
+    }
+
+    It 'explains why terminal tabs are or are not captured' {
+        $status = Get-SRTerminalCaptureStatus
+        $status.PSObject.Properties['Reason'] | Should -Not -BeNullOrEmpty
+        $status.Reason | Should -Not -BeNullOrEmpty -Because 'a user must never see an empty explanation'
+        if (-not $status.Supported) {
+            $status.Reason | Should -Match 'not installed'
+        } else {
+            $status.Reason | Should -Match 'terminal|Terminal'
+        }
+    }
+
+    It 'names the setting to change when layouts are unavailable' {
+        $status = Get-SRTerminalCaptureStatus
+        if ($status.Supported -and $status.TabsInState -eq 0) {
+            $status.Reason | Should -Match 'firstWindowPreference|persistedWindowLayout|crash'
+        }
+    }
+
+    It 'surfaces both in the diagnostics payload' {
+        $diag = Get-SRDiagnostics
+        $diag.PSObject.Properties['TerminalCapture'] | Should -Not -BeNullOrEmpty
+        $diag.PSObject.Properties['EstimatedStorage'] | Should -Not -BeNullOrEmpty
+        $diag.EstimatedStorage.TotalCount | Should -BeGreaterThan 0
+    }
+}
+Describe 'Terminal restore command lines' {
+    BeforeAll {
+        function New-TermTab {
+            param([string]$Cwd, [string]$Profile = '', [string]$Title = '')
+            [pscustomobject]@{ cwd = $Cwd; profile = $Profile; title = $Title }
+        }
+    }
+
+    It 'puts every tab into a single command line' {
+        $tabs = @(
+            (New-TermTab -Cwd 'C:\a' -Profile 'PowerShell' -Title 'one'),
+            (New-TermTab -Cwd 'C:\b' -Profile 'Ubuntu' -Title 'two')
+        )
+        $lines = @(Get-SRTerminalCommandLines -Tabs $tabs)
+        $lines.Count | Should -Be 1 -Because 'windowingBehavior defaults to useNew, so one launch per tab means one window per tab'
+        ([regex]::Matches($lines[0], 'new-tab')).Count | Should -Be 2
+        $lines[0] | Should -Match ' ; '
+    }
+
+    It 'carries profile, directory and title per tab' {
+        $lines = @(Get-SRTerminalCommandLines -Tabs @((New-TermTab -Cwd 'C:\work' -Profile 'PowerShell' -Title 'proj')))
+        $lines[0] | Should -Match '-p'
+        $lines[0] | Should -Match 'PowerShell'
+        $lines[0] | Should -Match '-d'
+        $lines[0] | Should -Match 'work'
+        $lines[0] | Should -Match '--title'
+        $lines[0] | Should -Match 'proj'
+    }
+
+    It 'escapes a semicolon in a path so it cannot start a new sub-command' {
+        $lines = @(Get-SRTerminalCommandLines -Tabs @((New-TermTab -Cwd 'C:\we;ird')))
+        ([regex]::Matches($lines[0], 'new-tab')).Count | Should -Be 1
+        $lines[0].Contains('we\;ird') | Should -BeTrue
+    }
+
+    It 'escapes a semicolon in a tab title' {
+        $lines = @(Get-SRTerminalCommandLines -Tabs @((New-TermTab -Cwd 'C:\x' -Title 'a;b')))
+        ([regex]::Matches($lines[0], 'new-tab')).Count | Should -Be 1
+        $lines[0].Contains('a\;b') | Should -BeTrue
+    }
+
+    It 'strips embedded quotes instead of breaking the command' {
+        # wt documents no quote escape, and an unbalanced quote swallows the
+        # rest of the line, so a quote inside a value is removed rather than
+        # escaped. The wrapping quotes it sits in stay.
+        $quoted = 'C:\say' + [char]34 + 'hi'
+        $lines = @(Get-SRTerminalCommandLines -Tabs @((New-TermTab -Cwd $quoted)))
+        $lines[0] | Should -Match 'sayhi'
+        # The quote count must stay even: the wrapper opens and closes, and
+        # no stray quote survives inside the value to unbalance it.
+        $quoteCount = ([regex]::Matches($lines[0], [string][char]34)).Count
+        ($quoteCount % 2) | Should -Be 0 -Because 'an unbalanced quote swallows the rest of the command line'
+    }
+
+    It 'does not double backslashes in a Windows path' {
+        # Doubling would produce C:\\Users\\... and wt could not resolve it.
+        $lines = @(Get-SRTerminalCommandLines -Tabs @((New-TermTab -Cwd 'C:\Users\me')))
+        $lines[0].Contains('C:\\Users') | Should -BeFalse
+        $lines[0].Contains('C:\Users\me') | Should -BeTrue
+    }
+
+    It 'splits into chunks past the limit, one line each' {
+        $tabs = @(1..25 | ForEach-Object { New-TermTab -Cwd ('C:\t' + $_) })
+        $lines = @(Get-SRTerminalCommandLines -Tabs $tabs -ChunkSize 20)
+        $lines.Count | Should -Be 2
+        ([regex]::Matches($lines[0], 'new-tab')).Count | Should -Be 20
+        ([regex]::Matches($lines[1], 'new-tab')).Count | Should -Be 5
+    }
+
+    It 'returns nothing for no tabs' {
+        @(Get-SRTerminalCommandLines -Tabs @()).Count | Should -Be 0
+        @(Get-SRTerminalCommandLines -Tabs $null).Count | Should -Be 0
+    }
+
+    It 'omits flags that have no value' {
+        $lines = @(Get-SRTerminalCommandLines -Tabs @((New-TermTab -Cwd 'C:\only')))
+        $lines[0] | Should -Not -Match '--title'
+        $lines[0] | Should -Not -Match '-p '
     }
 }
 

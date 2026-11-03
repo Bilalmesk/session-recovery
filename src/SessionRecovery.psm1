@@ -1767,6 +1767,73 @@ function Test-SRTitleUnsavedWork {
     return $false
 }
 
+function ConvertTo-SRTerminalArgument {
+    # Quotes a value for a wt command line.
+    #
+    # wt splits sub-commands on ';' and documents exactly one escape, \';'
+    # (AppCommandlineArgs.cpp: the delimiter regex is '(^;|[^\\];)').
+    # That is the whole escape grammar, so this must NOT double backslashes:
+    # doing so turns every Windows path into C:\\Users\\..., which wt
+    # then fails to resolve. Only ';' is escaped.
+    #
+    # Embedded double quotes are stripped rather than escaped: wt has no
+    # documented quote escape, and an unbalanced quote would swallow the
+    # rest of the command line. A quote in a window title or path is rare,
+    # and losing it is far better than breaking the restore.
+    param([string]$Value)
+    if ([string]::IsNullOrEmpty($Value)) { return '""' }
+    $clean = $Value.Replace('"', '')
+    $clean = $clean.Replace(';', '\;')
+    return ('"{0}"' -f $clean)
+}
+
+function Get-SRTerminalCommandLines {
+    # Pure: turns captured terminal tabs into the wt.exe command lines that
+    # reopen them. Kept separate from the launching code so the exact
+    # strings can be asserted in tests - a source-text grep proves nothing
+    # about what would actually run.
+    #
+    # All tabs are joined with ';' into ONE command. Windows Terminal's
+    # windowingBehavior defaults to useNew, so a separate launch per tab
+    # produced one window per tab.
+    param(
+        [object[]]$Tabs = @(),
+        [int]$ChunkSize = 20
+    )
+    $lines = New-Object System.Collections.Generic.List[string]
+    if ($null -eq $Tabs -or @($Tabs).Count -eq 0) { return $lines.ToArray() }
+    if ($ChunkSize -lt 1) { $ChunkSize = 20 }
+
+    $segments = New-Object System.Collections.Generic.List[string]
+    foreach ($tab in @($Tabs)) {
+        if ($null -eq $tab) { continue }
+        $parts = New-Object System.Collections.Generic.List[string]
+        $parts.Add('new-tab')
+        $profileName = [string]$tab.profile
+        if (-not [string]::IsNullOrWhiteSpace($profileName)) {
+            $parts.Add('-p')
+            $parts.Add((ConvertTo-SRTerminalArgument -Value $profileName))
+        }
+        $cwd = [string]$tab.cwd
+        if (-not [string]::IsNullOrWhiteSpace($cwd)) {
+            $parts.Add('-d')
+            $parts.Add((ConvertTo-SRTerminalArgument -Value $cwd))
+        }
+        $title = [string]$tab.title
+        if (-not [string]::IsNullOrWhiteSpace($title)) {
+            $parts.Add('--title')
+            $parts.Add((ConvertTo-SRTerminalArgument -Value $title))
+        }
+        $segments.Add(($parts -join ' '))
+    }
+    if ($segments.Count -eq 0) { return $lines.ToArray() }
+
+    for ($offset = 0; $offset -lt $segments.Count; $offset += $ChunkSize) {
+        $last = [Math]::Min($offset + $ChunkSize - 1, $segments.Count - 1)
+        $lines.Add(($segments[$offset..$last] -join ' ; '))
+    }
+    return $lines.ToArray()
+}
 function Get-SRLaunchOrder {
     # Pure launch sequencing for a restore: apps named in launchOrder first
     # (a VPN or database the rest depends on), then apps whose snapshot shows
@@ -7153,12 +7220,9 @@ function Invoke-SRRestore {
                 Message = 'Windows Terminal is not installed; its tabs were skipped.'
             })
         } else {
-            # One wt invocation for every tab, joined with ';'. Windows
-            # Terminal's windowingBehavior defaults to 'useNew', so a
-            # separate launch per tab produced one WINDOW per tab. A single
-            # command keeps every tab in the window this call creates,
-            # preserves snapshot order, and needs no launch sleeps.
-            $segments = New-Object System.Collections.Generic.List[string]
+            # All tabs go into one wt invocation per chunk; see
+            # Get-SRTerminalCommandLines.
+            $allTabs = New-Object System.Collections.Generic.List[object]
             foreach ($workspace in $terminalWorkspaces) {
                 $tabList = @()
                 try { $tabList = @($workspace.tabs) } catch { $tabList = @() }
@@ -7167,50 +7231,33 @@ function Invoke-SRRestore {
                     $tabList = @(@($workspace.folders) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
                         ForEach-Object { [pscustomobject]@{ title = ''; profile = ''; cwd = [string]$_ } })
                 }
-                foreach ($tab in $tabList) {
-                    if ($null -eq $tab) { continue }
-                    $cwd = [string]$tab.cwd
-                    $profileName = [string]$tab.profile
-                    $parts = New-Object System.Collections.Generic.List[string]
-                    $parts.Add('new-tab')
-                    if (-not [string]::IsNullOrWhiteSpace($profileName)) {
-                        $parts.Add('-p')
-                        $parts.Add(('"{0}"' -f $profileName))
-                    }
-                    if (-not [string]::IsNullOrWhiteSpace($cwd) -and (Test-Path -LiteralPath $cwd)) {
-                        $parts.Add('-d')
-                        $parts.Add(('"{0}"' -f $cwd))
-                    }
-                    if (-not [string]::IsNullOrWhiteSpace([string]$tab.title)) {
-                        $parts.Add('--title')
-                        $parts.Add(('"{0}"' -f [string]$tab.title))
-                    }
-                    $segments.Add(($parts -join ' '))
+                foreach ($tab in $tabList) { if ($null -ne $tab) { $allTabs.Add($tab) } }
+            }
+
+            $chunkLimit = 20
+            $commandLines = @(Get-SRTerminalCommandLines -Tabs $allTabs.ToArray() -ChunkSize $chunkLimit)
+            $openedChunks = 0
+            foreach ($commandLine in $commandLines) {
+                try {
+                    Start-Process -FilePath $wtExe -ArgumentList $commandLine
+                    $openedChunks++
+                    Start-Sleep -Milliseconds 400
+                } catch {
+                    Write-SRLog -Level WARN -Message ('Could not open part of the terminal session: {0}' -f $_.Exception.Message)
+                    break
                 }
             }
-            $opened = $segments.Count
-            if ($opened -gt 0) {
-                # Chunked so a very large session stays under the command
-                # line limit; chunks after the first still open new windows,
-                # which is the correct behaviour past a few thousand args.
-                $chunkSize = 20
-                for ($offset = 0; $offset -lt $segments.Count; $offset += $chunkSize) {
-                    $last = [Math]::Min($offset + $chunkSize - 1, $segments.Count - 1)
-                    $command = ($segments[$offset..$last] -join ' ; ')
-                    try {
-                        Start-Process -FilePath $wtExe -ArgumentList $command
-                        Start-Sleep -Milliseconds 400
-                    } catch {
-                        Write-SRLog -Level WARN -Message ('Could not open Windows Terminal tabs: {0}' -f $_.Exception.Message)
-                        $opened = 0
-                        break
-                    }
-                }
+            # Report tabs, not chunks, and never discard what already opened
+            # because a later chunk failed.
+            $openedTabs = if ($openedChunks -ge $commandLines.Count) {
+                $allTabs.Count
+            } else {
+                [Math]::Min($allTabs.Count, $openedChunks * $chunkLimit)
             }
             $results.Add([pscustomobject]@{
                 Target  = 'Windows Terminal'
-                Started = ($opened -gt 0)
-                Message = if ($opened -gt 0) { ('Opened {0} terminal tab(s) in their folders' -f $opened) } else { 'No terminal tabs could be reopened.' }
+                Started = ($openedTabs -gt 0)
+                Message = if ($openedTabs -gt 0) { ('Opened {0} terminal tab(s) in their folders' -f $openedTabs) } else { 'No terminal tabs could be reopened.' }
             })
         }
     }
@@ -8520,6 +8567,113 @@ function Get-SRScheduledTaskStatus {
     return $results.ToArray()
 }
 
+function Get-SRTerminalCaptureStatus {
+    # Explains whether Windows Terminal tabs can be captured, and why not.
+    # Verified on a real install: state.json holds only generatedProfiles and
+    # does not gain persistedWindowLayouts during a session or on a clean
+    # exit unless firstWindowPreference is persistedWindowLayout (it
+    # defaults to defaultProfile). Surfacing that beats a debug log line.
+    $result = [pscustomobject]@{
+        Supported       = $false
+        StatePath       = ''
+        StateExists     = $false
+        TabsInState     = 0
+        PreferenceValue = ''
+        Reason          = ''
+    }
+
+    $candidates = @(
+        (Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState'),
+        (Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe\LocalState'),
+        (Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminalCanary_8wekyb3d8bbwe\LocalState')
+    )
+    $stateDir = $null
+    foreach ($dir in $candidates) {
+        if (Test-Path -LiteralPath (Join-Path $dir 'state.json')) { $stateDir = $dir; break }
+    }
+    if ($null -eq $stateDir) {
+        $result.Reason = 'Windows Terminal is not installed, so it has no tabs to capture.'
+        return $result
+    }
+
+    $result.Supported = $true
+    $result.StatePath = Join-Path $stateDir 'state.json'
+    $result.StateExists = $true
+
+    # Read the preference so the explanation can name the exact setting.
+    try {
+        $settingsPath = Join-Path $stateDir 'settings.json'
+        if (Test-Path -LiteralPath $settingsPath) {
+            $settings = Get-Content -LiteralPath $settingsPath -Raw -ErrorAction Stop | ConvertFrom-Json
+            $preference = $settings.PSObject.Properties['firstWindowPreference']
+            if ($null -ne $preference -and $null -ne $preference.Value) { $result.PreferenceValue = [string]$preference.Value }
+        }
+    } catch { }
+
+    try {
+        $terminal = @(Get-SRDevWorkspaces | Where-Object { [string]$_.kind -eq 'terminal' })
+        if ($terminal.Count -gt 0) {
+            $tabs = @($terminal[0].tabs)
+            if ($tabs.Count -gt 0) {
+                $result.TabsInState = $tabs.Count
+                $result.Reason = ('Capturing {0} terminal tab(s) from the saved layout.' -f $tabs.Count)
+                return $result
+            }
+        }
+    } catch { }
+
+    if ($result.PreferenceValue -eq 'persistedWindowLayout') {
+        $result.Reason = 'Windows Terminal writes window layouts when a window closes, so a crash leaves no tabs on disk. Tabs still present at the last clean close are captured.'
+    } elseif ([string]::IsNullOrWhiteSpace($result.PreferenceValue)) {
+        $result.Reason = 'Terminal tabs are not captured: Windows Terminal saves window layouts only when firstWindowPreference is persistedWindowLayout, and it is unset (defaults to defaultProfile).'
+    } else {
+        $result.Reason = ('Terminal tabs are not captured: firstWindowPreference is "{0}". Set it to persistedWindowLayout to save window layouts.' -f $result.PreferenceValue)
+    }
+    return $result
+}
+
+function Get-SREstimatedSnapshotStorage {
+    # Rough long-run snapshot count and size for the configured retention.
+    # Tiers keep history that flat retention would have deleted, so the
+    # default disk footprint goes up on upgrade; showing the estimate next
+    # to the setting means that is never a surprise.
+    param(
+        [object]$Config = $null,
+        [int64]$AverageSnapshotBytes = 0
+    )
+    if ($null -eq $Config) { $Config = Get-SRConfig }
+    $settings = Get-SRRetentionSettings -Config $Config
+    if ($AverageSnapshotBytes -le 0) {
+        # Measure what is already on disk; fall back to a conservative
+        # per-snapshot estimate when there is nothing to measure.
+        try {
+            $files = @(Get-SRSnapshotFiles)
+            if ($files.Count -gt 0) {
+                $total = [int64]0
+                foreach ($file in $files) { $total += [int64]$file.Length }
+                $AverageSnapshotBytes = [int64]($total / $files.Count)
+            }
+        } catch { }
+    }
+    if ($AverageSnapshotBytes -le 0) { $AverageSnapshotBytes = 8000 }
+
+    $recent = $settings.Keep
+    $hourly = if ($settings.Tiered) { $settings.HourlyDays * 24 } else { 0 }
+    $daily = if ($settings.Tiered) { $settings.DailyDays } else { 0 }
+    $total = [int64]($recent + $hourly + $daily)
+    if ($total -lt 1) { $total = 1 }
+
+    return [pscustomobject]@{
+        RecentCount  = $recent
+        HourlyCount  = $hourly
+        DailyCount   = $daily
+        TotalCount   = $total
+        AverageBytes = $AverageSnapshotBytes
+        TotalBytes   = [int64]($total * $AverageSnapshotBytes)
+        TotalMB      = [math]::Round(($total * $AverageSnapshotBytes) / 1MB, 1)
+    }
+}
+
 function Get-SRDiagnostics {
     $root = Get-SRRoot
     $snapshotDir = Get-SRSnapshotDirectory
@@ -8699,6 +8853,8 @@ function Get-SRDiagnostics {
         TrayPids                 = @($trayPids)
         ScheduledTasks           = @($tasks)
         Browsers                 = $browsers.ToArray()
+        TerminalCapture          = Get-SRTerminalCaptureStatus
+        EstimatedStorage         = Get-SREstimatedSnapshotStorage -Config $config
         Settings                 = [pscustomobject]@{
             IntervalMinutes     = [int]$config.snapshotIntervalMinutes
             KeepSnapshots       = [int]$config.keepSnapshots
