@@ -51,13 +51,15 @@ try {
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-# Classic suspend arrives through PowerModeChanged. Modern Standby often
-# does not send that message, so also watch the display and lid state; both
-# are reliable early signals that the machine is about to leave the desktop.
+# Kept independently loadable for hermetic native-helper tests (no tray startup).
+function Initialize-SRTrayNative {
 if (-not ('SessionRecovery.TrayPowerMonitor' -as [type])) {
     Add-Type -ReferencedAssemblies 'System.Windows.Forms' -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
+using System.Collections.Generic;
+using System.Diagnostics;
+using Microsoft.Win32;
 using System.Windows.Forms;
 
 namespace SessionRecovery
@@ -75,6 +77,70 @@ namespace SessionRecovery
 
         public event EventHandler DisplayOff;
         public event EventHandler LidClosed;
+        public event EventHandler SuspendRequested;
+        public event EventHandler ShutdownRequested;
+        public event EventHandler ShutdownCancelled;
+        private bool ending;
+        private bool shutdownDispatched;
+        private readonly object signalGate = new object();
+        private bool resumeSignal, suspendSignal, lockSignal, suspendDispatched;
+        private long suspendSignalAt;
+        private static long ClockMilliseconds { get { return (long)(Stopwatch.GetTimestamp() * (1000.0 / Stopwatch.Frequency)); } }
+
+        // Foreign-thread fallback is only fresh until resume, native dispatch,
+        // or expiry. It must never turn into a stale pre-sleep save after wake.
+        public void SignalPowerMode(PowerModes mode)
+        {
+            lock (signalGate) {
+                if (mode == PowerModes.Resume) {
+                    resumeSignal = true;
+                    suspendSignal = suspendDispatched = false;
+                } else if (mode == PowerModes.Suspend && !suspendDispatched) {
+                    suspendSignal = true;
+                    suspendSignalAt = ClockMilliseconds;
+                }
+            }
+        }
+        public void SignalNativeSuspend()
+        {
+            lock (signalGate) {
+                suspendSignal = false;
+                if (suspendDispatched) return;
+                suspendDispatched = true;
+            }
+            Raise(SuspendRequested);
+        }
+        private readonly PowerModeChangedEventHandler powerHandler;
+        private readonly SessionSwitchEventHandler sessionHandler;
+
+        // SystemEvents may run on a foreign thread. Only C# state crosses it.
+        public bool[] DrainSystemSignals()
+        {
+            lock (signalGate) {
+                bool freshSuspend = suspendSignal && !suspendDispatched && !resumeSignal &&
+                    ClockMilliseconds - suspendSignalAt < 2000;
+                if (freshSuspend) suspendDispatched = true;
+                bool[] result = new bool[] { resumeSignal, freshSuspend, lockSignal };
+                resumeSignal = suspendSignal = lockSignal = false;
+                return result;
+            }
+        }
+
+        // Separate from WndProc so tests can exercise cancellation/dedup safely.
+        public void SignalSessionEnd(bool query, bool committed)
+        {
+            if (!query && !committed) {
+                ending = false;
+                shutdownDispatched = false;
+                Raise(ShutdownCancelled);
+                return;
+            }
+            if (!ending) { ending = true; }
+            if (!shutdownDispatched) {
+                shutdownDispatched = true;
+                Raise(ShutdownRequested);
+            }
+        }
 
         public bool DisplayRegistered { get { return displayNotification != IntPtr.Zero; } }
         public bool LidRegistered { get { return lidNotification != IntPtr.Zero; } }
@@ -90,10 +156,42 @@ namespace SessionRecovery
             Guid lid = LidGuid;
             displayNotification = RegisterPowerSettingNotification(Handle, ref display, DEVICE_NOTIFY_WINDOW_HANDLE);
             lidNotification = RegisterPowerSettingNotification(Handle, ref lid, DEVICE_NOTIFY_WINDOW_HANDLE);
+            powerHandler = delegate(object sender, PowerModeChangedEventArgs e) {
+                SignalPowerMode(e.Mode);
+            };
+            sessionHandler = delegate(object sender, SessionSwitchEventArgs e) {
+                if (e.Reason == SessionSwitchReason.SessionLock) {
+                    lock (signalGate) { lockSignal = true; }
+                }
+            };
+            SystemEvents.PowerModeChanged += powerHandler;
+            SystemEvents.SessionSwitch += sessionHandler;
         }
 
         protected override void WndProc(ref Message m)
         {
+            // This hidden window is top-level (not HWND_MESSAGE), so it receives
+            // session broadcasts. Dispatch NOW; a timer may never tick again.
+            if (m.Msg == 0x0011) {
+                try { SignalSessionEnd(true, false); } catch { }
+                m.Result = new IntPtr(1); // Always allow shutdown, even on error.
+                return;
+            }
+            if (m.Msg == 0x0016) {
+                try { SignalSessionEnd(false, m.WParam != IntPtr.Zero); } catch { }
+                m.Result = IntPtr.Zero;
+                return;
+            }
+            if (m.Msg == WM_POWERBROADCAST) {
+                if (m.WParam.ToInt64() == 0x0004) { // PBT_APMSUSPEND
+                    try { SignalNativeSuspend(); } catch { }
+                    m.Result = new IntPtr(1);
+                    return;
+                }
+                if (m.WParam.ToInt64() == 0x0007 || m.WParam.ToInt64() == 0x0012) {
+                    SignalPowerMode(PowerModes.Resume); // resume suspend/automatic
+                }
+            }
             if (m.Msg == WM_POWERBROADCAST && m.WParam.ToInt64() == PBT_POWERSETTINGCHANGE && m.LParam != IntPtr.Zero)
             {
                 Guid setting = (Guid)Marshal.PtrToStructure(m.LParam, typeof(Guid));
@@ -117,6 +215,9 @@ namespace SessionRecovery
         {
             if (disposed) { return; }
             disposed = true;
+            SystemEvents.PowerModeChanged -= powerHandler;
+            SystemEvents.SessionSwitch -= sessionHandler;
+            DisplayOff = LidClosed = SuspendRequested = ShutdownRequested = ShutdownCancelled = null;
             if (displayNotification != IntPtr.Zero)
             {
                 UnregisterPowerSettingNotification(displayNotification);
@@ -136,9 +237,93 @@ namespace SessionRecovery
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool UnregisterPowerSettingNotification(IntPtr handle);
     }
+
+    // WinEventProc NEVER enters PowerShell. The rooted delegate only filters
+    // native metadata and coalesces first/last timestamps under a lock.
+    public sealed class TrayWindowEvents : IDisposable
+    {
+        private delegate void WinEventProc(IntPtr hook, uint eventType, IntPtr hwnd,
+            int objectId, int childId, uint eventThread, uint eventTime);
+        private readonly WinEventProc callback;
+        private readonly List<IntPtr> hooks = new List<IntPtr>();
+        private readonly HashSet<IntPtr> knownTopLevels = new HashSet<IntPtr>();
+        private readonly object gate = new object();
+        private readonly uint ownProcess = (uint)Process.GetCurrentProcess().Id;
+        private long first, last;
+        private bool disposed;
+        public TrayWindowEvents() { callback = OnEvent; }
+        public bool Start()
+        {
+            // Seed handles so destroy callbacks can still identify windows after
+            // Windows has invalidated the HWND and native metadata is gone.
+            EnumWindows(delegate(IntPtr hwnd, IntPtr unused) {
+                uint pid; GetWindowThreadProcessId(hwnd, out pid);
+                if (pid != ownProcess && IsTopLevel(hwnd)) knownTopLevels.Add(hwnd);
+                return true;
+            }, IntPtr.Zero);
+            foreach (uint kind in new uint[] { 0x8001, 0x8002, 0x8003, 0x800C }) {
+                IntPtr hook = SetWinEventHook(kind, kind, IntPtr.Zero, callback, 0, 0, 2);
+                if (hook == IntPtr.Zero) { Dispose(); return false; }
+                hooks.Add(hook);
+            }
+            return true;
+        }
+        public static bool AcceptMetadata(uint kind, int objectId, int childId,
+            uint pid, uint ownPid, bool topLevel, bool known)
+        {
+            return objectId == 0 && childId == 0 && pid != ownPid &&
+                (kind == 0x8001 || kind == 0x8002 || kind == 0x8003 || kind == 0x800C) &&
+                (topLevel || (kind == 0x8001 && known));
+        }
+        private static bool IsTopLevel(IntPtr hwnd)
+        {
+            return GetAncestor(hwnd, 2) == hwnd && (GetWindowLong(hwnd, -16) & 0x40000000) == 0;
+        }
+        private void OnEvent(IntPtr hook, uint kind, IntPtr hwnd, int objectId,
+            int childId, uint eventThread, uint eventTime)
+        {
+            if (hwnd == IntPtr.Zero || objectId != 0 || childId != 0) return;
+            uint pid; GetWindowThreadProcessId(hwnd, out pid);
+            lock (gate) {
+                if (disposed) return;
+                bool known = knownTopLevels.Contains(hwnd);
+                bool top = pid != 0 && IsTopLevel(hwnd);
+                if (!AcceptMetadata(kind, objectId, childId, pid, ownProcess, top, known)) return;
+                if (kind == 0x8001) knownTopLevels.Remove(hwnd);
+                else knownTopLevels.Add(hwnd);
+                long now = (long)(Stopwatch.GetTimestamp() * (1000.0 / Stopwatch.Frequency));
+                if (first == 0) first = now;
+                last = now;
+            }
+        }
+        public long[] Drain()
+        {
+            lock (gate) {
+                long[] result = new long[] { first, last };
+                first = last = 0;
+                return result;
+            }
+        }
+        public void Dispose()
+        {
+            lock (gate) { disposed = true; first = last = 0; knownTopLevels.Clear(); }
+            foreach (IntPtr hook in hooks) UnhookWinEvent(hook);
+            hooks.Clear();
+            GC.KeepAlive(callback);
+        }
+        private delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr parameter);
+        [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr parameter);
+        [DllImport("user32.dll")] private static extern IntPtr SetWinEventHook(uint min, uint max, IntPtr module, WinEventProc callback, uint pid, uint thread, uint flags);
+        [DllImport("user32.dll")] private static extern bool UnhookWinEvent(IntPtr hook);
+        [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+        [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
+        [DllImport("user32.dll")] private static extern int GetWindowLong(IntPtr hwnd, int index);
+    }
 }
 '@
 }
+}
+Initialize-SRTrayNative
 
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
@@ -166,6 +351,13 @@ $script:paused = $false
 $script:resumeAt = $null
 $script:updatingPauseMenu = $false
 $script:snapshotBusy = $false
+$script:snapshotRunspace = $null
+$script:snapshotJob = $null
+$script:eventTimer = $null
+$script:windowEvents = $null
+$script:eventCaptureEnabled = $true
+$script:sessionEnding = $false
+$script:shutdownAttempted = $false
 $script:ownsSnapshots = $false
 $script:taskMode = $false
 $script:watcherMode = $false
@@ -222,14 +414,9 @@ function Invoke-SRTrayPowerCheckpoint {
         return
     }
 
-    try {
-        $path = Save-SRHibernateSnapshot -Force
-        if (-not [string]::IsNullOrWhiteSpace([string]$path)) {
-            $script:lastPowerCheckpointAt = Get-Date
-            try { Write-SRLog -Message (("Power checkpoint ({0}) saved: {1}") -f $Source, $path) } catch { }
-        }
-    } catch {
-        try { Write-SRLog -Level ERROR -Message (("Power checkpoint ({0}) failed: {1}") -f $Source, $_.Exception.Message) } catch { }
+    if ($script:sessionEnding -or $script:snapshotBusy) { return }
+    if (Start-SRTrayCapture -Operation Power -Detail $Source) {
+        $script:lastPowerCheckpointAt = Get-Date
     }
 }
 
@@ -318,7 +505,7 @@ function Update-SRTrayStatus {
     }
 
     if ($null -ne $script:pauseItem) {
-        $script:pauseItem.Enabled = [bool]$script:ownsSnapshots
+        $script:pauseItem.Enabled = $true
         # Setting Checked programmatically raises CheckedChanged. Suppress the
         # handler so a timed pause is not cancelled by its own status update.
         $script:updatingPauseMenu = $true
@@ -330,7 +517,7 @@ function Update-SRTrayStatus {
         $script:pauseItem.Text = if ($script:paused) { (T 'TrayResume' 'Resume snapshots') } else { (T 'TrayPause' 'Pause snapshots') }
     }
     if ($null -ne $script:pauseHourItem) {
-        $script:pauseHourItem.Enabled = ([bool]$script:ownsSnapshots -and -not $script:paused)
+        $script:pauseHourItem.Enabled = (-not $script:paused)
     }
 }
 
@@ -374,33 +561,169 @@ function Stop-SRTrayTimers {
     }
 }
 
+function Initialize-SRTrayWorker {
+    param([string]$ModulePath)
+    # Import before the message loop: shutdown must only enqueue work, never
+    # synchronously open/import a module in its native message callback.
+    $script:snapshotRunspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+    $script:snapshotRunspace.ApartmentState = [System.Threading.ApartmentState]::STA
+    $script:snapshotRunspace.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
+    $script:snapshotRunspace.Open()
+    $setup = [powershell]::Create()
+    try {
+        $setup.Runspace = $script:snapshotRunspace
+        [void]$setup.AddCommand('Import-Module').AddParameter('Name', $ModulePath).AddParameter('Force').AddParameter('ErrorAction', 'Stop')
+        [void]$setup.Invoke()
+        if ($setup.HadErrors) { throw $setup.Streams.Error[0] }
+    } finally { $setup.Dispose() }
+}
+
+function Start-SRTrayCapture {
+    param([ValidateSet('Automatic','Manual','Shutdown','Power','Workspace','Hibernate')][string]$Operation = 'Automatic', [string]$Detail = '')
+    if ($script:exiting -or $script:snapshotBusy -or $null -eq $script:snapshotRunspace) { return $false }
+    if ($script:sessionEnding -and $Operation -ne 'Shutdown') { return $false }
+    $pipeline = [powershell]::Create()
+    try {
+        $pipeline.Runspace = $script:snapshotRunspace
+        [void]$pipeline.AddScript({
+            param($operation, $detail)
+            $ErrorActionPreference = 'Stop'
+            switch ($operation) {
+                'Shutdown' { Save-SRSnapshot -Shutdown }
+                'Manual' { Save-SRSnapshot -Force }
+                'Power' { Save-SRHibernateSnapshot -Force }
+                'Hibernate' { Invoke-SRHibernate }
+                'Workspace' {
+                    $path = Save-SRSnapshot -Force
+                    if (-not $path) { throw 'Snapshot was skipped; workspace was not changed.' }
+                    Save-SRWorkspace -Name $detail
+                }
+                default { Save-SRSnapshot }
+            }
+        }).AddArgument($Operation).AddArgument($Detail)
+        $script:snapshotBusy = $true
+        $handle = $pipeline.BeginInvoke()
+        $script:snapshotJob = [pscustomobject]@{ Pipeline = $pipeline; Handle = $handle; Operation = $Operation; Detail = $Detail }
+        if ($Operation -eq 'Automatic' -and $null -ne $script:eventState) {
+            $script:eventState.LastAttempt = Get-SRTrayClock
+        }
+        return $true
+    } catch {
+        $script:snapshotBusy = $false
+        $pipeline.Dispose()
+        # The shutdown callback must remain nonblocking and silent.
+        if ($Operation -ne 'Shutdown') { try { Write-SRLog -Level ERROR -Message "Tray worker dispatch failed: $($_.Exception.Message)" } catch { } }
+        return $false
+    }
+}
+
+function Complete-SRTrayCapture {
+    $job = $script:snapshotJob
+    if ($null -eq $job -or -not $job.Handle.IsCompleted) { return }
+    try {
+        $result = @($job.Pipeline.EndInvoke($job.Handle) | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_) })
+        if ($job.Pipeline.HadErrors) { throw $job.Pipeline.Streams.Error[0] }
+        $script:snapshotFailures = 0
+        if (-not $script:sessionEnding) {
+            if ($job.Operation -eq 'Workspace') {
+                Show-SRTrayBalloon -Text ((T 'TrayWorkspaceSaved' 'Workspace "{0}" saved.') -f $job.Detail) -Icon Information
+            } elseif ($job.Operation -eq 'Manual') {
+                if ($result.Count -gt 0) { Show-SRTrayBalloon -Text (T 'TrayBalloonSaved' 'Snapshot saved. Your current windows and tabs are protected.') -Icon Information }
+                else { Show-SRTrayBalloon -Text (T 'TrayBalloonSkip' 'The snapshot was skipped because another snapshot is running.') -Icon Warning }
+            }
+        }
+    } catch {
+        $script:snapshotFailures++
+        try { Write-SRLog -Level ERROR -Message "Tray snapshot failed: $($_.Exception.Message)" } catch { }
+        if (-not $script:sessionEnding -and ($job.Operation -in @('Manual','Workspace','Hibernate') -or $script:snapshotFailures -eq 1)) {
+            Show-SRTrayBalloon -Text ((T 'TrayBalloonFail' 'Snapshot failed: {0}') -f $_.Exception.Message) -Icon Error -Timeout 5000
+        }
+    } finally {
+        $job.Pipeline.Dispose()
+        $script:snapshotJob = $null
+        $script:snapshotBusy = $false
+        if ($null -ne $script:eventState) {
+            Complete-SREventSnapshotRequest -State $script:eventState -NowMilliseconds (Get-SRTrayClock)
+        }
+        if (-not $script:sessionEnding) { Update-SRTrayStatus }
+    }
+}
+
 function Invoke-SRTraySnapshot {
     param([switch]$Manual)
     if ($script:snapshotBusy) {
         if ($Manual) { Show-SRTrayBalloon -Text (T 'TrayBalloonBusy' 'A snapshot is already in progress.') -Icon Information }
         return
     }
+    if (-not $Manual -and $null -ne $script:eventState -and $null -ne $script:eventState.LastAttempt -and
+        ((Get-SRTrayClock) - $script:eventState.LastAttempt) -lt 30000) { return }
+    $operation = if ($Manual) { 'Manual' } else { 'Automatic' }
+    [void](Start-SRTrayCapture -Operation $operation)
+}
 
-    $script:snapshotBusy = $true
-    try {
-        $path = Save-SRSnapshot -Force
-        if ($path) {
-            $script:snapshotFailures = 0
-            if ($Manual) {
-                Show-SRTrayBalloon -Text (T 'TrayBalloonSaved' 'Snapshot saved. Your current windows and tabs are protected.') -Icon Information
+function Request-SRTrayShutdown {
+    # Called by the native window on its owning UI thread. No disk/config I/O,
+    # timers, dialogs, waits, or synchronous save calls are allowed here.
+    $script:sessionEnding = $true
+    if ($script:shutdownAttempted) { return }
+    $script:shutdownAttempted = $true
+    Add-SREventSnapshotSignal -State $script:eventState -Signal 'session-ending' -NowMilliseconds (Get-SRTrayClock) -Enabled $script:eventCaptureEnabled -Paused $script:paused
+    if ($script:paused -or -not $script:eventCaptureEnabled -or $script:snapshotBusy) {
+        # This notification is consumed, not queued behind an in-flight save.
+        $script:eventState.SessionEnding = $false
+        $script:eventState.SessionEndingAttempted = $true
+        return
+    }
+    $request = Get-SREventSnapshotRequest -State $script:eventState -NowMilliseconds (Get-SRTrayClock)
+    if ($null -ne $request -and -not (Start-SRTrayCapture -Operation Shutdown)) {
+        Complete-SREventSnapshotRequest -State $script:eventState -NowMilliseconds (Get-SRTrayClock)
+    }
+}
+
+function Cancel-SRTrayShutdown {
+    $script:sessionEnding = $false
+    $script:shutdownAttempted = $false
+    Reset-SREventSnapshotState -State $script:eventState -CancelSessionEnding
+}
+
+function Get-SRTrayClock {
+    return [long]([System.Diagnostics.Stopwatch]::GetTimestamp() * (1000.0 / [System.Diagnostics.Stopwatch]::Frequency))
+}
+
+function Request-SRTraySuspend {
+    if ($script:exiting -or $script:sessionEnding -or $script:paused -or -not $script:eventCaptureEnabled) { return }
+    if (Test-SRTrayHibernateGuard) { Invoke-SRTrayPowerCheckpoint -Source 'suspend' }
+    else { Invoke-SRTraySnapshot }
+}
+
+function Invoke-SRTrayEventPoll {
+    Complete-SRTrayCapture
+    if ($script:exiting -or $script:sessionEnding) { return }
+    $script:eventCaptureEnabled = Test-SRTrayEventSnapshots
+    $enabled = $script:eventCaptureEnabled -and -not $script:paused
+    if (-not $enabled) { Reset-SREventSnapshotState -State $script:eventState }
+    if ($null -ne $script:windowEvents) {
+        $dirty = $script:windowEvents.Drain()
+        if ($enabled -and $dirty[0] -ne 0) {
+            Add-SREventSnapshotSignal -State $script:eventState -Signal 'window' -NowMilliseconds $dirty[0]
+            Add-SREventSnapshotSignal -State $script:eventState -Signal 'window' -NowMilliseconds $dirty[1]
+        }
+    }
+    if ($null -ne $script:powerWindow) {
+        $signals = $script:powerWindow.DrainSystemSignals()
+        if ($enabled) {
+            if ($signals[0]) {
+                Add-SREventSnapshotSignal -State $script:eventState -Signal 'resume' -NowMilliseconds (Get-SRTrayClock)
             }
-        } elseif ($Manual) {
-            Show-SRTrayBalloon -Text (T 'TrayBalloonSkip' 'The snapshot was skipped because another snapshot is running.') -Icon Warning
+            if ($signals[1]) { Request-SRTraySuspend }
+            if ($signals[2]) {
+                Add-SREventSnapshotSignal -State $script:eventState -Signal 'lock' -NowMilliseconds (Get-SRTrayClock)
+            }
         }
-    } catch {
-        $script:snapshotFailures++
-        try { Write-SRLog -Level ERROR -Message "Tray snapshot failed: $($_.Exception.Message)" } catch { }
-        if ($Manual -or $script:snapshotFailures -eq 1) {
-            Show-SRTrayBalloon -Text ((T 'TrayBalloonFail' 'Snapshot failed: {0}') -f $_.Exception.Message) -Icon Error -Timeout 5000
-        }
-    } finally {
-        $script:snapshotBusy = $false
-        Update-SRTrayStatus
+    }
+    $request = Get-SREventSnapshotRequest -State $script:eventState -NowMilliseconds (Get-SRTrayClock) -Busy $script:snapshotBusy -Enabled $script:eventCaptureEnabled -Paused $script:paused
+    if ($null -ne $request -and -not (Start-SRTrayCapture -Operation Automatic)) {
+        Complete-SREventSnapshotRequest -State $script:eventState -NowMilliseconds (Get-SRTrayClock)
     }
 }
 
@@ -415,7 +738,9 @@ function Invoke-SRTrayHibernate {
 
     try {
         Show-SRTrayBalloon -Text (T 'TrayHibernateSaving' 'Saving a recovery checkpoint, then hibernating...') -Icon Information
-        [void](Invoke-SRHibernate)
+        if (-not (Start-SRTrayCapture -Operation Hibernate)) {
+            Show-SRTrayBalloon -Text (T 'TrayBalloonBusy' 'A snapshot is already in progress.') -Icon Information
+        }
     } catch {
         try { Write-SRLog -Level ERROR -Message ("Hibernate from tray failed: {0}" -f $_.Exception.Message) } catch { }
         Show-SRTrayBalloon -Text ((T 'HibernateFailed' 'Could not hibernate: {0}') -f $_.Exception.Message) -Icon Error -Timeout 8000
@@ -483,17 +808,44 @@ function Start-SRDiagnosticsWindow {
     Start-SRStudio -Mode '--diagnostics'
 }
 
+function Stop-SRTrayWorker {
+    if ($null -ne $script:snapshotJob) {
+        if ($script:snapshotJob.Handle.IsCompleted) { Complete-SRTrayCapture }
+        else {
+            # Stop/Dispose can wait indefinitely on blocked native/COM calls.
+            # Request cancellation and leave active objects rooted until process
+            # exit; do not synchronously close their runspace on either exit path.
+            try { [void]$script:snapshotJob.Pipeline.BeginStop($null, $null) } catch { }
+            return
+        }
+    }
+    if ($null -ne $script:snapshotRunspace -and -not $script:snapshotBusy) {
+        try { $script:snapshotRunspace.Dispose() } catch { }
+        $script:snapshotRunspace = $null
+    }
+}
+
 function Exit-SRTray {
     if ($script:exiting) { return }
     $script:exiting = $true
     Stop-SRTrayTimers
+    foreach ($timerName in @('snapshotTimer','firstTimer','eventTimer','batteryTimer')) {
+        $timer = Get-Variable -Scope Script -Name $timerName -ValueOnly -ErrorAction SilentlyContinue
+        if ($null -ne $timer) { try { $timer.Stop(); $timer.Dispose() } catch { } }
+        Set-Variable -Scope Script -Name $timerName -Value $null
+    }
+    if ($null -ne $script:windowEvents) {
+        try { $script:windowEvents.Dispose() } catch { }
+        $script:windowEvents = $null
+    }
+    Stop-SRTrayWorker
     if ($null -ne $script:controlTimer) {
         try { $script:controlTimer.Stop(); $script:controlTimer.Dispose() } catch { }
         $script:controlTimer = $null
     }
     try {
         if ('SessionRecovery.Tray.ControlPipe' -as [type]) {
-            [SessionRecovery.Tray.ControlPipe]::Stop()
+            [SessionRecovery.Tray.ControlPipe]::Stop((-not $script:sessionEnding))
         }
     } catch { }
     if ($null -ne $script:hotkeyTimer) {
@@ -518,6 +870,9 @@ function Exit-SRTray {
             $script:notify.Dispose()
             $script:notify = $null
         }
+    } catch { }
+    try {
+        if ($null -ne $script:menu) { $script:menu.Dispose(); $script:menu = $null }
     } catch { }
     try {
         if ($null -ne $script:appContext) { $script:appContext.ExitThread() }
@@ -682,9 +1037,9 @@ $workspaceMenu = New-Object System.Windows.Forms.ToolStripMenuItem((T 'TrayWorks
         } catch { return }
         if ([string]::IsNullOrWhiteSpace($name)) { return }
         try {
-            [void](Save-SRSnapshot -Force)
-            [void](Save-SRWorkspace -Name $name)
-            Show-SRTrayBalloon -Text ((T 'TrayWorkspaceSaved' 'Workspace "{0}" saved.') -f $name) -Icon Information
+            if (-not (Start-SRTrayCapture -Operation Workspace -Detail $name)) {
+                Show-SRTrayBalloon -Text (T 'TrayBalloonBusy' 'A snapshot is already in progress.') -Icon Information
+            }
         } catch {
             Show-SRTrayBalloon -Text ((T 'TrayWorkspaceFail' 'Could not save the workspace: {0}') -f $_.Exception.Message) -Icon Error
         }
@@ -725,7 +1080,6 @@ $script:pauseItem.CheckOnClick = $true
 
 $script:pauseHourItem = New-Object System.Windows.Forms.ToolStripMenuItem((T 'TrayPauseHour' 'Pause for 1 hour'))
 [void]$script:pauseHourItem.Add_Click({
-    if (-not $script:ownsSnapshots) { return }
     $script:paused = $true
     Stop-SRTrayTimers
     $script:resumeAt = (Get-Date).AddHours(1)
@@ -886,6 +1240,8 @@ namespace SessionRecovery.Tray
         private static readonly ConcurrentQueue<string> Queue = new ConcurrentQueue<string>();
         private static Thread worker;
         private static volatile bool stopping;
+        private static readonly object PipeGate = new object();
+        private static NamedPipeServerStream activePipe;
 
         public static bool TryDequeue(out string command)
         {
@@ -901,12 +1257,16 @@ namespace SessionRecovery.Tray
             worker.Start();
         }
 
-        public static void Stop()
+        public static void Stop(bool wait)
         {
             stopping = true;
+            lock (PipeGate) {
+                try { if (activePipe != null) activePipe.Dispose(); } catch { }
+                activePipe = null;
+            }
             Thread local = worker;
             worker = null;
-            try { if (local != null) local.Join(700); } catch { }
+            try { if (wait && local != null) local.Join(700); } catch { }
         }
 
         private static void Run()
@@ -919,6 +1279,10 @@ namespace SessionRecovery.Tray
                     pipe = new NamedPipeServerStream(
                         "SessionRecoveryControl", PipeDirection.InOut, 1,
                         PipeTransmissionMode.Byte, PipeOptions.None);
+                    lock (PipeGate) {
+                        if (stopping) return;
+                        activePipe = pipe;
+                    }
                     pipe.WaitForConnection();
                     if (stopping) return;
                     string line = null;
@@ -944,6 +1308,7 @@ namespace SessionRecovery.Tray
                 }
                 finally
                 {
+                    lock (PipeGate) { if (activePipe == pipe) activePipe = null; }
                     try { if (pipe != null) pipe.Dispose(); } catch { }
                 }
             }
@@ -967,9 +1332,9 @@ function Invoke-SRTrayControl {
         $command = [string]$request.command
         $name = [string]$request.name
         switch ($command) {
-            'snapshot' { Invoke-SRTraySnapshot }
+            'snapshot' { Invoke-SRTraySnapshot -Manual }
             'pause' {
-                if ($script:ownsSnapshots -and -not $script:paused) {
+                if (-not $script:paused) {
                     $script:paused = $true
                     Stop-SRTrayTimers
                     $script:resumeAt = $null
@@ -981,9 +1346,9 @@ function Invoke-SRTrayControl {
             'workspace-save' {
                 if ([string]::IsNullOrWhiteSpace($name)) { break }
                 try {
-                    [void](Save-SRSnapshot -Force)
-                    [void](Save-SRWorkspace -Name $name)
-                    Show-SRTrayBalloon -Text ((T 'TrayWorkspaceSaved' 'Workspace "{0}" saved.') -f $name) -Icon Information
+                    if (-not (Start-SRTrayCapture -Operation Workspace -Detail $name)) {
+                        Show-SRTrayBalloon -Text (T 'TrayBalloonBusy' 'A snapshot is already in progress.') -Icon Information
+                    }
                 } catch {
                     Show-SRTrayBalloon -Text ((T 'TrayWorkspaceFail' 'Could not save the workspace: {0}') -f $_.Exception.Message) -Icon Error
                 }
@@ -1049,7 +1414,7 @@ $script:batteryLowSeen = $false
         $critical = ($power.BatteryChargeStatus -band [System.Windows.Forms.BatteryChargeStatus]::Critical) -ne 0
         if (($low -or $critical) -and -not $script:batteryLowSeen) {
             $script:batteryLowSeen = $true
-            if ((Test-SRTrayEventSnapshots) -and $script:ownsSnapshots -and -not $script:paused) {
+            if ((Test-SRTrayEventSnapshots) -and -not $script:paused) {
                 Invoke-SRTraySnapshot
             }
         }
@@ -1060,35 +1425,11 @@ $script:batteryLowSeen = $false
 })
 $script:batteryTimer.Start()
 
-try {
-    [Microsoft.Win32.SystemEvents]::PowerModeChanged += {
-        param($sender, $e)
-        if ($e.Mode -eq [Microsoft.Win32.PowerModes]::Resume) {
-            # A resume is a likely crash moment on laptops: capture once the
-            # desktop is back, then let the timer continue.
-            if ((Test-SRTrayEventSnapshots) -and $script:ownsSnapshots -and -not $script:paused) {
-                Stop-SRTrayTimers
-                $script:firstTimer.Interval = 15000
-                $script:firstTimer.Start()
-            }
-        }
-        if ($e.Mode -eq [Microsoft.Win32.PowerModes]::Suspend) {
-            # Capture right before sleep or hibernate: this is the snapshot
-            # that matters when the battery dies or the machine never wakes
-            # up. The hibernate guard is a one-off checkpoint, so it also
-            # runs while a scheduled task owns the normal snapshot timer.
-            # With the guard on, the checkpoint is pinned and the latest few
-            # survive retention.
-            if ((Test-SRTrayEventSnapshots) -and -not $script:paused) {
-                if (Test-SRTrayHibernateGuard) {
-                    Invoke-SRTrayPowerCheckpoint -Source 'suspend'
-                } elseif ($script:ownsSnapshots) {
-                    Invoke-SRTraySnapshot
-                }
-            }
-        }
-    }
-} catch { }
+# Classic SystemEvents are marshalled as C# flags by TrayPowerMonitor;
+# the event timer drains them on this STA, never on a foreign .NET thread.
+Initialize-SRTrayWorker -ModulePath $modulePath
+$script:eventState = New-SREventSnapshotState
+$script:eventCaptureEnabled = Test-SRTrayEventSnapshots
 
 # Modern Standby (and some lid-close paths) does not reliably send the
 # classic suspend message. Display-off and lid-close arrive early enough to
@@ -1098,6 +1439,9 @@ try {
     $script:powerWindow = New-Object SessionRecovery.TrayPowerMonitor
     $script:powerWindow.add_DisplayOff({ Invoke-SRTrayPowerCheckpoint -Source 'display-off' })
     $script:powerWindow.add_LidClosed({ Invoke-SRTrayPowerCheckpoint -Source 'lid-closed' })
+    $script:powerWindow.add_SuspendRequested({ Request-SRTraySuspend })
+    $script:powerWindow.add_ShutdownRequested({ Request-SRTrayShutdown })
+    $script:powerWindow.add_ShutdownCancelled({ Cancel-SRTrayShutdown })
     try {
         Write-SRLog -Message ('Power monitor registered (display: {0}, lid: {1}).' -f $script:powerWindow.DisplayRegistered, $script:powerWindow.LidRegistered)
     } catch { }
@@ -1107,24 +1451,18 @@ try {
 }
 
 try {
-    [Microsoft.Win32.SystemEvents]::SessionSwitch += {
-        param($sender, $e)
-        if ($e.Reason -eq [Microsoft.Win32.SessionSwitchReason]::SessionLock) {
-            # Locking is the most reliable 'walked away / end of session'
-            # signal Windows gives without admin rights.
-            if ((Test-SRTrayEventSnapshots) -and -not $script:paused) {
-                Invoke-SRTraySnapshot
-            }
-        }
-    }
-} catch { }
+    $script:windowEvents = New-Object SessionRecovery.TrayWindowEvents
+    if (-not $script:windowEvents.Start()) { throw 'SetWinEventHook registration failed.' }
+} catch {
+    if ($null -ne $script:windowEvents) { $script:windowEvents.Dispose() }
+    $script:windowEvents = $null
+    try { Write-SRLog -Level WARN -Message ("Window notifications unavailable; periodic capture remains active: {0}" -f $_.Exception.Message) } catch { }
+}
 
-try {
-    [Microsoft.Win32.SystemEvents]::SessionEnding += {
-        param($sender, $e)
-        Exit-SRTray
-    }
-} catch { }
+$script:eventTimer = New-Object System.Windows.Forms.Timer
+$script:eventTimer.Interval = 250
+[void]$script:eventTimer.Add_Tick({ Invoke-SRTrayEventPoll })
+$script:eventTimer.Start()
 
 try {
     Write-SRLog -Message ('Tray app started (owns snapshots: {0}, scheduled task: {1}, monitor-only: {2}).' -f $script:ownsSnapshots, $script:taskMode, $MonitorOnly)
@@ -1142,6 +1480,7 @@ $script:appContext = New-Object System.Windows.Forms.ApplicationContext
 try {
     [System.Windows.Forms.Application]::Run($script:appContext)
 } finally {
+    Exit-SRTray
     try {
         if ($null -ne $script:snapshotMutex) {
             try { [void]$script:snapshotMutex.ReleaseMutex() } catch { }

@@ -22,13 +22,13 @@ winget install --id Bilalmesk.SessionRecovery
 ```
 
 > [!IMPORTANT]
-> It reopens apps and tabs. It **cannot** recover unsaved documents, passwords or form data - but its **unsaved-work radar** tells you exactly which apps had windows with unsaved changes when the crash hit, opens those apps first, and points you at Office AutoRecover drafts.
+> It reopens apps and tabs. It **cannot** recover unsaved documents, editor buffers, passwords or form data. Its **unsaved-work radar** can flag unsaved-change markers in window titles at the last successful snapshot, prioritize those apps on restore, and point you at available Office AutoRecover drafts. These are hints, not a record of every unsaved change or a guarantee of recovery.
 
 ## ✨ Features
 
 | | |
 |---|---|
-| 📸 **Auto snapshots** | Every 3 minutes and at logon, with a searchable timeline |
+| 📸 **Auto snapshots** | Periodic snapshots (3-minute default), logon and best-effort workspace/system events, with a searchable timeline |
 | 🪟 **Window-accurate restore** | Position, size and maximized state, clamped to your current monitors |
 | 🌐 **Browser tabs** | Chrome, Edge, Brave, Vivaldi, Opera, Opera GX, Chromium, Firefox; duplicates and window groups kept |
 | 📁 **Explorer folders** | Reopened alongside your apps |
@@ -187,7 +187,11 @@ Left-click opens the Studio. Right-click for restore, snapshot now, **undo last 
 
 **Hibernate with checkpoint** saves a pinned recovery snapshot first and only then asks Windows to hibernate. The same thing happens automatically on suspend, display-off or lid-close while the guard is on. The latest three checkpoints stay pinned; older ones return to normal retention. This is a fast workspace checkpoint, not a memory image: apps still relaunch from disk and unsaved work is not recovered.
 
-When scheduled tasks drive snapshots, the tray runs in monitor-only mode so normal snapshots are never duplicated. The one-off hibernate checkpoint still runs at suspend.
+When scheduled tasks drive periodic snapshots, the tray runs in task-monitor mode: it does not run a second periodic snapshot loop, but its event-triggered capture and hibernate checkpoints remain available while the tray is resident. The legacy `Watch-Session.ps1` watcher is interval-only; it does not provide these event hooks.
+
+**Workspace and system events** are enabled by `eventSnapshots` (default `true`), exposed as **Capture workspace and system events** in Studio Settings. The resident tray listens for native top-level window show, hide, destroy and title-change events, plus lock, sleep and low-battery transitions. Workspace changes are coalesced with a **2-second debounce**, a **10-second maximum burst delay**, and a **30-second automatic-attempt cooldown**. These timings throttle attempts; they do not guarantee a saved snapshot within that time. Browser-internal changes, tabs that do not change a top-level window title, and other in-app state can go unnoticed, so **periodic capture remains necessary**. Disabling event capture does not disable the periodic fallback or the separate `hibernateGuard` setting.
+
+**Shutdown and sign-out are best-effort only.** When Windows queries whether the session may end, the tray initiates a snapshot asynchronously, immediately permits the session to end, and never vetoes or waits for capture. That path has a **2-second cooperative stage budget**: it checks the remaining budget between stages, but cannot interrupt a blocked COM call, and Windows may terminate the process before saving finishes. It skips thumbnails, automatic exports and retention cleanup, while retaining exclusions, URL privacy rules and configured snapshot encryption. It is not a shutdown blocker or a guarantee of a final snapshot, and it never recovers unsaved buffers. Hard power loss and crashes may give no notification at all.
 
 ## ⚙️ Configure
 
@@ -207,6 +211,7 @@ Use the Studio **Settings** page, or edit `%LOCALAPPDATA%\SessionRecovery\config
   "compressSnapshots": false,
   "redactUrls": true,
   "redactUrlMode": "Full",
+  "eventSnapshots": true,
   "hibernateGuard": true,
   "keepHibernateCheckpoints": 3,
   "excludeApps": ["KeePass*"],
@@ -221,7 +226,7 @@ Use the Studio **Settings** page, or edit `%LOCALAPPDATA%\SessionRecovery\config
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `snapshotIntervalMinutes` | `3` | Minutes between snapshots |
+| `snapshotIntervalMinutes` | `3` | Periodic fallback interval in minutes; still needed alongside event capture |
 | `keepSnapshots` | `48` | Recent window: the newest files are always kept in full |
 | `tieredRetention` | `true` | Beyond the recent window, thin history to hourly then daily representatives instead of deleting |
 | `keepHourlyDays` | `7` | Days kept at one snapshot per clock hour |
@@ -247,7 +252,8 @@ Use the Studio **Settings** page, or edit `%LOCALAPPDATA%\SessionRecovery\config
 | `compressSnapshots` | `false` | Write gzip-compressed snapshots |
 | `redactUrls` | `true` | Redact URL query strings and fragments before writing |
 | `redactUrlMode` | `Full` | `Full` strips the whole query string; `Safe` keeps ordinary parameters and blanks credential-looking values |
-| `hibernateGuard` | `true` | Save and pin a checkpoint whenever Windows suspends |
+| `eventSnapshots` | `true` | Resident tray: workspace/window changes, lock, sleep, low battery and best-effort shutdown/sign-out; also works in task-monitor mode, not the legacy watcher |
+| `hibernateGuard` | `true` | Attempt to save and pin a checkpoint on suspend, display-off or lid-close; separate from `eventSnapshots` |
 | `keepHibernateCheckpoints` | `3` | Number of hibernate/suspend checkpoints kept pinned |
 | `excludeApps` / `excludeFolders` / `excludeUrls` | `[]` | Case-insensitive wildcards |
 | `pinnedSnapshots` | `[]` | Files retention never deletes (managed via **Pin**) |
@@ -293,7 +299,7 @@ Use the Studio **Settings** page, or edit `%LOCALAPPDATA%\SessionRecovery\config
 - **What it does:** with `hibernateGuard` on, the tray saves a forced snapshot when Windows reports suspend (sleep or hibernate), marks it `reason: "hibernate"`, pins it, and keeps the newest `keepHibernateCheckpoints` (default 3). Older checkpoints are unpinned; normal retention decides when they go. Classic suspend arrives through `PowerModeChanged`. Modern Standby often skips that message, so the same checkpoint also runs on display-off and lid-close, with a 30-second debounce so one transition does not create duplicates. Use **Hibernate with checkpoint** in the tray or `SessionRecovery.exe --hibernate` to do it explicitly. If the checkpoint cannot be saved, the explicit action cancels instead of hibernating without one.
 - **What it cannot do:** Windows offers no safe user-mode way to freeze and resume an arbitrary app's RAM. This is a workspace checkpoint, not a process clone or VM snapshot. Unsaved editor buffers, passwords and form data are still not captured. Hibernate itself is handled by Windows; if hibernation is disabled in Power Options, `shutdown.exe /h` fails and the app reports the error.
 - **No memory dumps:** the app never reads another process's memory or writes a crash dump. The only data saved is the same app, folder, tab, window and workspace metadata as a normal snapshot.
-- **Crashes and power cuts cannot be predicted:** Windows sends no suspend notification before a blue screen or a hard power loss. The normal 3-minute timer and crash detection remain the safety net, so the worst case is a layout from the last few minutes rather than the exact moment before the crash.
+- **Crashes and power cuts cannot be predicted:** Windows sends no suspend notification before a blue screen or a hard power loss. Periodic capture (3-minute default), event attempts and crash detection remain the safety net, but recovery can only use the last successful snapshot. Pauses, capture failures or a stopped tray/task can leave older history; there is no guaranteed maximum data-loss window or exact pre-crash state.
 - **Virtual desktops are best-effort:** restore uses the documented `IVirtualDesktopManager` interface and only moves windows owned by the restarted app. If a desktop no longer exists, the window stays on the current one. Moving arbitrary apps between desktops would need undocumented interfaces that change between Windows 11 builds, so it is out of scope.
 
 </details>

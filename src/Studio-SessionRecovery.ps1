@@ -3708,7 +3708,7 @@ $languageHint = New-StudioLabel -Text 'English, Arabic, French, Spanish, German,
 $appearanceCard.Controls.Add($languageHint)
 
 # Card: smart capture
-$smartCard = New-StudioSettingsCard -Title 'Smart capture' -Description 'Skip snapshots nobody needs, and capture from anywhere.' -Height 438
+$smartCard = New-StudioSettingsCard -Title 'Smart capture' -Description 'Skip snapshots nobody needs, and capture from anywhere.' -Height 486
 $settingsFlow.Controls.Add($smartCard)
 $settingsCards.Add($smartCard)
 
@@ -3731,23 +3731,25 @@ $smartCard.Controls.Add($hotkeyLabel)
 $hotkeyHint = New-StudioLabel -Text 'Works while the background app is running. Takes effect after saving.' -X 76 -Y 214 -Width 500 -Height 34 -Font $script:FontBodySmall -Color $script:P.Subtle
 $smartCard.Controls.Add($hotkeyHint)
 
-$toggleEvents = New-StudioToggle -X 20 -Y 244 -Checked $true
+$toggleEvents = New-StudioToggle -X 20 -Y 260 -Checked $true
 $smartCard.Controls.Add($toggleEvents)
-$eventsLabel = New-StudioLabel -Text 'Capture on lock, sleep and low battery' -X 76 -Y 254 -Width 420 -Height 20 -Font $script:FontBody -Color $script:P.Text
+$eventsLabel = New-StudioLabel -Text 'Capture workspace and system events' -X 76 -Y 264 -Width 660 -Height 20 -Font $script:FontBody -Color $script:P.Text
 $smartCard.Controls.Add($eventsLabel)
+$eventsHint = New-StudioLabel -Text 'Window changes, lock, sleep and low battery; shutdown/sign-out are best-effort. Requires the tray; periodic capture stays on.' -X 76 -Y 284 -Width 700 -Height 34 -Font $script:FontBodySmall -Color $script:P.Subtle
+$smartCard.Controls.Add($eventsHint)
 
-$toggleHibernate = New-StudioToggle -X 20 -Y 300 -Checked $true
+$toggleHibernate = New-StudioToggle -X 20 -Y 348 -Checked $true
 $smartCard.Controls.Add($toggleHibernate)
-$hibernateLabel = New-StudioLabel -Text 'Checkpoint before sleep or hibernate' -X 76 -Y 304 -Width 420 -Height 20 -Font $script:FontBody -Color $script:P.Text
+$hibernateLabel = New-StudioLabel -Text 'Checkpoint before sleep or hibernate' -X 76 -Y 352 -Width 420 -Height 20 -Font $script:FontBody -Color $script:P.Text
 $smartCard.Controls.Add($hibernateLabel)
-$hibernateHint = New-StudioLabel -Text 'Saves and pins a snapshot before Windows suspends, keeping the latest three. Automatic pinning only; unsaved work is still not captured.' -X 76 -Y 324 -Width 620 -Height 34 -Font $script:FontBodySmall -Color $script:P.Subtle
+$hibernateHint = New-StudioLabel -Text 'Saves and pins a snapshot before Windows suspends, keeping the latest three. Automatic pinning only; unsaved work is still not captured.' -X 76 -Y 372 -Width 620 -Height 34 -Font $script:FontBodySmall -Color $script:P.Subtle
 $smartCard.Controls.Add($hibernateHint)
 
-$toggleDev = New-StudioToggle -X 20 -Y 356 -Checked $true
+$toggleDev = New-StudioToggle -X 20 -Y 404 -Checked $true
 $smartCard.Controls.Add($toggleDev)
-$devLabel = New-StudioLabel -Text 'Capture dev workspaces (VS Code, Cursor, JetBrains, Windows Terminal)' -X 76 -Y 360 -Width 660 -Height 20 -Font $script:FontBody -Color $script:P.Text
+$devLabel = New-StudioLabel -Text 'Capture dev workspaces (VS Code, Cursor, JetBrains, Windows Terminal)' -X 76 -Y 408 -Width 660 -Height 20 -Font $script:FontBody -Color $script:P.Text
 $smartCard.Controls.Add($devLabel)
-$devHint = New-StudioLabel -Text 'Reads the editors'' own recent-files state so restore can reopen the same folders.' -X 76 -Y 380 -Width 560 -Height 34 -Font $script:FontBodySmall -Color $script:P.Subtle
+$devHint = New-StudioLabel -Text 'Reads the editors'' own recent-files state so restore can reopen the same folders.' -X 76 -Y 428 -Width 560 -Height 34 -Font $script:FontBodySmall -Color $script:P.Subtle
 $smartCard.Controls.Add($devHint)
 
 # Card: storage and privacy

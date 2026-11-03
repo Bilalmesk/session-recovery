@@ -5885,22 +5885,134 @@ function Start-SRUndoLastRestore {
     return $checkpoint
 }
 
+# Event coordination is deliberately free of timers, desktop APIs and wall-clock
+# time. The tray owns serialization and supplies Stopwatch.ElapsedMilliseconds.
+function New-SREventSnapshotState {
+    return [pscustomobject]@{
+        Pending = $false; FirstSignal = [long]0; LastSignal = [long]0
+        Generation = [long]0; InFlight = $false; LastAttempt = $null
+        SessionEnding = $false; SessionEndingAttempted = $false
+    }
+}
+
+function Reset-SREventSnapshotState {
+    param([Parameter(Mandatory = $true)][object]$State, [switch]$CancelSessionEnding)
+    $State.Pending = $false
+    $State.FirstSignal = [long]0
+    $State.LastSignal = [long]0
+    # Never release an active reservation, or reset the attempt cooldown.
+    if ($CancelSessionEnding) {
+        $State.SessionEnding = $false
+        $State.SessionEndingAttempted = $false
+    }
+}
+
+function Add-SREventSnapshotSignal {
+    param(
+        [Parameter(Mandatory = $true)][object]$State,
+        [Parameter(Mandatory = $true)][string]$Signal,
+        [Parameter(Mandatory = $true)][long]$NowMilliseconds,
+        [bool]$Enabled = $true, [bool]$Paused = $false
+    )
+    if ($Signal -eq 'session-ending-cancelled') {
+        Reset-SREventSnapshotState -State $State -CancelSessionEnding
+        return
+    }
+    if (-not $Enabled -or $Paused) {
+        Reset-SREventSnapshotState -State $State
+        $State.SessionEnding = $false
+        return
+    }
+    if ($Signal -eq 'session-ending') {
+        Reset-SREventSnapshotState -State $State
+        if (-not $State.SessionEndingAttempted) { $State.SessionEnding = $true }
+        return
+    }
+    if ($State.SessionEnding -or $State.SessionEndingAttempted) { return }
+    if (-not $State.Pending) {
+        $State.Generation++
+        $State.FirstSignal = $NowMilliseconds
+        $State.Pending = $true
+    }
+    $State.LastSignal = $NowMilliseconds
+}
+
+function Get-SREventSnapshotRequest {
+    param(
+        [Parameter(Mandatory = $true)][object]$State,
+        [Parameter(Mandatory = $true)][long]$NowMilliseconds,
+        [bool]$Busy = $false, [bool]$Enabled = $true, [bool]$Paused = $false
+    )
+    if (-not $Enabled -or $Paused) {
+        Reset-SREventSnapshotState -State $State
+        $State.SessionEnding = $false
+        return $null
+    }
+    if ($Busy -or $State.InFlight) { return $null }
+    $shutdown = [bool]$State.SessionEnding
+    if (-not $shutdown) {
+        if (-not $State.Pending) { return $null }
+        if (($NowMilliseconds - $State.LastSignal) -lt 2000 -and
+            ($NowMilliseconds - $State.FirstSignal) -lt 10000) { return $null }
+        if ($null -ne $State.LastAttempt -and ($NowMilliseconds - $State.LastAttempt) -lt 30000) { return $null }
+    } else {
+        $State.SessionEnding = $false
+        $State.SessionEndingAttempted = $true
+    }
+    $State.Pending = $false
+    $State.LastAttempt = $NowMilliseconds
+    $State.InFlight = $true
+    return [pscustomobject]@{
+        Reason = $(if ($shutdown) { 'session-ending' } else { 'event' })
+        Shutdown = $shutdown
+        Generation = [long]$State.Generation
+    }
+}
+
+function Complete-SREventSnapshotRequest {
+    param(
+        [Parameter(Mandatory = $true)][object]$State,
+        [Parameter(Mandatory = $true)][long]$NowMilliseconds
+    )
+    # Cooldown is measured from the attempt, including skipped/failed saves.
+    $State.InFlight = $false
+}
+
+function Assert-SRSnapshotBudget {
+    param([object]$Clock, [int]$BudgetMilliseconds)
+    if ($BudgetMilliseconds -gt 0 -and $Clock.ElapsedMilliseconds -ge $BudgetMilliseconds) {
+        throw [System.TimeoutException]::new('Snapshot capture exceeded its cooperative time budget.')
+    }
+}
+
+function Get-SRSnapshotWindows {
+    # A separate collector boundary also lets tests avoid live desktop capture.
+    return [SessionRecovery.WindowEnumerator]::GetVisibleWindows()
+}
+
 function New-SRSnapshot {
-    param([string]$Reason = '')
-    $windows = @([SessionRecovery.WindowEnumerator]::GetVisibleWindows())
+    param([string]$Reason = '', [ValidateRange(0, 2147483647)][int]$BudgetMilliseconds = 0)
+    $captureClock = [System.Diagnostics.Stopwatch]::StartNew()
+    $windows = @(Get-SRSnapshotWindows)
+    Assert-SRSnapshotBudget -Clock $captureClock -BudgetMilliseconds $BudgetMilliseconds
     $processMap = Get-SRProcessMap
+    Assert-SRSnapshotBudget -Clock $captureClock -BudgetMilliseconds $BudgetMilliseconds
     $config = Get-SRConfig
     $apps = @(Get-SRApplications -Windows $windows -ProcessMap $processMap)
+    Assert-SRSnapshotBudget -Clock $captureClock -BudgetMilliseconds $BudgetMilliseconds
     $folders = @(Get-SRExplorerFolders -Windows $windows)
+    Assert-SRSnapshotBudget -Clock $captureClock -BudgetMilliseconds $BudgetMilliseconds
     $browsers = @()
     if ($null -eq $config.PSObject.Properties['captureBrowserTabs'] -or [bool]$config.captureBrowserTabs) {
         $browsers = @(Get-SRBrowsers -Windows $windows -ProcessMap $processMap -Config $config)
     }
+    Assert-SRSnapshotBudget -Clock $captureClock -BudgetMilliseconds $BudgetMilliseconds
     if ($null -eq $config.PSObject.Properties['captureMediaPlayers'] -or [bool]$config.captureMediaPlayers) {
         # Attaches the playing media file and an estimated position to media
         # player entries (currently VLC).
         Get-SRMediaPlayerMedia -Apps $apps -Config $config
     }
+    Assert-SRSnapshotBudget -Clock $captureClock -BudgetMilliseconds $BudgetMilliseconds
 
     # Apply the user's capture exclusions before the snapshot is written, so
     # excluded names, folders and URLs never reach the JSON files on disk.
@@ -5957,7 +6069,9 @@ function New-SRSnapshot {
     }
 
     $now = Get-Date
+    Assert-SRSnapshotBudget -Clock $captureClock -BudgetMilliseconds $BudgetMilliseconds
     $logonTime = Get-SRLogonTime
+    Assert-SRSnapshotBudget -Clock $captureClock -BudgetMilliseconds $BudgetMilliseconds
     $tabCount = 0
     foreach ($browser in $browsers) {
         foreach ($profile in $browser.profiles) {
@@ -6010,7 +6124,9 @@ function New-SRSnapshot {
         $devProperty = $config.PSObject.Properties['captureDevWorkspaces']
         if ($null -ne $devProperty) { $devCapture = [bool]$devProperty.Value }
     } catch { }
+    Assert-SRSnapshotBudget -Clock $captureClock -BudgetMilliseconds $BudgetMilliseconds
     if ($devCapture) { $devWorkspaces = @(Get-SRDevWorkspaces) }
+    Assert-SRSnapshotBudget -Clock $captureClock -BudgetMilliseconds $BudgetMilliseconds
 
     # Virtual desktops (best-effort, documented IVirtualDesktopManager): each
     # captured app remembers the desktop its window lived on.
@@ -6021,6 +6137,7 @@ function New-SRSnapshot {
     } catch { }
     if ($restoreDesktops -and (Get-SRVirtualDesktopHelper)) {
         foreach ($app in $apps) {
+            Assert-SRSnapshotBudget -Clock $captureClock -BudgetMilliseconds $BudgetMilliseconds
             $matchName = ([string]$app.name).ToLowerInvariant()
             $best = $null
             foreach ($window in $windows) {
@@ -6043,16 +6160,20 @@ function New-SRSnapshot {
         }
     }
 
+    Assert-SRSnapshotBudget -Clock $captureClock -BudgetMilliseconds $BudgetMilliseconds
     # Remote sessions: open PuTTY sessions and Remote Desktop targets.
     $remote = @(Get-SRRemoteSessions -Windows $windows)
+    Assert-SRSnapshotBudget -Clock $captureClock -BudgetMilliseconds $BudgetMilliseconds
 
     # Monitor layout at capture time, so restore can map windows from
     # monitors that no longer exist instead of only clamping them.
     $monitors = @(Get-SRMonitors)
+    Assert-SRSnapshotBudget -Clock $captureClock -BudgetMilliseconds $BudgetMilliseconds
     # Machine facts (OS build, DPI scale, display sizes) so a restore opened on
     # another PC can say what differs. Best effort: never fail a snapshot.
     $systemProfile = $null
     try { $systemProfile = Get-SRSystemProfile } catch { }
+    Assert-SRSnapshotBudget -Clock $captureClock -BudgetMilliseconds $BudgetMilliseconds
 
     # Kept for the thumbnail pass in Save-SRSnapshot; never serialized.
     $script:SRLastWindows = $windows
@@ -6089,6 +6210,7 @@ function New-SRSnapshot {
         $snapshot | Add-Member -NotePropertyName reason -NotePropertyValue ([string]$Reason).Trim().ToLowerInvariant() -Force
     }
     $snapshot | Add-Member -NotePropertyName stateHash -NotePropertyValue (Get-SRSnapshotStateHash -Snapshot $snapshot) -Force
+    Assert-SRSnapshotBudget -Clock $captureClock -BudgetMilliseconds $BudgetMilliseconds
     return $snapshot
 }
 
@@ -6414,8 +6536,14 @@ function Test-SRAutoSnapshotBlocked {
 function Save-SRSnapshot {
     param(
         [switch]$Force,
-        [string]$Reason = ''
+        [string]$Reason = '',
+        [switch]$Shutdown
     )
+    # A final checkpoint has no retry window or optional post-save work.
+    if ($Shutdown) {
+        $Force = $true
+        if ([string]::IsNullOrWhiteSpace($Reason)) { $Reason = 'session-ending' }
+    }
     $config = Get-SRConfig
     if (-not (Test-Path -LiteralPath $script:SRSnapshotDir)) {
         New-Item -ItemType Directory -Path $script:SRSnapshotDir -Force | Out-Null
@@ -6448,12 +6576,14 @@ function Save-SRSnapshot {
 
     $lockPath = Join-Path $script:SRSnapshotDir '.save.lock'
     $lock = $null
-    for ($attempt = 0; $attempt -lt 10; $attempt++) {
+    $lockAttempts = 10
+    if ($Shutdown) { $lockAttempts = 1 }
+    for ($attempt = 0; $attempt -lt $lockAttempts; $attempt++) {
         try {
             $lock = [System.IO.File]::Open($lockPath, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
             break
         } catch {
-            Start-Sleep -Milliseconds 150
+            if (-not $Shutdown) { Start-Sleep -Milliseconds 150 }
         }
     }
     if ($null -eq $lock) {
@@ -6462,7 +6592,11 @@ function Save-SRSnapshot {
     }
 
     try {
-        $snapshot = New-SRSnapshot -Reason $Reason
+        if ($Shutdown) {
+            $snapshot = New-SRSnapshot -Reason $Reason -BudgetMilliseconds 2000
+        } else {
+            $snapshot = New-SRSnapshot -Reason $Reason
+        }
         $captured = [DateTimeOffset]::Parse([string]$snapshot.capturedAt, [System.Globalization.CultureInfo]::InvariantCulture)
 
         # Change detection: when nothing relevant changed since the newest
@@ -6494,7 +6628,7 @@ function Save-SRSnapshot {
             $thumbsProperty = $config.PSObject.Properties['captureThumbnails']
             if ($null -ne $thumbsProperty) { $captureThumbs = [bool]$thumbsProperty.Value }
         } catch { }
-        if ($captureThumbs) {
+        if ($captureThumbs -and -not $Shutdown) {
             try {
                 $thumbName = $captured.ToString('yyyyMMdd-HHmmss-fff')
                 [void](New-SRThumbnailSet -Snapshot $snapshot -Windows @($script:SRLastWindows) -Name $thumbName)
@@ -6544,11 +6678,11 @@ function Save-SRSnapshot {
         # Same policy as the cleanup button. Passing the settings here is what
         # actually builds hourly and daily history; before this the automatic
         # path silently used flat count-only retention and deleted it.
-        [void](Invoke-SRRetention -Config $config)
+        if (-not $Shutdown) { [void](Invoke-SRRetention -Config $config) }
         Write-SRLog -Message ("Snapshot saved: {0} ({1} apps, {2} folders, {3} browsers, {4} tabs)" -f $path, $snapshot.stats.apps, $snapshot.stats.folders, $snapshot.stats.browsers, $snapshot.stats.tabs)
         try {
             $exportFolder = [string]$config.autoExportFolder
-            if (-not [string]::IsNullOrWhiteSpace($exportFolder)) {
+            if (-not $Shutdown -and -not [string]::IsNullOrWhiteSpace($exportFolder)) {
                 # Auto-backup: keep the newest snapshots as plain JSON copies
                 # so OneDrive/Dropbox-style folders can carry them elsewhere.
                 if (-not (Test-Path -LiteralPath $exportFolder)) {
