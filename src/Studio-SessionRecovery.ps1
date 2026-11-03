@@ -1683,6 +1683,22 @@ $dashboardHint.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System
 $dashboardHint.Visible = $false
 $dashboard.Controls.Add($dashboardHint)
 
+function Get-StudioPauseDetail {
+    # One line saying when snapshots were paused and how the pause ends.
+    param([object]$Pause)
+    if ($null -eq $Pause -or -not [bool]$Pause.Paused) { return '' }
+    $since = if ($null -ne $Pause.PausedAt) {
+        Format-StudioDate -Date ([datetime]$Pause.PausedAt) -Format 'MMM d, HH:mm'
+    } else {
+        (T 'PausedSinceUnknown' 'an unknown time')
+    }
+    if ($null -ne $Pause.ResumeAt) {
+        $until = Format-StudioDate -Date ([datetime]$Pause.ResumeAt) -Format 'MMM d, HH:mm'
+        return ((T 'HeroPausedUntilLine' 'Paused since {0}  •  resumes automatically at {1}') -f $since, $until)
+    }
+    return ((T 'HeroPausedLine' 'Paused since {0}  •  stays paused until you choose Resume') -f $since)
+}
+
 function Refresh-StudioDashboard {
     if (-not $script:UiReady -and -not $script:Ui.StatSnapshots) { return }
     $latest = if ($script:Snapshots.Count -gt 0) { $script:Snapshots[0] } else { $null }
@@ -1742,6 +1758,21 @@ function Refresh-StudioDashboard {
             $script:Ui.HeroTitle.Text = (T 'HeroNothing' 'Nothing has been saved yet')
             $script:Ui.HeroRing.ProgressColor = $script:P.Red
             $script:Ui.HeroRing.ProgressEndColor = $script:P.Red
+        }
+    }
+    # A pause persists across restarts and stops every automatic snapshot, so
+    # the hero must say so instead of showing a healthy "protected" state.
+    if ($script:Ui.HeroRing) {
+        $pauseNow = $null
+        try { $pauseNow = Get-SRSnapshotPause } catch { }
+        if ($null -ne $pauseNow -and [bool]$pauseNow.Paused) {
+            $script:Ui.HeroBadge.Text = (T 'BadgePaused' 'PAUSED')
+            $script:Ui.HeroBadge.FillColor = $script:P.AmberSoft
+            $script:Ui.HeroBadge.TextColor = $script:P.Amber
+            $script:Ui.HeroTitle.Text = (T 'HeroPaused' 'Snapshots are paused')
+            $script:Ui.HeroRing.ProgressColor = $script:P.Amber
+            $script:Ui.HeroRing.ProgressEndColor = $script:P.Amber
+            $script:Ui.HeroNext.Text = (Get-StudioPauseDetail -Pause $pauseNow)
         }
     }
     if ($script:Ui.QuickRestore) { $script:Ui.QuickRestore.Enabled = ($script:Snapshots.Count -gt 0) }
@@ -4538,6 +4569,25 @@ function Render-StudioDiagnostics {
             $estimatedStorageDetail = (T 'DiagEstimatedStorageDetail' 'Rough snapshot-file estimate: {0} for {1} projected retained snapshot(s), averaging {2} each. Not a full disk budget.') -f (Format-StudioBytes -Bytes ([int64]$estimate.TotalBytes)), [int64]$estimate.TotalCount, (Format-StudioBytes -Bytes ([int64]$estimate.AverageBytes))
             Add-StudioDiagnosticRow -Ok $true -Text (T 'DiagEstimatedStorage' 'Estimated retention storage') -Detail $estimatedStorageDetail
         }
+        # Pause state: a forgotten pause silently removes crash protection.
+        $pauseDetail = ''
+        if ([bool]$diag.Paused) {
+            $pauseDetail = Get-StudioPauseDetail -Pause ([pscustomobject]@{ Paused = $true; PausedAt = $diag.PausedAt; ResumeAt = $diag.ResumeAt })
+            Add-StudioDiagnosticRow -Ok $false -Text (T 'DiagPause' 'Snapshot pause') -Detail ((T 'DiagPauseOn' 'Automatic snapshots are paused.') + '  ' + $pauseDetail)
+        } else {
+            $pauseDetail = (T 'DiagPauseOff' 'Automatic snapshots are running.')
+            Add-StudioDiagnosticRow -Ok $true -Text (T 'DiagPause' 'Snapshot pause') -Detail $pauseDetail
+        }
+        # Shutdown snapshots: how often the best-effort final capture reached disk.
+        $shutdownSnapshotDetail = (T 'DiagShutdownSnapshotsNone' 'No shutdown has been recorded yet.')
+        if ($null -ne $diag.ShutdownSnapshots -and [int]$diag.ShutdownSnapshots.Total -gt 0) {
+            $summary = $diag.ShutdownSnapshots
+            $shutdownSnapshotDetail = ((T 'DiagShutdownSnapshotsDetail' '{0} of the last {1} shutdown snapshot(s) reached disk.') -f [int]$summary.Saved, [int]$summary.Total)
+            # Informational: the capture is best effort, so a miss is not a fault.
+            Add-StudioDiagnosticRow -Ok $true -Text (T 'DiagShutdownSnapshots' 'Shutdown snapshots') -Detail $shutdownSnapshotDetail
+        } else {
+            Add-StudioDiagnosticRow -Ok $true -Text (T 'DiagShutdownSnapshots' 'Shutdown snapshots') -Detail $shutdownSnapshotDetail
+        }
         if (-not [string]::IsNullOrWhiteSpace([string]$diag.ShutdownReason) -or -not [string]::IsNullOrWhiteSpace([string]$diag.ShutdownReasonKey)) {
             $ok = ([string]$diag.ShutdownKind -ne 'crash')
             $shutdownInfo = [pscustomobject]@{
@@ -4584,6 +4634,8 @@ function Render-StudioDiagnostics {
             'Browsers: ' + (($browsers | ForEach-Object { $_.Name }) -join ', '),
             ((T 'DiagTerminalCapture' 'Windows Terminal capture') + ': ' + $terminalDetail),
             ((T 'DiagEstimatedStorage' 'Estimated retention storage') + ': ' + $estimatedStorageDetail),
+            ((T 'DiagPause' 'Snapshot pause') + ': ' + $pauseDetail),
+            ((T 'DiagShutdownSnapshots' 'Shutdown snapshots') + ': ' + $shutdownSnapshotDetail),
             'Log: ' + $diag.LogPath
         ) -join "`r`n"
         Update-StudioInsights

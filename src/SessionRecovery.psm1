@@ -1079,6 +1079,7 @@ $script:SRInstallIdPath = Join-Path $script:SRRoot 'installation.id'
 $script:SRInstallationId = $null
 $script:SRPausePath = Join-Path $script:SRRoot 'paused.json'
 $script:SRShutdownAttemptPath = Join-Path $script:SRRoot 'shutdown-attempt.json'
+$script:SRShutdownHistoryPath = Join-Path $script:SRRoot 'shutdown-history.json'
 
 function Get-SRRoot { $script:SRRoot }
 function Get-SRSnapshotDirectory { $script:SRSnapshotDir }
@@ -1090,7 +1091,7 @@ function Get-SRSnapshotPause {
     # Pause is persisted in the data folder, not only in the tray process.
     # The scheduled task runs in a separate process, so it can only honor the
     # Pause menu if both sides read the same marker.
-    $result = [pscustomobject]@{ Paused = $false; ResumeAt = $null }
+    $result = [pscustomobject]@{ Paused = $false; ResumeAt = $null; PausedAt = $null }
     if (-not (Test-Path -LiteralPath $script:SRPausePath -PathType Leaf)) { return $result }
     $marker = $null
     try {
@@ -1120,6 +1121,19 @@ function Get-SRSnapshotPause {
                 return $result
             }
             $result.ResumeAt = $resumeAtUtc.ToLocalTime()
+        }
+    }
+    # When the pause started, so every place that shows it can say "since X".
+    # Older markers have no timestamp; PausedAt then stays null.
+    $pausedAtProperty = $marker.PSObject.Properties['pausedAt']
+    if ($null -ne $pausedAtProperty -and -not [string]::IsNullOrWhiteSpace([string]$pausedAtProperty.Value)) {
+        $pausedAt = [datetime]::MinValue
+        if ([datetime]::TryParse([string]$pausedAtProperty.Value, [System.Globalization.CultureInfo]::InvariantCulture,
+                [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$pausedAt)) {
+            if ($pausedAt.Kind -eq [System.DateTimeKind]::Unspecified) {
+                $pausedAt = [datetime]::SpecifyKind($pausedAt, [System.DateTimeKind]::Utc)
+            }
+            $result.PausedAt = $pausedAt.ToUniversalTime().ToLocalTime()
         }
     }
     $result.Paused = $true
@@ -1161,7 +1175,7 @@ function Set-SRSnapshotPause {
         try { Remove-Item -LiteralPath $script:SRPausePath -Force -ErrorAction SilentlyContinue } catch { }
         return
     }
-    $payload = [ordered]@{ paused = $true; resumeAt = $null }
+    $payload = [ordered]@{ paused = $true; pausedAt = (Get-Date).ToUniversalTime().ToString('o'); resumeAt = $null }
     if ($null -ne $ResumeAt) {
         $payload.resumeAt = ([datetime]$ResumeAt).ToUniversalTime().ToString('o')
     }
@@ -1199,6 +1213,67 @@ function Complete-SRShutdownAttempt {
 
 function Clear-SRShutdownAttempt { try { Remove-Item -LiteralPath $script:SRShutdownAttemptPath -Force -ErrorAction SilentlyContinue } catch { } }
 
+function Get-SRShutdownHistoryLimit { 20 }
+
+function Add-SRShutdownHistory {
+    # One entry per shutdown attempt, newest last, trimmed to the last 20.
+    # A small JSON array: it is read by Diagnostics, never by the capture path.
+    param(
+        [Parameter(Mandatory = $true)][bool]$Completed,
+        [string]$At = ''
+    )
+    $entries = New-Object System.Collections.Generic.List[object]
+    foreach ($existing in @(Read-SRShutdownHistory)) { $entries.Add($existing) }
+    if ([string]::IsNullOrWhiteSpace($At)) { $At = (Get-Date).ToUniversalTime().ToString('o') }
+    $entries.Add([pscustomobject]@{ at = $At; completed = [bool]$Completed })
+    $limit = Get-SRShutdownHistoryLimit
+    if ($entries.Count -gt $limit) { $entries.RemoveRange(0, $entries.Count - $limit) }
+    # ConvertTo-Json unrolls a one-item array; wrap explicitly so it stays an array.
+    $payload = [ordered]@{ entries = @($entries.ToArray()) }
+    Write-SRMarkerFile -Path $script:SRShutdownHistoryPath -Payload $payload
+}
+
+function Read-SRShutdownHistory {
+    # Tolerant reader: a missing or damaged file is simply "no history".
+    if (-not (Test-Path -LiteralPath $script:SRShutdownHistoryPath -PathType Leaf)) { return @() }
+    try {
+        $parsed = Get-Content -LiteralPath $script:SRShutdownHistoryPath -Raw -ErrorAction Stop | ConvertFrom-Json
+        $entriesProperty = $parsed.PSObject.Properties['entries']
+        if ($null -eq $entriesProperty) { return @() }
+        $rows = New-Object System.Collections.Generic.List[object]
+        foreach ($entry in @($entriesProperty.Value)) {
+            if ($null -eq $entry) { continue }
+            $completedProperty = $entry.PSObject.Properties['completed']
+            if ($null -eq $completedProperty) { continue }
+            $atProperty = $entry.PSObject.Properties['at']
+            $rows.Add([pscustomobject]@{
+                at        = if ($null -ne $atProperty) { [string]$atProperty.Value } else { '' }
+                completed = [bool]$completedProperty.Value
+            })
+        }
+        $limit = Get-SRShutdownHistoryLimit
+        if ($rows.Count -gt $limit) { $rows.RemoveRange(0, $rows.Count - $limit) }
+        return @($rows.ToArray())
+    } catch {
+        try { Write-SRLog -Level WARN -Message ('Ignoring unreadable shutdown history: {0}' -f $_.Exception.Message) } catch { }
+        return @()
+    }
+}
+
+function Get-SRShutdownHistorySummary {
+    # Saved / not saved over the recorded shutdowns, for Diagnostics.
+    $entries = @(Read-SRShutdownHistory)
+    $saved = @($entries | Where-Object { $_.completed }).Count
+    return [pscustomobject]@{
+        Total    = $entries.Count
+        Saved    = $saved
+        NotSaved = ($entries.Count - $saved)
+        Limit    = (Get-SRShutdownHistoryLimit)
+        LastAt   = if ($entries.Count -gt 0) { [string]$entries[$entries.Count - 1].at } else { '' }
+        LastSaved = if ($entries.Count -gt 0) { [bool]$entries[$entries.Count - 1].completed } else { $false }
+    }
+}
+
 function Get-SRLastShutdownCapture {
     # Called once at tray start: reports whether the previous shutdown got its
     # final snapshot, so the success rate is observable instead of assumed.
@@ -1213,6 +1288,19 @@ function Get-SRLastShutdownCapture {
     $completed = ($null -ne $completedProperty -and [bool]$completedProperty.Value)
     $pathProperty = $marker.PSObject.Properties['path']
     $path = if ($null -ne $pathProperty) { [string]$pathProperty.Value } else { '' }
+    # Keep the outcome: the marker itself is cleared right after this call, so
+    # without a history only a log line would remain.
+    $stamp = ''
+    foreach ($name in @('at', 'startedAt')) {
+        $stampProperty = $marker.PSObject.Properties[$name]
+        if ($null -ne $stampProperty -and -not [string]::IsNullOrWhiteSpace([string]$stampProperty.Value)) {
+            $stamp = [string]$stampProperty.Value
+            break
+        }
+    }
+    try { Add-SRShutdownHistory -Completed $completed -At $stamp } catch {
+        try { Write-SRLog -Level WARN -Message ('Could not record the shutdown outcome: {0}' -f $_.Exception.Message) } catch { }
+    }
     try {
         if ($completed) {
             Write-SRLog -Message ('Previous shutdown snapshot completed: {0}' -f $path)
@@ -9040,6 +9128,11 @@ function Get-SRDiagnostics {
     $logDir = Get-SRLogDirectory
     $configPath = Get-SRConfigPath
 
+    # A persistent pause stops every automatic snapshot, so Diagnostics must
+    # report it. A failure to read the marker must never break the report.
+    $pauseState = [pscustomobject]@{ Paused = $false; PausedAt = $null; ResumeAt = $null }
+    try { $pauseState = Get-SRSnapshotPause } catch { }
+
     $config = Get-SRConfig
     $configValid = $true
     $configError = $null
@@ -9215,6 +9308,10 @@ function Get-SRDiagnostics {
         Browsers                 = $browsers.ToArray()
         TerminalCapture          = Get-SRTerminalCaptureStatus
         EstimatedStorage         = Get-SREstimatedSnapshotStorage -Config $config
+        Paused                   = [bool]$pauseState.Paused
+        PausedAt                 = $pauseState.PausedAt
+        ResumeAt                 = $pauseState.ResumeAt
+        ShutdownSnapshots        = Get-SRShutdownHistorySummary
         Settings                 = [pscustomobject]@{
             IntervalMinutes     = [int]$config.snapshotIntervalMinutes
             KeepSnapshots       = [int]$config.keepSnapshots

@@ -61,6 +61,20 @@ try {
             $lines.Add('Scheduled tasks: none')
         }
 
+        if ($diagnostics.Paused) {
+            $pausedSince = if ($diagnostics.PausedAt) { ([datetime]$diagnostics.PausedAt).ToString('g') } else { 'unknown time' }
+            $resumeText = if ($diagnostics.ResumeAt) { ('resumes automatically at ' + ([datetime]$diagnostics.ResumeAt).ToString('g')) } else { 'stays paused until you choose Resume' }
+            $lines.Add(('Snapshots paused: yes, since {0}; {1}' -f $pausedSince, $resumeText))
+        } else {
+            $lines.Add('Snapshots paused: no')
+        }
+        $shutdownSummary = $diagnostics.ShutdownSnapshots
+        if ($shutdownSummary -and $shutdownSummary.Total -gt 0) {
+            $lines.Add(('Shutdown snapshots: {0} of the last {1} reached disk' -f $shutdownSummary.Saved, $shutdownSummary.Total))
+        } else {
+            $lines.Add('Shutdown snapshots: no shutdown recorded yet')
+        }
+
         $lines.Add('')
         $lines.Add(('Interval: {0} minute(s)' -f $diagnostics.Settings.IntervalMinutes))
         $lines.Add(('Retention: {0} snapshots, {1} day(s)' -f $diagnostics.Settings.KeepSnapshots, $diagnostics.Settings.KeepSnapshotDays))
@@ -101,6 +115,9 @@ try {
         }
         if ($diagnostics.ScheduleMode -eq 'Not running') {
             $lines.Add('WARNING: no scheduled task, tray app or watcher process was detected.')
+        }
+        if ($diagnostics.Paused) {
+            $lines.Add('WARNING: automatic snapshots are paused, so a crash now would be recovered from an older snapshot.')
         }
 
         $text = $lines -join [Environment]::NewLine

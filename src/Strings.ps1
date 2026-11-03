@@ -675,6 +675,20 @@ function Get-SRStrings {
         DiagTerminalPreferenceOther = 'Terminal tabs are not captured: firstWindowPreference is "{0}". Set it to persistedWindowLayout to save layouts.'
         DiagEstimatedStorage = 'Estimated retention storage'
         DiagEstimatedStorageDetail = 'Rough snapshot-file estimate: {0} for {1} projected retained snapshot(s), averaging {2} each. Not a full disk budget.'
+        BadgePaused = 'PAUSED'
+        HeroPaused = 'Snapshots are paused'
+        HeroPausedLine = 'Paused since {0}  •  stays paused until you choose Resume'
+        HeroPausedUntilLine = 'Paused since {0}  •  resumes automatically at {1}'
+        PausedSinceUnknown = 'an unknown time'
+        TrayPausedAtStart = 'Snapshots are paused (since {0}). Choose "Resume snapshots" to protect your session again.'
+        RstPausedShort = 'Snapshots paused since {0}'
+        RstPausedShortUnknown = 'Snapshots are paused'
+        DiagPause = 'Snapshot pause'
+        DiagPauseOn = 'Automatic snapshots are paused.'
+        DiagPauseOff = 'Automatic snapshots are running.'
+        DiagShutdownSnapshots = 'Shutdown snapshots'
+        DiagShutdownSnapshotsDetail = '{0} of the last {1} shutdown snapshot(s) reached disk.'
+        DiagShutdownSnapshotsNone = 'No shutdown has been recorded yet.'
         StorageHealthy = 'Storage looks clean'
         StorageIssues = '{0} issue(s)  •  {1} can be reclaimed'
         StorageUnreadable = '{0} unreadable snapshot(s)'
@@ -4387,6 +4401,145 @@ function Get-SRStrings {
         if ($null -eq $overlays[$diagnosticsLang]) { $overlays[$diagnosticsLang] = @{} }
         foreach ($diagnosticsKey in @($diagnosticsExtra[$diagnosticsLang].Keys)) {
             $overlays[$diagnosticsLang][$diagnosticsKey] = $diagnosticsExtra[$diagnosticsLang][$diagnosticsKey]
+        }
+    }
+
+    # Pause visibility and shutdown-snapshot history: the pause now persists
+    # across restarts, so every place that shows it needs a translated string.
+    $pauseExtra = @{
+        ar = @{
+            BadgePaused = 'إيقاف مؤقت'
+            HeroPaused = 'اللقطات متوقفة مؤقتًا'
+            HeroPausedLine = 'متوقفة منذ {0}  •  تبقى متوقفة حتى تختار الاستئناف'
+            HeroPausedUntilLine = 'متوقفة منذ {0}  •  تُستأنف تلقائيًا: {1}'
+            PausedSinceUnknown = 'وقت غير معروف'
+            TrayPausedAtStart = 'اللقطات متوقفة مؤقتًا (منذ {0}). اختر "استئناف اللقطات" لحماية جلستك من جديد.'
+            RstPausedShort = 'اللقطات متوقفة منذ {0}'
+            RstPausedShortUnknown = 'اللقطات متوقفة مؤقتًا'
+            DiagPause = 'إيقاف اللقطات مؤقتًا'
+            DiagPauseOn = 'اللقطات التلقائية متوقفة مؤقتًا.'
+            DiagPauseOff = 'اللقطات التلقائية تعمل.'
+            DiagShutdownSnapshots = 'لقطات الإيقاف'
+            DiagShutdownSnapshotsDetail = 'وصلت {0} من آخر {1} لقطة إيقاف إلى القرص.'
+            DiagShutdownSnapshotsNone = 'لم يُسجَّل أي إيقاف تشغيل بعد.'
+        }
+        fr = @{
+            BadgePaused = 'EN PAUSE'
+            HeroPaused = 'Les instantanés sont en pause'
+            HeroPausedLine = 'En pause depuis {0}  •  reste en pause jusqu''à ce que vous choisissiez Reprendre'
+            HeroPausedUntilLine = 'En pause depuis {0}  •  reprise automatique : {1}'
+            PausedSinceUnknown = 'une date inconnue'
+            TrayPausedAtStart = 'Les instantanés sont en pause (depuis {0}). Choisissez « Reprendre les instantanés » pour protéger de nouveau votre session.'
+            RstPausedShort = 'Instantanés en pause depuis {0}'
+            RstPausedShortUnknown = 'Instantanés en pause'
+            DiagPause = 'Pause des instantanés'
+            DiagPauseOn = 'Les instantanés automatiques sont en pause.'
+            DiagPauseOff = 'Les instantanés automatiques sont actifs.'
+            DiagShutdownSnapshots = 'Instantanés à l''arrêt'
+            DiagShutdownSnapshotsDetail = '{0} des {1} derniers instantanés à l''arrêt ont été écrits sur le disque.'
+            DiagShutdownSnapshotsNone = 'Aucun arrêt n''a encore été enregistré.'
+        }
+        es = @{
+            BadgePaused = 'EN PAUSA'
+            HeroPaused = 'Las capturas están en pausa'
+            HeroPausedLine = 'En pausa desde {0}  •  sigue en pausa hasta que elijas Reanudar'
+            HeroPausedUntilLine = 'En pausa desde {0}  •  reanudación automática: {1}'
+            PausedSinceUnknown = 'una hora desconocida'
+            TrayPausedAtStart = 'Las capturas están en pausa (desde {0}). Elige "Reanudar capturas" para proteger de nuevo tu sesión.'
+            RstPausedShort = 'Capturas en pausa desde {0}'
+            RstPausedShortUnknown = 'Capturas en pausa'
+            DiagPause = 'Pausa de capturas'
+            DiagPauseOn = 'Las capturas automáticas están en pausa.'
+            DiagPauseOff = 'Las capturas automáticas están activas.'
+            DiagShutdownSnapshots = 'Capturas al apagar'
+            DiagShutdownSnapshotsDetail = '{0} de las últimas {1} capturas al apagar llegaron al disco.'
+            DiagShutdownSnapshotsNone = 'Todavía no se ha registrado ningún apagado.'
+        }
+        de = @{
+            BadgePaused = 'PAUSIERT'
+            HeroPaused = 'Snapshots sind pausiert'
+            HeroPausedLine = 'Pausiert seit {0}  •  bleibt pausiert, bis Fortsetzen gewählt wird'
+            HeroPausedUntilLine = 'Pausiert seit {0}  •  wird automatisch fortgesetzt: {1}'
+            PausedSinceUnknown = 'unbekannter Zeit'
+            TrayPausedAtStart = 'Snapshots sind pausiert (seit {0}). Wähle "Snapshots fortsetzen", um deine Sitzung wieder zu schützen.'
+            RstPausedShort = 'Snapshots pausiert seit {0}'
+            RstPausedShortUnknown = 'Snapshots pausiert'
+            DiagPause = 'Snapshot-Pause'
+            DiagPauseOn = 'Automatische Snapshots sind pausiert.'
+            DiagPauseOff = 'Automatische Snapshots laufen.'
+            DiagShutdownSnapshots = 'Snapshots beim Herunterfahren'
+            DiagShutdownSnapshotsDetail = '{0} der letzten {1} Snapshots beim Herunterfahren wurden gespeichert.'
+            DiagShutdownSnapshotsNone = 'Noch kein Herunterfahren aufgezeichnet.'
+        }
+        pt = @{
+            BadgePaused = 'EM PAUSA'
+            HeroPaused = 'As capturas estão em pausa'
+            HeroPausedLine = 'Em pausa desde {0}  •  continua em pausa até escolher Retomar'
+            HeroPausedUntilLine = 'Em pausa desde {0}  •  retoma automaticamente: {1}'
+            PausedSinceUnknown = 'um momento desconhecido'
+            TrayPausedAtStart = 'As capturas estão em pausa (desde {0}). Escolha "Retomar capturas" para voltar a proteger a sua sessão.'
+            RstPausedShort = 'Capturas em pausa desde {0}'
+            RstPausedShortUnknown = 'Capturas em pausa'
+            DiagPause = 'Pausa das capturas'
+            DiagPauseOn = 'As capturas automáticas estão em pausa.'
+            DiagPauseOff = 'As capturas automáticas estão ativas.'
+            DiagShutdownSnapshots = 'Capturas ao encerrar'
+            DiagShutdownSnapshotsDetail = '{0} das últimas {1} capturas ao encerrar chegaram ao disco.'
+            DiagShutdownSnapshotsNone = 'Ainda não foi registado nenhum encerramento.'
+        }
+        ru = @{
+            BadgePaused = 'ПАУЗА'
+            HeroPaused = 'Снимки приостановлены'
+            HeroPausedLine = 'Приостановлено с {0}  •  так будет, пока вы не выберете «Возобновить»'
+            HeroPausedUntilLine = 'Приостановлено с {0}  •  возобновится автоматически: {1}'
+            PausedSinceUnknown = 'неизвестного времени'
+            TrayPausedAtStart = 'Снимки приостановлены (с {0}). Выберите «Возобновить снимки», чтобы снова защитить сеанс.'
+            RstPausedShort = 'Снимки приостановлены с {0}'
+            RstPausedShortUnknown = 'Снимки приостановлены'
+            DiagPause = 'Пауза снимков'
+            DiagPauseOn = 'Автоматические снимки приостановлены.'
+            DiagPauseOff = 'Автоматические снимки работают.'
+            DiagShutdownSnapshots = 'Снимки при выключении'
+            DiagShutdownSnapshotsDetail = '{0} из последних {1} снимков при выключении сохранены на диск.'
+            DiagShutdownSnapshotsNone = 'Выключений пока не зафиксировано.'
+        }
+        zh = @{
+            BadgePaused = '已暂停'
+            HeroPaused = '快照已暂停'
+            HeroPausedLine = '自 {0} 起已暂停  •  在你选择恢复之前将一直暂停'
+            HeroPausedUntilLine = '自 {0} 起已暂停  •  将自动恢复：{1}'
+            PausedSinceUnknown = '未知时间'
+            TrayPausedAtStart = '快照已暂停（自 {0} 起）。选择“恢复快照”即可再次保护你的会话。'
+            RstPausedShort = '快照自 {0} 起暂停'
+            RstPausedShortUnknown = '快照已暂停'
+            DiagPause = '快照暂停'
+            DiagPauseOn = '自动快照已暂停。'
+            DiagPauseOff = '自动快照正在运行。'
+            DiagShutdownSnapshots = '关机快照'
+            DiagShutdownSnapshotsDetail = '最近 {1} 次关机快照中有 {0} 次已写入磁盘。'
+            DiagShutdownSnapshotsNone = '尚未记录任何关机。'
+        }
+        tr = @{
+            BadgePaused = 'DURAKLADI'
+            HeroPaused = 'Yakalamalar duraklatıldı'
+            HeroPausedLine = '{0} tarihinden beri duraklatıldı  •  Sürdür seçilene kadar duraklatılmış kalır'
+            HeroPausedUntilLine = '{0} tarihinden beri duraklatıldı  •  otomatik olarak sürdürülecek: {1}'
+            PausedSinceUnknown = 'bilinmeyen bir zaman'
+            TrayPausedAtStart = 'Yakalamalar duraklatıldı ({0} tarihinden beri). Oturumunu yeniden korumak için "Yakalamaları sürdür" seçeneğini seç.'
+            RstPausedShort = 'Yakalamalar {0} tarihinden beri duraklatıldı'
+            RstPausedShortUnknown = 'Yakalamalar duraklatıldı'
+            DiagPause = 'Yakalama duraklatma'
+            DiagPauseOn = 'Otomatik yakalamalar duraklatıldı.'
+            DiagPauseOff = 'Otomatik yakalamalar çalışıyor.'
+            DiagShutdownSnapshots = 'Kapatma yakalamaları'
+            DiagShutdownSnapshotsDetail = 'Son {1} kapatma yakalamasının {0} tanesi diske yazıldı.'
+            DiagShutdownSnapshotsNone = 'Henüz kapatma kaydı yok.'
+        }
+    }
+    foreach ($pauseLang in @($pauseExtra.Keys)) {
+        if ($null -eq $overlays[$pauseLang]) { $overlays[$pauseLang] = @{} }
+        foreach ($pauseKey in @($pauseExtra[$pauseLang].Keys)) {
+            $overlays[$pauseLang][$pauseKey] = $pauseExtra[$pauseLang][$pauseKey]
         }
     }
 

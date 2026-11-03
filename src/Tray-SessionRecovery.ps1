@@ -287,27 +287,54 @@ namespace SessionRecovery
                 (structural || kind == 0x800C) &&
                 (topLevel || (structural && known));
         }
+        // Pure decision: takes the window facts, touches no native state, so the
+        // rules can be tested without a desktop. Real app windows only:
+        // tooltips, menus, toasts, tool windows and owned dialogs must not
+        // start a full capture.
+        public static bool IsRelevantWindow(int style, int exStyle, bool hasOwner,
+            string title, string className)
+        {
+            if ((style & 0x10000000) == 0) return false;      // WS_VISIBLE
+            if ((style & 0x40000000) != 0) return false;      // WS_CHILD
+            if ((exStyle & 0x00000080) != 0) return false;    // WS_EX_TOOLWINDOW
+            if (hasOwner) return false;                       // GW_OWNER
+            if (title == null || title.Trim().Length == 0) return false;
+            if (className != null && IgnoredClasses.Contains(className)) return false;
+            return true;
+        }
+
+        // 0 = ignore, 1 = structural change (a window appeared, disappeared or
+        // became relevant), 2 = title-only change on a window already known.
+        // Apps usually show a window first and set its title afterwards. That
+        // first title is the moment the window becomes relevant, so it counts
+        // as structural; treating it as a title-only change would delay the
+        // capture of a newly opened app behind the long title debounce.
+        public static int ClassifyEvent(uint kind, bool topLevel, bool known)
+        {
+            bool structural = (kind == 0x8001 || kind == 0x8002 || kind == 0x8003);
+            if (structural) return (topLevel || known) ? 1 : 0;
+            if (kind == 0x800C) {
+                if (!topLevel) return 0;
+                return known ? 2 : 1;
+            }
+            return 0;
+        }
+
         private static bool IsRelevantTopLevel(IntPtr hwnd)
         {
-            // Same practical filter as the snapshot window enumerator: real app
-            // windows only. Tooltips, menus, toasts, tool windows and owned
-            // dialogs must not start a full capture.
             if (GetAncestor(hwnd, 2) != hwnd) return false;
             int style = GetWindowLong(hwnd, -16);
-            if ((style & 0x10000000) == 0) return false; // WS_VISIBLE
-            if ((style & 0x40000000) != 0) return false; // WS_CHILD
             int exStyle = GetWindowLong(hwnd, -20);
-            if ((exStyle & 0x00000080) != 0) return false; // WS_EX_TOOLWINDOW
-            if (GetWindow(hwnd, 4) != IntPtr.Zero) return false; // GW_OWNER
+            bool hasOwner = GetWindow(hwnd, 4) != IntPtr.Zero;
+            string titleText = "";
             int titleLength = GetWindowTextLength(hwnd);
-            if (titleLength <= 0) return false;
-            StringBuilder title = new StringBuilder(titleLength + 1);
-            if (GetWindowText(hwnd, title, title.Capacity) <= 0) return false;
-            if (title.ToString().Trim().Length == 0) return false;
+            if (titleLength > 0) {
+                StringBuilder title = new StringBuilder(titleLength + 1);
+                if (GetWindowText(hwnd, title, title.Capacity) > 0) titleText = title.ToString();
+            }
             StringBuilder className = new StringBuilder(256);
             GetClassName(hwnd, className, className.Capacity);
-            if (IgnoredClasses.Contains(className.ToString())) return false;
-            return true;
+            return IsRelevantWindow(style, exStyle, hasOwner, titleText, className.ToString());
         }
         private void OnEvent(IntPtr hook, uint kind, IntPtr hwnd, int objectId,
             int childId, uint eventThread, uint eventTime)
@@ -319,13 +346,16 @@ namespace SessionRecovery
                 bool known = knownTopLevels.Contains(hwnd);
                 bool top = pid != 0 && IsRelevantTopLevel(hwnd);
                 if (!AcceptMetadata(kind, objectId, childId, pid, ownProcess, top, known)) return;
+                int category = ClassifyEvent(kind, top, known);
+                if (category == 0) return;
                 if (kind == 0x8001) knownTopLevels.Remove(hwnd);
                 else if (top) knownTopLevels.Add(hwnd);
                 long now = (long)(Stopwatch.GetTimestamp() * (1000.0 / Stopwatch.Frequency));
                 // Rename-only traffic is mostly browser page titles and clocks.
                 // Report it separately so the scheduler can wait longer before
-                // spending a full capture on it.
-                if (kind == 0x800C) {
+                // spending a full capture on it. The first title of a window
+                // that was not known yet is structural (see ClassifyEvent).
+                if (category == 2) {
                     if (nameFirst == 0) nameFirst = now;
                     nameLast = now;
                 } else {
@@ -500,6 +530,20 @@ function Sync-SRTrayPauseMarker {
         if ($script:ownsSnapshots -and -not $script:exiting) { Start-SRTrayFirstSnapshot }
     }
     Update-SRTrayStatus
+}
+
+function Get-SRTrayPausedNoticeText {
+    # Text for the notice shown when the tray starts while snapshots are
+    # paused. A pause now survives restarts and stops every automatic snapshot,
+    # so starting silently in that state would hide the loss of protection.
+    param([object]$Pause)
+    if ($null -eq $Pause -or -not [bool]$Pause.Paused) { return '' }
+    $since = if ($null -ne $Pause.PausedAt) {
+        ([datetime]$Pause.PausedAt).ToString('g')
+    } else {
+        (T 'PausedSinceUnknown' 'an unknown time')
+    }
+    return ((T 'TrayPausedAtStart' 'Snapshots are paused (since {0}). Choose "Resume snapshots" to protect your session again.') -f $since)
 }
 
 function Get-SRTrayIntervalMinutes {
@@ -1549,6 +1593,12 @@ $script:eventTimer.Start()
 # A timed pause persisted by another process expires on its own; the marker
 # check above promotes that back to a normal running state.
 try { Sync-SRTrayPauseMarker } catch { }
+try {
+    $noticeText = Get-SRTrayPausedNoticeText -Pause (Get-SRSnapshotPause)
+    if (-not [string]::IsNullOrWhiteSpace($noticeText)) {
+        Show-SRTrayBalloon -Text $noticeText -Icon Warning -Timeout 8000
+    }
+} catch { }
 
 try {
     Write-SRLog -Message ('Tray app started (owns snapshots: {0}, scheduled task: {1}, monitor-only: {2}).' -f $script:ownsSnapshots, $script:taskMode, $MonitorOnly)
