@@ -6,7 +6,7 @@ BeforeAll {
     $tokens = $null; $errors = $null
     $script:trayAst = [System.Management.Automation.Language.Parser]::ParseFile($script:trayPath, [ref]$tokens, [ref]$errors)
     if ($errors.Count) { throw ($errors | Out-String) }
-    $names = @('Initialize-SRTrayNative','Initialize-SRTrayWorker','Start-SRTrayCapture','Complete-SRTrayCapture','Invoke-SRTraySnapshot','Request-SRTrayShutdown','Cancel-SRTrayShutdown','Get-SRTrayClock','Invoke-SRTrayEventPoll','Request-SRTraySuspend','Stop-SRTrayWorker')
+    $names = @('Initialize-SRTrayNative','Initialize-SRTrayWorker','Start-SRTrayCapture','Complete-SRTrayCapture','Invoke-SRTraySnapshot','Request-SRTrayShutdown','Cancel-SRTrayShutdown','Get-SRTrayClock','Invoke-SRTrayEventPoll','Request-SRTraySuspend','Stop-SRTrayWorker','Set-SRTrayPaused','Sync-SRTrayPauseMarker')
     foreach ($name in $names) {
         $function = $script:trayAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
         . ([scriptblock]::Create($function.Extent.Text))
@@ -25,6 +25,10 @@ BeforeAll {
     function Test-SRTrayEventSnapshots { return $script:eventCaptureEnabled }
     function Test-SRTrayHibernateGuard { return $true }
     function Invoke-SRTrayPowerCheckpoint { param($Source) }
+    function Stop-SRTrayTimers { }
+    function Start-SRTrayFirstSnapshot { }
+    function Set-SRSnapshotPause { param([switch]$Paused, $ResumeAt) }
+    function Get-SRSnapshotPause { return [pscustomobject]@{ Paused = $false; ResumeAt = $null } }
 }
 
 Describe 'Tray native event boundaries' {
@@ -38,9 +42,14 @@ Describe 'Tray native event boundaries' {
         [SessionRecovery.TrayWindowEvents]::AcceptMetadata(0x800C,0,0,42,7,$false,$false) | Should -BeFalse
         [SessionRecovery.TrayWindowEvents]::AcceptMetadata(0x8000,0,0,42,7,$true,$false) | Should -BeFalse
     }
-    It 'recognizes destroyed known top-level handles, but not unknown child handles' {
+    It 'recognizes destroyed or hidden known top-level handles, but not unknown child handles' {
         [SessionRecovery.TrayWindowEvents]::AcceptMetadata(0x8001,0,0,0,7,$false,$true) | Should -BeTrue
+        [SessionRecovery.TrayWindowEvents]::AcceptMetadata(0x8003,0,0,0,7,$false,$true) | Should -BeTrue
+        [SessionRecovery.TrayWindowEvents]::AcceptMetadata(0x8002,0,0,0,7,$false,$true) | Should -BeTrue
         [SessionRecovery.TrayWindowEvents]::AcceptMetadata(0x8001,0,0,0,7,$false,$false) | Should -BeFalse
+        # A known but currently invisible window must not turn a title change
+        # into a capture.
+        [SessionRecovery.TrayWindowEvents]::AcceptMetadata(0x800C,0,0,0,7,$false,$true) | Should -BeFalse
     }
     It 'deduplicates native query/end notifications and resets after cancellation' {
         $monitor = New-Object SessionRecovery.TrayPowerMonitor
@@ -215,6 +224,56 @@ Describe 'Tray shutdown dispatch' {
     }
 }
 
+Describe 'Tray pause marker integration' {
+    BeforeEach {
+        $script:paused = $false; $script:resumeAt = $null
+        $script:notify = [pscustomobject]@{}
+        $script:pauseMarkerAt = [DateTime]::MinValue
+        $script:ownsSnapshots = $false; $script:exiting = $false
+        $script:resumeTimer = $null; $script:snapshotTimer = $null; $script:firstTimer = $null
+        $script:pauseWrite = $null
+        $script:pauseRead = [pscustomobject]@{ Paused = $false; ResumeAt = $null }
+        Mock Set-SRSnapshotPause {
+            $script:pauseWrite = [pscustomobject]@{ Paused = [bool]$Paused; ResumeAt = $ResumeAt }
+        }
+        Mock Get-SRSnapshotPause { return $script:pauseRead }
+        Mock Stop-SRTrayTimers { }
+        Mock Start-SRTrayFirstSnapshot { }
+    }
+    It 'persists pause and resume for the scheduled task' {
+        Set-SRTrayPaused -Paused $true
+        $script:paused | Should -BeTrue
+        $script:pauseWrite.Paused | Should -BeTrue
+        Set-SRTrayPaused -Paused $false
+        $script:paused | Should -BeFalse
+        $script:pauseWrite.Paused | Should -BeFalse
+    }
+    It 'stops a local resume timer when pausing indefinitely' {
+        $script:resumeTimer = [pscustomobject]@{}
+        $script:resumeTimer | Add-Member -MemberType ScriptMethod -Name Stop -Value { $script:resumeStopped = $true }
+        $script:resumeStopped = $false
+        Set-SRTrayPaused -Paused $true
+        $script:resumeStopped | Should -BeTrue
+    }
+    It 'adopts a pause written by another process' {
+        $script:pauseRead = [pscustomobject]@{ Paused = $true; ResumeAt = $null }
+        Sync-SRTrayPauseMarker
+        $script:paused | Should -BeTrue
+        Should -Invoke Stop-SRTrayTimers -Times 1 -Exactly
+    }
+    It 'adopts an expired pause and stops the local resume timer' {
+        $script:paused = $true
+        $script:ownsSnapshots = $true
+        $script:resumeTimer = [pscustomobject]@{}
+        $script:resumeTimer | Add-Member -MemberType ScriptMethod -Name Stop -Value { $script:resumeStopped = $true }
+        $script:resumeStopped = $false
+        Sync-SRTrayPauseMarker
+        $script:paused | Should -BeFalse
+        $script:resumeStopped | Should -BeTrue
+        Should -Invoke Start-SRTrayFirstSnapshot -Times 1 -Exactly
+    }
+}
+
 Describe 'Tray poll policy integration' {
     BeforeEach {
         $script:eventState = New-SREventSnapshotState
@@ -229,6 +288,21 @@ Describe 'Tray poll policy integration' {
         Mock Start-SRTrayCapture { return $true }
     }
     It 'dispatches debounced changes in task monitor mode' {
+        Invoke-SRTrayEventPoll
+        Should -Invoke Start-SRTrayCapture -Times 1 -Exactly -ParameterFilter { $Operation -eq 'Automatic' }
+    }
+    It 'keeps title-only notifications pending across polls' {
+        $script:drainCalls = 0
+        $script:windowEvents = [pscustomobject]@{}
+        $script:windowEvents | Add-Member -MemberType ScriptMethod -Name Drain -Value {
+            $script:drainCalls++
+            if ($script:drainCalls -eq 1) { return [long[]]@(0,0,1000,1000) }
+            return [long[]]@(0,0,0,0)
+        }
+        Invoke-SRTrayEventPoll
+        Should -Invoke Start-SRTrayCapture -Times 0 -Exactly
+        $script:eventState.NamePending | Should -BeTrue
+        Mock Get-SRTrayClock { return [long]17000 }
         Invoke-SRTrayEventPoll
         Should -Invoke Start-SRTrayCapture -Times 1 -Exactly -ParameterFilter { $Operation -eq 'Automatic' }
     }

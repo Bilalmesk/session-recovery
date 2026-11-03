@@ -69,6 +69,50 @@ Describe 'Event snapshot coordinator' {
         (Get-SREventSnapshotRequest $state 32000).Reason | Should -Be 'event'
     }
 
+    It 'requires a longer quiet period and cooldown for title-only changes' {
+        Add-SREventSnapshotSignal $state window-name 1000
+        Get-SREventSnapshotRequest $state 15999 | Should -BeNullOrEmpty
+        (Get-SREventSnapshotRequest $state 16000).Reason | Should -Be 'event'
+        Complete-SREventSnapshotRequest $state 16000
+
+        # A structural change is still allowed after the shorter cooldown.
+        Add-SREventSnapshotSignal $state window 17000
+        Get-SREventSnapshotRequest $state 45000 | Should -BeNullOrEmpty
+        (Get-SREventSnapshotRequest $state 46000).Reason | Should -Be 'event'
+        Complete-SREventSnapshotRequest $state 46000
+
+        # A title-only change must wait for the two-minute cooldown.
+        Add-SREventSnapshotSignal $state window-name 47000
+        Get-SREventSnapshotRequest $state 48000 | Should -BeNullOrEmpty
+        Get-SREventSnapshotRequest $state 165999 | Should -BeNullOrEmpty
+        (Get-SREventSnapshotRequest $state 166000).Reason | Should -Be 'event'
+    }
+
+    It 'caps continuous title-only changes at sixty seconds' {
+        foreach ($time in 1000,6000,11000,16000,21000,26000,31000,36000,41000,46000,51000,56000) {
+            Add-SREventSnapshotSignal $state window-name $time
+            Get-SREventSnapshotRequest $state $time | Should -BeNullOrEmpty
+        }
+        Get-SREventSnapshotRequest $state 60999 | Should -BeNullOrEmpty
+        (Get-SREventSnapshotRequest $state 61000).Reason | Should -Be 'event'
+    }
+
+    It 'lets a structural change supersede pending title noise' {
+        Add-SREventSnapshotSignal $state window-name 1000
+        Add-SREventSnapshotSignal $state window 2000
+        Get-SREventSnapshotRequest $state 2500 | Should -BeNullOrEmpty
+        (Get-SREventSnapshotRequest $state 4000).Reason | Should -Be 'event'
+        $state.NamePending | Should -BeFalse
+    }
+
+    It 'keeps title-only signals pending across polls until their interval passes' {
+        Add-SREventSnapshotSignal $state window-name 1000
+        # The first poll drains the native timestamps; the event state must
+        # retain them for later polls.
+        Get-SREventSnapshotRequest $state 4000 | Should -BeNullOrEmpty
+        Get-SREventSnapshotRequest $state 16000 | Should -Not -BeNullOrEmpty
+    }
+
     It 'deduplicates final signals, bypasses debounce and cooldown, and rearms on cancellation' {
         Add-SREventSnapshotSignal $state window 0
         $null = Get-SREventSnapshotRequest $state 2000
@@ -122,10 +166,87 @@ Describe 'Event snapshot coordinator' {
     }
 }
 
+Describe 'Snapshot pause marker' {
+    InModuleScope SessionRecovery {
+        BeforeEach {
+            $script:SRRoot = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+            $script:SRPausePath = Join-Path $script:SRRoot 'paused.json'
+            $script:SRShutdownAttemptPath = Join-Path $script:SRRoot 'shutdown-attempt.json'
+            $script:SRSnapshotDir = Join-Path $script:SRRoot 'snapshots'
+            New-Item -ItemType Directory -Path $script:SRRoot -Force | Out-Null
+            Mock Write-SRLog { }
+        }
+
+        It 'persists an indefinite pause and clears it on resume' {
+            Set-SRSnapshotPause -Paused
+            (Get-SRSnapshotPause).Paused | Should -BeTrue
+            Test-Path -LiteralPath $script:SRPausePath -PathType Leaf | Should -BeTrue
+            Set-SRSnapshotPause -Paused:$false
+            (Get-SRSnapshotPause).Paused | Should -BeFalse
+            Test-Path -LiteralPath $script:SRPausePath | Should -BeFalse
+        }
+
+        It 'expires a timed pause even when the tray is not running' {
+            Set-SRSnapshotPause -Paused -ResumeAt ((Get-Date).AddMinutes(-1))
+            (Get-SRSnapshotPause).Paused | Should -BeFalse
+            Test-Path -LiteralPath $script:SRPausePath | Should -BeFalse
+        }
+
+        It 'keeps a future timed pause' {
+            Set-SRSnapshotPause -Paused -ResumeAt ((Get-Date).AddHours(1))
+            $pause = Get-SRSnapshotPause
+            $pause.Paused | Should -BeTrue
+            $pause.ResumeAt.Kind | Should -Be ([System.DateTimeKind]::Local)
+            $pause.ResumeAt.ToUniversalTime() | Should -BeGreaterThan (Get-Date).AddMinutes(50).ToUniversalTime()
+        }
+
+        It 'fails open on an unreadable marker' {
+            Set-Content -LiteralPath $script:SRPausePath -Value 'not json'
+            (Get-SRSnapshotPause).Paused | Should -BeFalse
+            Should -Invoke Write-SRLog -Times 1 -ParameterFilter { $Level -eq 'WARN' }
+        }
+
+        It 'skips automatic and shutdown snapshots while paused but still allows explicit captures' {
+            Mock Get-SRConfig {
+                [pscustomobject]@{
+                    captureThumbnails = $false; compressSnapshots = $false; encryptSnapshots = $false
+                    autoExportFolder = ''
+                }
+            }
+            Mock New-SRSnapshot {
+                [pscustomobject]@{
+                    capturedAt = (Get-Date).ToUniversalTime().ToString('o'); stateHash = 'fixture'
+                    stats = [pscustomobject]@{ apps=0; folders=0; browsers=0; tabs=0 }
+                }
+            }
+            Mock Invoke-SRRetention { }
+            Mock New-SRThumbnailSet { throw 'Unexpected thumbnails' }
+
+            Set-SRSnapshotPause -Paused
+            Save-SRSnapshot | Should -BeNullOrEmpty
+            Should -Invoke New-SRSnapshot -Times 0
+
+            $forced = Save-SRSnapshot -Force
+            $forced | Should -Not -BeNullOrEmpty
+            Should -Invoke New-SRSnapshot -Times 1
+            # A manual capture must not silently resume periodic snapshots.
+            (Get-SRSnapshotPause).Paused | Should -BeTrue
+
+            # Pause also suppresses the automatic session-ending snapshot.
+            Save-SRSnapshot -Shutdown | Should -BeNullOrEmpty
+            Should -Invoke New-SRSnapshot -Times 1
+            Get-SRLastShutdownCapture | Should -BeNullOrEmpty
+        }
+    }
+}
+
 Describe 'Shutdown snapshot persistence' {
     InModuleScope SessionRecovery {
         BeforeEach {
-            $script:SRSnapshotDir = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+            $script:SRRoot = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+            $script:SRSnapshotDir = Join-Path $script:SRRoot 'snapshots'
+            $script:SRPausePath = Join-Path $script:SRRoot 'paused.json'
+            $script:SRShutdownAttemptPath = Join-Path $script:SRRoot 'shutdown-attempt.json'
             $script:fixtureConfig = [pscustomobject]@{
                 captureThumbnails = $true; compressSnapshots = $false; encryptSnapshots = $false
                 autoExportFolder = (Join-Path $TestDrive 'must-not-export')
@@ -157,6 +278,20 @@ Describe 'Shutdown snapshot persistence' {
             Should -Invoke Copy-Item -Times 0
             Should -Invoke Start-Sleep -Times 0
             @(Get-ChildItem $script:SRSnapshotDir -Force -Filter '*.tmp').Count | Should -Be 0
+        }
+
+        It 'records a completed shutdown attempt for the next start' {
+            $path = Save-SRSnapshot -Shutdown
+            $last = Get-SRLastShutdownCapture
+            $last.Completed | Should -BeTrue
+            $last.Path | Should -Be $path
+        }
+
+        It 'reports an incomplete shutdown attempt at the next start' {
+            Start-SRShutdownAttempt
+            $last = Get-SRLastShutdownCapture
+            $last.Completed | Should -BeFalse
+            Should -Invoke Write-SRLog -Times 1 -ParameterFilter { $Level -eq 'WARN' }
         }
 
         It 'returns immediately on a held lock without capturing or sleeping' {

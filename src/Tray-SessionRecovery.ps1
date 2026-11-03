@@ -59,6 +59,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Text;
 using Microsoft.Win32;
 using System.Windows.Forms;
 
@@ -249,8 +250,15 @@ namespace SessionRecovery
         private readonly HashSet<IntPtr> knownTopLevels = new HashSet<IntPtr>();
         private readonly object gate = new object();
         private readonly uint ownProcess = (uint)Process.GetCurrentProcess().Id;
-        private long first, last;
+        private long structuralFirst, structuralLast, nameFirst, nameLast;
         private bool disposed;
+        private static readonly HashSet<string> IgnoredClasses = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Progman", "WorkerW",
+            "Windows.UI.Core.CoreWindow", "ApplicationFrameWindow",
+            "TaskListThumbnailWnd", "DV2ControlHost", "MsgrIMEWindowClass",
+            "SysShadow", "Button", "tooltips_class32", "#32768"
+        };
         public TrayWindowEvents() { callback = OnEvent; }
         public bool Start()
         {
@@ -258,7 +266,7 @@ namespace SessionRecovery
             // Windows has invalidated the HWND and native metadata is gone.
             EnumWindows(delegate(IntPtr hwnd, IntPtr unused) {
                 uint pid; GetWindowThreadProcessId(hwnd, out pid);
-                if (pid != ownProcess && IsTopLevel(hwnd)) knownTopLevels.Add(hwnd);
+                if (pid != ownProcess && IsRelevantTopLevel(hwnd)) knownTopLevels.Add(hwnd);
                 return true;
             }, IntPtr.Zero);
             foreach (uint kind in new uint[] { 0x8001, 0x8002, 0x8003, 0x800C }) {
@@ -271,13 +279,35 @@ namespace SessionRecovery
         public static bool AcceptMetadata(uint kind, int objectId, int childId,
             uint pid, uint ownPid, bool topLevel, bool known)
         {
+            // Show/hide/destroy may arrive after the window has lost its title
+            // or visibility, so a previously relevant handle stays acceptable
+            // until it is destroyed. A title change must pass the live filter.
+            bool structural = (kind == 0x8001 || kind == 0x8002 || kind == 0x8003);
             return objectId == 0 && childId == 0 && pid != ownPid &&
-                (kind == 0x8001 || kind == 0x8002 || kind == 0x8003 || kind == 0x800C) &&
-                (topLevel || (kind == 0x8001 && known));
+                (structural || kind == 0x800C) &&
+                (topLevel || (structural && known));
         }
-        private static bool IsTopLevel(IntPtr hwnd)
+        private static bool IsRelevantTopLevel(IntPtr hwnd)
         {
-            return GetAncestor(hwnd, 2) == hwnd && (GetWindowLong(hwnd, -16) & 0x40000000) == 0;
+            // Same practical filter as the snapshot window enumerator: real app
+            // windows only. Tooltips, menus, toasts, tool windows and owned
+            // dialogs must not start a full capture.
+            if (GetAncestor(hwnd, 2) != hwnd) return false;
+            int style = GetWindowLong(hwnd, -16);
+            if ((style & 0x10000000) == 0) return false; // WS_VISIBLE
+            if ((style & 0x40000000) != 0) return false; // WS_CHILD
+            int exStyle = GetWindowLong(hwnd, -20);
+            if ((exStyle & 0x00000080) != 0) return false; // WS_EX_TOOLWINDOW
+            if (GetWindow(hwnd, 4) != IntPtr.Zero) return false; // GW_OWNER
+            int titleLength = GetWindowTextLength(hwnd);
+            if (titleLength <= 0) return false;
+            StringBuilder title = new StringBuilder(titleLength + 1);
+            if (GetWindowText(hwnd, title, title.Capacity) <= 0) return false;
+            if (title.ToString().Trim().Length == 0) return false;
+            StringBuilder className = new StringBuilder(256);
+            GetClassName(hwnd, className, className.Capacity);
+            if (IgnoredClasses.Contains(className.ToString())) return false;
+            return true;
         }
         private void OnEvent(IntPtr hook, uint kind, IntPtr hwnd, int objectId,
             int childId, uint eventThread, uint eventTime)
@@ -287,26 +317,34 @@ namespace SessionRecovery
             lock (gate) {
                 if (disposed) return;
                 bool known = knownTopLevels.Contains(hwnd);
-                bool top = pid != 0 && IsTopLevel(hwnd);
+                bool top = pid != 0 && IsRelevantTopLevel(hwnd);
                 if (!AcceptMetadata(kind, objectId, childId, pid, ownProcess, top, known)) return;
                 if (kind == 0x8001) knownTopLevels.Remove(hwnd);
-                else knownTopLevels.Add(hwnd);
+                else if (top) knownTopLevels.Add(hwnd);
                 long now = (long)(Stopwatch.GetTimestamp() * (1000.0 / Stopwatch.Frequency));
-                if (first == 0) first = now;
-                last = now;
+                // Rename-only traffic is mostly browser page titles and clocks.
+                // Report it separately so the scheduler can wait longer before
+                // spending a full capture on it.
+                if (kind == 0x800C) {
+                    if (nameFirst == 0) nameFirst = now;
+                    nameLast = now;
+                } else {
+                    if (structuralFirst == 0) structuralFirst = now;
+                    structuralLast = now;
+                }
             }
         }
         public long[] Drain()
         {
             lock (gate) {
-                long[] result = new long[] { first, last };
-                first = last = 0;
+                long[] result = new long[] { structuralFirst, structuralLast, nameFirst, nameLast };
+                structuralFirst = structuralLast = nameFirst = nameLast = 0;
                 return result;
             }
         }
         public void Dispose()
         {
-            lock (gate) { disposed = true; first = last = 0; knownTopLevels.Clear(); }
+            lock (gate) { disposed = true; structuralFirst = structuralLast = nameFirst = nameLast = 0; knownTopLevels.Clear(); }
             foreach (IntPtr hook in hooks) UnhookWinEvent(hook);
             hooks.Clear();
             GC.KeepAlive(callback);
@@ -317,7 +355,11 @@ namespace SessionRecovery
         [DllImport("user32.dll")] private static extern bool UnhookWinEvent(IntPtr hook);
         [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
         [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
+        [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr hwnd, uint command);
         [DllImport("user32.dll")] private static extern int GetWindowLong(IntPtr hwnd, int index);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowTextLength(IntPtr hwnd);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int maxCount);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr hwnd, StringBuilder text, int maxCount);
     }
 }
 '@
@@ -350,6 +392,7 @@ $script:exiting = $false
 $script:paused = $false
 $script:resumeAt = $null
 $script:updatingPauseMenu = $false
+$script:pauseMarkerAt = [DateTime]::MinValue
 $script:snapshotBusy = $false
 $script:snapshotRunspace = $null
 $script:snapshotJob = $null
@@ -418,6 +461,45 @@ function Invoke-SRTrayPowerCheckpoint {
     if (Start-SRTrayCapture -Operation Power -Detail $Source) {
         $script:lastPowerCheckpointAt = Get-Date
     }
+}
+
+function Set-SRTrayPaused {
+    # The tray process and the scheduled task are separate processes. Persist
+    # pause so every automatic driver honors it, not only event captures.
+    param([bool]$Paused, [Nullable[datetime]]$ResumeAt)
+    $script:paused = $Paused
+    $script:resumeAt = if ($Paused) { $ResumeAt } else { $null }
+    try {
+        Set-SRSnapshotPause -Paused:$Paused -ResumeAt $script:resumeAt
+    } catch {
+        try { Write-SRLog -Level WARN -Message ('Could not persist pause state: {0}' -f $_.Exception.Message) } catch { }
+    }
+    $script:pauseMarkerAt = [DateTime]::MinValue
+    if ($Paused) {
+        Stop-SRTrayTimers
+        if ($script:resumeTimer) { $script:resumeTimer.Stop() }
+    }
+    Update-SRTrayStatus
+}
+
+function Sync-SRTrayPauseMarker {
+    # Another tray/Studio process (or an expired timed pause) may have changed
+    # the shared marker. Pick it up without touching an explicit local choice.
+    if ($null -eq $script:notify) { return }
+    if ($script:pauseMarkerAt -ne [DateTime]::MinValue -and ((Get-Date) - $script:pauseMarkerAt).TotalSeconds -lt 2) { return }
+    $script:pauseMarkerAt = Get-Date
+    try { $pause = Get-SRSnapshotPause } catch { return }
+    if ($pause.Paused -eq $script:paused) { return }
+    $script:paused = [bool]$pause.Paused
+    $script:resumeAt = $pause.ResumeAt
+    if ($script:paused) {
+        Stop-SRTrayTimers
+        if ($script:resumeTimer) { $script:resumeTimer.Stop() }
+    } else {
+        if ($script:resumeTimer) { $script:resumeTimer.Stop() }
+        if ($script:ownsSnapshots -and -not $script:exiting) { Start-SRTrayFirstSnapshot }
+    }
+    Update-SRTrayStatus
 }
 
 function Get-SRTrayIntervalMinutes {
@@ -704,6 +786,14 @@ function Invoke-SRTrayEventPoll {
     if (-not $enabled) { Reset-SREventSnapshotState -State $script:eventState }
     if ($null -ne $script:windowEvents) {
         $dirty = $script:windowEvents.Drain()
+        if ($enabled -and $dirty.Count -ge 4 -and $dirty[2] -ne 0) {
+            # Keep title-only traffic in the event state. It is a weaker signal
+            # with its own longer debounce and cooldown.
+            Add-SREventSnapshotSignal -State $script:eventState -Signal 'window-name' -NowMilliseconds $dirty[2]
+            if ($dirty[3] -ne $dirty[2]) {
+                Add-SREventSnapshotSignal -State $script:eventState -Signal 'window-name' -NowMilliseconds $dirty[3]
+            }
+        }
         if ($enabled -and $dirty[0] -ne 0) {
             Add-SREventSnapshotSignal -State $script:eventState -Signal 'window' -NowMilliseconds $dirty[0]
             Add-SREventSnapshotSignal -State $script:eventState -Signal 'window' -NowMilliseconds $dirty[1]
@@ -756,10 +846,8 @@ function Start-SRTrayFirstSnapshot {
 }
 
 function Resume-SRTraySnapshots {
-    $script:paused = $false
-    $script:resumeAt = $null
     if ($script:resumeTimer) { $script:resumeTimer.Stop() }
-    Update-SRTrayStatus
+    Set-SRTrayPaused -Paused $false
     if ($script:ownsSnapshots -and -not $script:exiting) {
         Start-SRTrayFirstSnapshot
         Show-SRTrayBalloon -Text (T 'TrayResumed' 'Snapshots resumed.')
@@ -1065,12 +1153,8 @@ $script:pauseItem = New-Object System.Windows.Forms.ToolStripMenuItem((T 'TrayPa
 $script:pauseItem.CheckOnClick = $true
 [void]$script:pauseItem.Add_CheckedChanged({
     if ($script:updatingPauseMenu) { return }
-    $script:paused = [bool]$script:pauseItem.Checked
-    if ($script:paused) {
-        Stop-SRTrayTimers
-        $script:resumeAt = $null
-        if ($script:resumeTimer) { $script:resumeTimer.Stop() }
-        Update-SRTrayStatus
+    if ($script:pauseItem.Checked) {
+        Set-SRTrayPaused -Paused $true
     } else {
         # Unchecking Pause also cancels a timed pause and its resume timer.
         Resume-SRTraySnapshots
@@ -1080,9 +1164,7 @@ $script:pauseItem.CheckOnClick = $true
 
 $script:pauseHourItem = New-Object System.Windows.Forms.ToolStripMenuItem((T 'TrayPauseHour' 'Pause for 1 hour'))
 [void]$script:pauseHourItem.Add_Click({
-    $script:paused = $true
-    Stop-SRTrayTimers
-    $script:resumeAt = (Get-Date).AddHours(1)
+    Set-SRTrayPaused -Paused $true -ResumeAt ((Get-Date).AddHours(1))
     if ($null -eq $script:resumeTimer) {
         $script:resumeTimer = New-Object System.Windows.Forms.Timer
         [void]$script:resumeTimer.Add_Tick({
@@ -1094,7 +1176,6 @@ $script:pauseHourItem = New-Object System.Windows.Forms.ToolStripMenuItem((T 'Tr
     $script:resumeTimer.Interval = [Math]::Max(1000, $remaining)
     $script:resumeTimer.Stop()
     $script:resumeTimer.Start()
-    Update-SRTrayStatus
     Show-SRTrayBalloon -Text ((T 'TrayPausedUntil' 'Snapshots paused until {0}. They resume automatically.') -f $script:resumeAt.ToString('HH:mm'))
 })
 [void]$script:menu.Items.Add($script:pauseHourItem)
@@ -1335,10 +1416,7 @@ function Invoke-SRTrayControl {
             'snapshot' { Invoke-SRTraySnapshot -Manual }
             'pause' {
                 if (-not $script:paused) {
-                    $script:paused = $true
-                    Stop-SRTrayTimers
-                    $script:resumeAt = $null
-                    Update-SRTrayStatus
+                    Set-SRTrayPaused -Paused $true
                 }
             }
             'resume' { Resume-SRTraySnapshots }
@@ -1430,6 +1508,10 @@ $script:batteryTimer.Start()
 Initialize-SRTrayWorker -ModulePath $modulePath
 $script:eventState = New-SREventSnapshotState
 $script:eventCaptureEnabled = Test-SRTrayEventSnapshots
+try {
+    $previousShutdown = Get-SRLastShutdownCapture
+    if ($null -ne $previousShutdown) { Clear-SRShutdownAttempt }
+} catch { }
 
 # Modern Standby (and some lid-close paths) does not reliably send the
 # classic suspend message. Display-off and lid-close arrive early enough to
@@ -1461,8 +1543,12 @@ try {
 
 $script:eventTimer = New-Object System.Windows.Forms.Timer
 $script:eventTimer.Interval = 250
-[void]$script:eventTimer.Add_Tick({ Invoke-SRTrayEventPoll })
+[void]$script:eventTimer.Add_Tick({ Sync-SRTrayPauseMarker; Invoke-SRTrayEventPoll })
 $script:eventTimer.Start()
+
+# A timed pause persisted by another process expires on its own; the marker
+# check above promotes that back to a normal running state.
+try { Sync-SRTrayPauseMarker } catch { }
 
 try {
     Write-SRLog -Message ('Tray app started (owns snapshots: {0}, scheduled task: {1}, monitor-only: {2}).' -f $script:ownsSnapshots, $script:taskMode, $MonitorOnly)

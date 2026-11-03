@@ -39,7 +39,13 @@ try {
             if ($path) {
                 Write-Host "Snapshot saved: $path"
             } else {
-                Write-Host 'Snapshot skipped (another snapshot is still running).'
+                $paused = $false
+                try { $paused = [bool](Get-SRSnapshotPause).Paused } catch { }
+                if ($paused -and -not $Force) {
+                    Write-Host 'Snapshot skipped because snapshots are paused.'
+                } else {
+                    Write-Host 'Snapshot skipped (another snapshot is still running).'
+                }
             }
         }
     }

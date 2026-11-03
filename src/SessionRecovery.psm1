@@ -1077,11 +1077,151 @@ $script:SRLogDir = Join-Path $script:SRRoot 'logs'
 $script:SRConfigPath = Join-Path $script:SRRoot 'config.json'
 $script:SRInstallIdPath = Join-Path $script:SRRoot 'installation.id'
 $script:SRInstallationId = $null
+$script:SRPausePath = Join-Path $script:SRRoot 'paused.json'
+$script:SRShutdownAttemptPath = Join-Path $script:SRRoot 'shutdown-attempt.json'
 
 function Get-SRRoot { $script:SRRoot }
 function Get-SRSnapshotDirectory { $script:SRSnapshotDir }
 function Get-SRLogDirectory { $script:SRLogDir }
 function Get-SRConfigPath { $script:SRConfigPath }
+function Get-SRPausePath { $script:SRPausePath }
+
+function Get-SRSnapshotPause {
+    # Pause is persisted in the data folder, not only in the tray process.
+    # The scheduled task runs in a separate process, so it can only honor the
+    # Pause menu if both sides read the same marker.
+    $result = [pscustomobject]@{ Paused = $false; ResumeAt = $null }
+    if (-not (Test-Path -LiteralPath $script:SRPausePath -PathType Leaf)) { return $result }
+    $marker = $null
+    try {
+        $marker = Get-Content -LiteralPath $script:SRPausePath -Raw -ErrorAction Stop | ConvertFrom-Json
+    } catch {
+        # A torn marker must not silently disable protection forever.
+        try { Write-SRLog -Level WARN -Message ('Ignoring unreadable pause marker: {0}' -f $_.Exception.Message) } catch { }
+        return $result
+    }
+    if ($null -eq $marker) { return $result }
+    $pausedProperty = $marker.PSObject.Properties['paused']
+    if ($null -eq $pausedProperty -or -not [bool]$pausedProperty.Value) { return $result }
+    $resumeProperty = $marker.PSObject.Properties['resumeAt']
+    if ($null -ne $resumeProperty -and -not [string]::IsNullOrWhiteSpace([string]$resumeProperty.Value)) {
+        $resumeAt = [datetime]::MinValue
+        if ([datetime]::TryParse([string]$resumeProperty.Value, [System.Globalization.CultureInfo]::InvariantCulture,
+                [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$resumeAt)) {
+            # Compare in UTC, then hand the tray a local time so its timer
+            # arithmetic works regardless of the machine's time zone.
+            if ($resumeAt.Kind -eq [System.DateTimeKind]::Unspecified) {
+                $resumeAt = [datetime]::SpecifyKind($resumeAt, [System.DateTimeKind]::Utc)
+            }
+            $resumeAtUtc = $resumeAt.ToUniversalTime()
+            if ($resumeAtUtc -le [datetime]::UtcNow) {
+                # Timed pauses expire even if the tray is not running.
+                try { Remove-Item -LiteralPath $script:SRPausePath -Force -ErrorAction SilentlyContinue } catch { }
+                return $result
+            }
+            $result.ResumeAt = $resumeAtUtc.ToLocalTime()
+        }
+    }
+    $result.Paused = $true
+    return $result
+}
+
+function Write-SRMarkerFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][object]$Payload
+    )
+    $directory = Split-Path -Parent $Path
+    if (-not [string]::IsNullOrWhiteSpace($directory) -and -not (Test-Path -LiteralPath $directory)) {
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    }
+    $tempPath = $Path + '.tmp'
+    try {
+        $json = $Payload | ConvertTo-Json
+        [System.IO.File]::WriteAllText($tempPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            # File.Replace needs a real backup path on .NET Framework; passing
+            # null throws "The path is not of a legal form".
+            $backupPath = $Path + '.bak'
+            if (Test-Path -LiteralPath $backupPath) { Remove-Item -LiteralPath $backupPath -Force }
+            [System.IO.File]::Replace($tempPath, $Path, $backupPath)
+            try { Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue } catch { }
+        } else {
+            [System.IO.File]::Move($tempPath, $Path)
+        }
+    } catch {
+        try { Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue } catch { }
+        throw
+    }
+}
+
+function Set-SRSnapshotPause {
+    param([switch]$Paused, [Nullable[datetime]]$ResumeAt)
+    if (-not $Paused) {
+        try { Remove-Item -LiteralPath $script:SRPausePath -Force -ErrorAction SilentlyContinue } catch { }
+        return
+    }
+    $payload = [ordered]@{ paused = $true; resumeAt = $null }
+    if ($null -ne $ResumeAt) {
+        $payload.resumeAt = ([datetime]$ResumeAt).ToUniversalTime().ToString('o')
+    }
+    Write-SRMarkerFile -Path $script:SRPausePath -Payload $payload
+}
+
+function Get-SRShutdownAttemptPath { $script:SRShutdownAttemptPath }
+
+function Start-SRShutdownAttempt {
+    # Windows can terminate the process as soon as it acknowledges the end
+    # session. Write a marker before capture starts, so the next start can tell
+    # a completed shutdown snapshot from one that never reached disk.
+    $startedAt = (Get-Date).ToUniversalTime().ToString('o')
+    $payload = [ordered]@{
+        startedAt = $startedAt
+        completed = $false
+        path      = $null
+    }
+    try { Write-SRMarkerFile -Path $script:SRShutdownAttemptPath -Payload $payload } catch { }
+    try { Write-SRLog -Message ('Shutdown snapshot attempt started at {0}.' -f $startedAt) } catch { }
+}
+
+function Complete-SRShutdownAttempt {
+    param([string]$Path)
+    try {
+        $payload = [ordered]@{
+            startedAt = $null
+            completed = $true
+            path      = [string]$Path
+            at        = (Get-Date).ToUniversalTime().ToString('o')
+        }
+        Write-SRMarkerFile -Path $script:SRShutdownAttemptPath -Payload $payload
+    } catch { }
+}
+
+function Clear-SRShutdownAttempt { try { Remove-Item -LiteralPath $script:SRShutdownAttemptPath -Force -ErrorAction SilentlyContinue } catch { } }
+
+function Get-SRLastShutdownCapture {
+    # Called once at tray start: reports whether the previous shutdown got its
+    # final snapshot, so the success rate is observable instead of assumed.
+    if (-not (Test-Path -LiteralPath $script:SRShutdownAttemptPath -PathType Leaf)) { return $null }
+    $marker = $null
+    try { $marker = Get-Content -LiteralPath $script:SRShutdownAttemptPath -Raw -ErrorAction Stop | ConvertFrom-Json } catch {
+        try { Write-SRLog -Level WARN -Message 'The previous shutdown attempt marker was unreadable.' } catch { }
+        return $null
+    }
+    if ($null -eq $marker) { return $null }
+    $completedProperty = $marker.PSObject.Properties['completed']
+    $completed = ($null -ne $completedProperty -and [bool]$completedProperty.Value)
+    $pathProperty = $marker.PSObject.Properties['path']
+    $path = if ($null -ne $pathProperty) { [string]$pathProperty.Value } else { '' }
+    try {
+        if ($completed) {
+            Write-SRLog -Message ('Previous shutdown snapshot completed: {0}' -f $path)
+        } else {
+            Write-SRLog -Level WARN -Message 'Previous shutdown snapshot was not written before Windows ended the process.'
+        }
+    } catch { }
+    return [pscustomobject]@{ Completed = $completed; Path = $path }
+}
 
 function Get-SRInstallationId {
     # Snapshots carry this per-install ID as provenance. A file that was
@@ -5890,6 +6030,7 @@ function Start-SRUndoLastRestore {
 function New-SREventSnapshotState {
     return [pscustomobject]@{
         Pending = $false; FirstSignal = [long]0; LastSignal = [long]0
+        NamePending = $false; NameFirst = [long]0; NameLast = [long]0
         Generation = [long]0; InFlight = $false; LastAttempt = $null
         SessionEnding = $false; SessionEndingAttempted = $false
     }
@@ -5900,6 +6041,9 @@ function Reset-SREventSnapshotState {
     $State.Pending = $false
     $State.FirstSignal = [long]0
     $State.LastSignal = [long]0
+    $State.NamePending = $false
+    $State.NameFirst = [long]0
+    $State.NameLast = [long]0
     # Never release an active reservation, or reset the attempt cooldown.
     if ($CancelSessionEnding) {
         $State.SessionEnding = $false
@@ -5929,10 +6073,29 @@ function Add-SREventSnapshotSignal {
         return
     }
     if ($State.SessionEnding -or $State.SessionEndingAttempted) { return }
+    if ($Signal -eq 'window-name') {
+        # A title-only change is weaker than a real window appearing or
+        # disappearing. Keep it separate so it cannot reset the short
+        # structural debounce, and let Get-SREventSnapshotRequest apply the
+        # longer title-only interval.
+        if (-not $State.Pending) {
+            if (-not $State.NamePending) {
+                $State.NameFirst = $NowMilliseconds
+                $State.NamePending = $true
+            }
+            $State.NameLast = $NowMilliseconds
+        }
+        return
+    }
     if (-not $State.Pending) {
         $State.Generation++
         $State.FirstSignal = $NowMilliseconds
         $State.Pending = $true
+        # A structural change supersedes pending title noise; the capture that
+        # follows includes the current titles anyway.
+        $State.NamePending = $false
+        $State.NameFirst = [long]0
+        $State.NameLast = [long]0
     }
     $State.LastSignal = $NowMilliseconds
 }
@@ -5941,7 +6104,8 @@ function Get-SREventSnapshotRequest {
     param(
         [Parameter(Mandatory = $true)][object]$State,
         [Parameter(Mandatory = $true)][long]$NowMilliseconds,
-        [bool]$Busy = $false, [bool]$Enabled = $true, [bool]$Paused = $false
+        [bool]$Busy = $false, [bool]$Enabled = $true, [bool]$Paused = $false,
+        [long]$NameOnlyFirst = 0, [long]$NameOnlyLast = 0
     )
     if (-not $Enabled -or $Paused) {
         Reset-SREventSnapshotState -State $State
@@ -5949,17 +6113,41 @@ function Get-SREventSnapshotRequest {
         return $null
     }
     if ($Busy -or $State.InFlight) { return $null }
+    # Compatibility for callers that drain timestamps once: fold them into the
+    # state so the pending title-only signal survives the next poll.
+    if ($NameOnlyFirst -gt 0) {
+        if (-not $State.NamePending -or $NameOnlyFirst -lt $State.NameFirst) { $State.NameFirst = $NameOnlyFirst }
+        if ($NameOnlyLast -gt $State.NameLast) { $State.NameLast = $NameOnlyLast }
+        $State.NamePending = $true
+    } elseif ($NameOnlyLast -gt 0) {
+        if (-not $State.NamePending) { $State.NameFirst = $NameOnlyLast }
+        if ($NameOnlyLast -gt $State.NameLast) { $State.NameLast = $NameOnlyLast }
+        $State.NamePending = $true
+    }
     $shutdown = [bool]$State.SessionEnding
     if (-not $shutdown) {
-        if (-not $State.Pending) { return $null }
-        if (($NowMilliseconds - $State.LastSignal) -lt 2000 -and
-            ($NowMilliseconds - $State.FirstSignal) -lt 10000) { return $null }
-        if ($null -ne $State.LastAttempt -and ($NowMilliseconds - $State.LastAttempt) -lt 30000) { return $null }
+        if (-not $State.Pending -and -not $State.NamePending) { return $null }
+        # A title-only change is usually a browser page or a ticking clock.
+        # Keep one debounce like other changes, but require a much longer
+        # quiet period and a longer attempt cooldown for this weaker signal.
+        $nameOnly = (-not $State.Pending)
+        if ($nameOnly) {
+            if (($NowMilliseconds - $State.NameLast) -lt 15000 -and
+                ($NowMilliseconds - $State.NameFirst) -lt 60000) { return $null }
+            if ($null -ne $State.LastAttempt -and ($NowMilliseconds - $State.LastAttempt) -lt 120000) { return $null }
+        } else {
+            if (($NowMilliseconds - $State.LastSignal) -lt 2000 -and
+                ($NowMilliseconds - $State.FirstSignal) -lt 10000) { return $null }
+            if ($null -ne $State.LastAttempt -and ($NowMilliseconds - $State.LastAttempt) -lt 30000) { return $null }
+        }
     } else {
         $State.SessionEnding = $false
         $State.SessionEndingAttempted = $true
     }
     $State.Pending = $false
+    $State.NamePending = $false
+    $State.NameFirst = [long]0
+    $State.NameLast = [long]0
     $State.LastAttempt = $NowMilliseconds
     $State.InFlight = $true
     return [pscustomobject]@{
@@ -6549,6 +6737,16 @@ function Save-SRSnapshot {
         New-Item -ItemType Directory -Path $script:SRSnapshotDir -Force | Out-Null
     }
 
+    # Pause must mean pause for every automatic driver, including the
+    # scheduled task, which runs in its own process. A forced manual capture
+    # is an explicit request and still runs; a paused user gets no shutdown
+    # snapshot either.
+    $pause = Get-SRSnapshotPause
+    if ($pause.Paused -and ($Shutdown -or -not $Force)) {
+        Write-SRLog -Level DEBUG -Message 'Skipped snapshot: snapshots are paused.'
+        return $null
+    }
+
     # Smart capture: skip pointless or intrusive snapshots. Manual captures
     # (from the tray or the hotkey) always run.
     if (-not $Force) {
@@ -6592,6 +6790,7 @@ function Save-SRSnapshot {
     }
 
     try {
+        if ($Shutdown) { Start-SRShutdownAttempt }
         if ($Shutdown) {
             $snapshot = New-SRSnapshot -Reason $Reason -BudgetMilliseconds 2000
         } else {
@@ -6679,6 +6878,7 @@ function Save-SRSnapshot {
         # actually builds hourly and daily history; before this the automatic
         # path silently used flat count-only retention and deleted it.
         if (-not $Shutdown) { [void](Invoke-SRRetention -Config $config) }
+        if ($Shutdown) { Complete-SRShutdownAttempt -Path $path }
         Write-SRLog -Message ("Snapshot saved: {0} ({1} apps, {2} folders, {3} browsers, {4} tabs)" -f $path, $snapshot.stats.apps, $snapshot.stats.folders, $snapshot.stats.browsers, $snapshot.stats.tabs)
         try {
             $exportFolder = [string]$config.autoExportFolder
