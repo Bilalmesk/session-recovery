@@ -4,8 +4,8 @@
 BeforeDiscovery {
     $script:encRoot = Split-Path $PSScriptRoot -Parent
     $script:encFiles = @(
-        Get-ChildItem -LiteralPath $script:encRoot -Recurse -File -Include *.ps1, *.psm1 |
-            Where-Object { $_.FullName -notmatch '[\\/](\.git|node_modules)[\\/]' } |
+        Get-ChildItem -LiteralPath $script:encRoot -Recurse -File |
+            Where-Object { $_.Extension -in '.ps1', '.psm1' -and $_.FullName -notmatch '[\\/](\.git|node_modules)[\\/]' } |
             ForEach-Object { @{ Path = $_.FullName; Name = $_.FullName.Substring($script:encRoot.Length + 1) } }
     )
 }
