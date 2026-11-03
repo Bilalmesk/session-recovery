@@ -146,6 +146,30 @@ Describe 'String tables' {
         }
     }
 
+    It 'explicitly translates the Terminal and storage diagnostics keys in all nine languages' {
+        $english = Get-SRStrings -Language 'en'
+        $keys = @('DiagTerminalCapture', 'DiagTerminalUnavailable', 'DiagTerminalCapturing',
+            'DiagTerminalSavedLayout', 'DiagTerminalPreferenceUnset', 'DiagTerminalPreferenceOther',
+            'DiagEstimatedStorage', 'DiagEstimatedStorageDetail')
+        foreach ($language in @('en', 'ar', 'fr', 'es', 'de', 'pt', 'ru', 'zh', 'tr')) {
+            $strings = Get-SRStrings -Language $language
+            foreach ($key in $keys) {
+                $strings[$key] | Should -Not -BeNullOrEmpty -Because "$language must define '$key'"
+                if ($language -ne 'en') {
+                    $strings[$key] | Should -Not -Be $english[$key] -Because "$language must not rely on English fallback for '$key'"
+                }
+                $expectedPlaceholders = @([regex]::Matches($english[$key], '\{\d+\}') | ForEach-Object { $_.Value } | Sort-Object)
+                $actualPlaceholders = @([regex]::Matches($strings[$key], '\{\d+\}') | ForEach-Object { $_.Value } | Sort-Object)
+                ($actualPlaceholders -join ',') | Should -Be ($expectedPlaceholders -join ',') -Because "$language must preserve every '$key' format argument"
+            }
+            $strings['DiagTerminalCapturing'] | Should -Match '\{0\}'
+            $strings['DiagTerminalPreferenceOther'] | Should -Match '\{0\}'
+            foreach ($placeholder in @('{0}', '{1}', '{2}')) {
+                $strings['DiagEstimatedStorageDetail'].Contains($placeholder) | Should -BeTrue
+            }
+        }
+    }
+
     It 'falls back to English for unknown languages' {        $strings = Get-SRStrings -Language 'xx'
         $strings.NavDashboard | Should -Be 'Dashboard'
     }
@@ -1937,6 +1961,27 @@ Describe 'Auto snapshot resource guards' {
 }
 
 Describe 'Retention wiring' {
+    BeforeEach {
+        $script:retentionHome = $env:SESSIONRECOVERY_HOME
+        $script:retentionSnapshotDir = Get-SRSnapshotDirectory
+        $env:SESSIONRECOVERY_HOME = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $env:SESSIONRECOVERY_HOME -Force | Out-Null
+        $script:retentionConfigPath = Get-SRConfigPath
+        & (Get-Module SessionRecovery) {
+            param($Path)
+            $script:SRConfigPath = $Path
+        } (Join-Path $env:SESSIONRECOVERY_HOME 'config.json')
+    }
+
+    AfterEach {
+        $env:SESSIONRECOVERY_HOME = $script:retentionHome
+        & (Get-Module SessionRecovery) {
+            param($Path)
+            $script:SRConfigPath = $Path
+        } $script:retentionConfigPath
+        Set-SRTestSnapshotDirectory -Path $script:retentionSnapshotDir
+    }
+
     It 'shares one policy between the snapshot path and the cleanup button' {
         # The automatic snapshot path used to omit the tier arguments, so it
         # kept deleting history the cleanup button preserved. Both now read
@@ -1955,7 +2000,19 @@ Describe 'Retention wiring' {
         (Get-SRRetentionSettings -Config $config).Tiered | Should -BeFalse
     }
 
-    It 'applies tiers through Save-SRSnapshot, not only through cleanup' {
+    It 'applies tiers through Save-SRSnapshot and restores config (initially present: <ConfigExists>)' -TestCases @(
+        @{ ConfigExists = $true }
+        @{ ConfigExists = $false }
+    ) {
+        param($ConfigExists)
+        # Exercise real snapshot writes/retention, not live desktop capture.
+        Mock New-SRSnapshot -ModuleName SessionRecovery {
+            [pscustomobject]@{
+                capturedAt = [DateTimeOffset]::Now.ToString('o')
+                apps = @(); explorer = @(); browsers = @(); devWorkspaces = @()
+                stats = [pscustomobject]@{ apps = 0; folders = 0; browsers = 0; tabs = 0 }
+            }
+        }
         # keepSnapshots is set low on purpose. With the default of 48 the
         # seeded files all fit inside the recent window, so flat retention
         # would keep them too and this test could never fail - which is what
@@ -1964,9 +2021,12 @@ Describe 'Retention wiring' {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
         $previousDir = Get-SRSnapshotDirectory
         $configPath = Get-SRConfigPath
-        $backupConfig = if (Test-Path -LiteralPath $configPath) { Get-Content -LiteralPath $configPath -Raw } else { $null }
-        Set-SRTestSnapshotDirectory -Path $dir
+        if ($ConfigExists) { Save-SRConfig -Config (Get-SRDefaultConfig) }
+        $hadConfig = Test-Path -LiteralPath $configPath
+        $hadConfig | Should -Be $ConfigExists
+        $backupConfig = if ($hadConfig) { Get-Content -LiteralPath $configPath -Raw } else { $null }
         try {
+            Set-SRTestSnapshotDirectory -Path $dir
             $config = Get-SRConfig
             $config.keepSnapshots = 5
             $config.keepSnapshotDays = 0
@@ -1999,14 +2059,53 @@ Describe 'Retention wiring' {
             $after.Count | Should -BeGreaterThan 30
         } finally {
             Set-SRTestSnapshotDirectory -Path $previousDir
-            if ($null -ne $backupConfig) {
+            if ($hadConfig) {
                 Set-Content -LiteralPath $configPath -Value $backupConfig -Encoding UTF8 -NoNewline
+            } else {
+                Remove-Item -LiteralPath $configPath -Force -ErrorAction SilentlyContinue
             }
         }
+        (Test-Path -LiteralPath $configPath) | Should -Be $hadConfig
+        if ($hadConfig) { (Get-Content -LiteralPath $configPath -Raw) | Should -BeExactly $backupConfig }
+        (Get-SRSnapshotDirectory) | Should -Be $previousDir
     }
 }
 
 Describe 'Diagnostics: terminal capture and storage estimate' {
+    BeforeAll {
+        function New-TestTerminalInstall {
+            param([string]$RelativePath = 'Microsoft\Windows Terminal\LocalState',
+                [string]$Preference = '', [int]$TabCount = 0)
+            $dir = Join-Path $env:LOCALAPPDATA $RelativePath
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            $tabs = @(for ($i = 0; $i -lt $TabCount; $i++) {
+                [pscustomobject]@{ startingDirectory = $TestDrive; tabTitle = "tab$i"; profile = 'PowerShell' }
+            })
+            $state = @{ persistedWindowLayouts = @(@{ tabLayout = $tabs }) }
+            $state | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $dir 'state.json') -Encoding UTF8
+            $settings = @{}
+            if ($Preference) { $settings.firstWindowPreference = $Preference }
+            $settings | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $dir 'settings.json') -Encoding UTF8
+            return (Join-Path $dir 'state.json')
+        }
+    }
+
+    BeforeEach {
+        $script:diagnosticLocalAppData = $env:LOCALAPPDATA
+        $script:diagnosticAppData = $env:APPDATA
+        $script:diagnosticTerminalOverride = & (Get-Module SessionRecovery) { $script:SRTerminalStateOverride }
+        $env:LOCALAPPDATA = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        $env:APPDATA = Join-Path $env:LOCALAPPDATA 'Roaming'
+        New-Item -ItemType Directory -Path $env:APPDATA -Force | Out-Null
+        Set-SRTestTerminalStatePath -Path ''
+    }
+
+    AfterEach {
+        $env:LOCALAPPDATA = $script:diagnosticLocalAppData
+        $env:APPDATA = $script:diagnosticAppData
+        Set-SRTestTerminalStatePath -Path $script:diagnosticTerminalOverride
+    }
+
     It 'reports the snapshot count tiering will keep' {
         $config = Get-SRDefaultConfig
         $estimate = Get-SREstimatedSnapshotStorage -Config $config -AverageSnapshotBytes 10000
@@ -2026,22 +2125,71 @@ Describe 'Diagnostics: terminal capture and storage estimate' {
         $estimate.TotalCount | Should -Be 48
     }
 
-    It 'explains why terminal tabs are or are not captured' {
+    It 'explains unavailable Terminal state without consulting the real installation' {
         $status = Get-SRTerminalCaptureStatus
-        $status.PSObject.Properties['Reason'] | Should -Not -BeNullOrEmpty
-        $status.Reason | Should -Not -BeNullOrEmpty -Because 'a user must never see an empty explanation'
-        if (-not $status.Supported) {
-            $status.Reason | Should -Match 'not installed'
-        } else {
-            $status.Reason | Should -Match 'terminal|Terminal'
+        $status.Supported | Should -BeFalse
+        $status.StateExists | Should -BeFalse
+        $status.ReasonKey | Should -Be 'DiagTerminalUnavailable'
+        $status.ReasonArg | Should -BeNullOrEmpty
+        $status.Reason | Should -Match 'not installed'
+    }
+
+    It 'detects unpackaged Terminal and returns the captured count as its reason argument' {
+        $path = New-TestTerminalInstall -TabCount 2
+        $status = Get-SRTerminalCaptureStatus
+        $status.Supported | Should -BeTrue
+        $status.StateExists | Should -BeTrue
+        $status.StatePath | Should -Be $path
+        $status.TabsInState | Should -Be 2
+        $status.ReasonKey | Should -Be 'DiagTerminalCapturing'
+        $status.ReasonArg | Should -Be 2
+        $status.Reason | Should -Be 'Capturing 2 terminal tab(s) from the saved layout.'
+    }
+
+    It 'explains empty layouts for preference <Preference>' -TestCases @(
+        @{ Preference = ''; Key = 'DiagTerminalPreferenceUnset'; Argument = $null }
+        @{ Preference = 'defaultProfile'; Key = 'DiagTerminalPreferenceOther'; Argument = 'defaultProfile' }
+        @{ Preference = 'persistedWindowLayout'; Key = 'DiagTerminalSavedLayout'; Argument = $null }
+    ) {
+        param($Preference, $Key, $Argument)
+        $null = New-TestTerminalInstall -Preference $Preference
+        $status = Get-SRTerminalCaptureStatus
+        $status.Supported | Should -BeTrue
+        $status.TabsInState | Should -Be 0
+        $status.PreferenceValue | Should -Be $Preference
+        $status.ReasonKey | Should -Be $Key
+        $status.ReasonArg | Should -Be $Argument
+        $status.Reason | Should -Match 'firstWindowPreference|persistedWindowLayout|crash'
+    }
+
+    It 'uses the same packaged-to-unpackaged priority as capture' {
+        $candidates = @(
+            'Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState'
+            'Packages\Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe\LocalState'
+            'Packages\Microsoft.WindowsTerminalCanary_8wekyb3d8bbwe\LocalState'
+            'Microsoft\Windows Terminal\LocalState'
+        )
+        for ($i = 0; $i -lt $candidates.Count; $i++) {
+            $null = New-TestTerminalInstall -RelativePath $candidates[$i] -TabCount ($i + 1)
+        }
+        for ($i = 0; $i -lt $candidates.Count; $i++) {
+            $path = Join-Path (Join-Path $env:LOCALAPPDATA $candidates[$i]) 'state.json'
+            $status = Get-SRTerminalCaptureStatus
+            $status.StatePath | Should -Be $path
+            $status.TabsInState | Should -Be ($i + 1)
+            $terminal = @(Get-SRDevWorkspaces | Where-Object { $_.kind -eq 'terminal' })
+            @($terminal[0].tabs).Count | Should -Be ($i + 1)
+            Remove-Item -LiteralPath $path -Force
         }
     }
 
-    It 'names the setting to change when layouts are unavailable' {
+    It 'handles malformed state and settings without losing its explanation' {
+        $path = New-TestTerminalInstall
+        Set-Content -LiteralPath $path -Value '{broken' -Encoding UTF8
+        Set-Content -LiteralPath (Join-Path (Split-Path $path) 'settings.json') -Value '{broken' -Encoding UTF8
         $status = Get-SRTerminalCaptureStatus
-        if ($status.Supported -and $status.TabsInState -eq 0) {
-            $status.Reason | Should -Match 'firstWindowPreference|persistedWindowLayout|crash'
-        }
+        $status.ReasonKey | Should -Be 'DiagTerminalPreferenceUnset'
+        $status.Reason | Should -Not -BeNullOrEmpty
     }
 
     It 'surfaces both in the diagnostics payload' {
@@ -2112,6 +2260,29 @@ Describe 'Terminal restore command lines' {
         $lines[0].Contains('C:\Users\me') | Should -BeTrue
     }
 
+    It 'doubles only trailing backslashes before a title and next tab (<Cwd>)' -TestCases @(
+        @{ Cwd = 'C:\'; Quoted = '"C:\\"' }
+        @{ Cwd = 'C:\my work\'; Quoted = '"C:\my work\\"' }
+        @{ Cwd = 'C:\work\\\'; Quoted = '"C:\work\\\\\\"' }
+    ) {
+        param($Cwd, $Quoted)
+        $tabs = @(
+            (New-TermTab -Cwd $Cwd -Profile 'PowerShell' -Title 'first\')
+            (New-TermTab -Cwd 'C:\next' -Title 'second')
+        )
+        $lines = @(Get-SRTerminalCommandLines -Tabs $tabs)
+        $lines.Count | Should -Be 1
+        $lines[0] | Should -BeExactly ('new-tab -p "PowerShell" -d ' + $Quoted + ' --title "first\\" ; new-tab -d "C:\next" --title "second"')
+        $tabs[0].cwd | Should -BeExactly $Cwd
+    }
+
+    It 'is pure and never probes a captured directory' {
+        Mock Test-Path -ModuleName SessionRecovery { throw 'The pure builder must not touch the filesystem' }
+        @(Get-SRTerminalCommandLines -Tabs @((New-TermTab -Cwd 'C:\nonexistent')))[0] |
+            Should -BeExactly 'new-tab -d "C:\nonexistent"'
+        Should -Invoke Test-Path -ModuleName SessionRecovery -Times 0 -Exactly
+    }
+
     It 'splits into chunks past the limit, one line each' {
         $tabs = @(1..25 | ForEach-Object { New-TermTab -Cwd ('C:\t' + $_) })
         $lines = @(Get-SRTerminalCommandLines -Tabs $tabs -ChunkSize 20)
@@ -2129,6 +2300,64 @@ Describe 'Terminal restore command lines' {
         $lines = @(Get-SRTerminalCommandLines -Tabs @((New-TermTab -Cwd 'C:\only')))
         $lines[0] | Should -Not -Match '--title'
         $lines[0] | Should -Not -Match '-p '
+    }
+}
+
+Describe 'Terminal restore directory validation' {
+    BeforeEach {
+        Mock Get-SRConfig -ModuleName SessionRecovery { Get-SRDefaultConfig }
+        Mock Start-Process -ModuleName SessionRecovery {}
+        Mock Start-Sleep -ModuleName SessionRecovery {}
+        # Only the executable lookup is mocked; directory checks use real,
+        # isolated fixtures so LiteralPath and Container semantics are tested.
+        Mock Test-Path -ModuleName SessionRecovery {
+            param($LiteralPath, $PathType)
+            if ($PathType) {
+                Microsoft.PowerShell.Management\Test-Path -LiteralPath $LiteralPath -PathType $PathType
+            } else {
+                Microsoft.PowerShell.Management\Test-Path -LiteralPath $LiteralPath
+            }
+        }
+        Mock Test-Path -ModuleName SessionRecovery { $true } -ParameterFilter { $LiteralPath -like '*\WindowsApps\wt.exe' }
+    }
+
+    It 'omits invalid directories on copies while retaining valid and blank tabs' {
+        $valid = Join-Path $TestDrive 'valid[1]'
+        $missing = Join-Path $TestDrive 'missing'
+        $file = Join-Path $TestDrive 'file.txt'
+        New-Item -ItemType Directory -Path $valid -Force | Out-Null
+        Set-Content -LiteralPath $file -Value 'not a directory'
+        $tabs = @(
+            [pscustomobject]@{ cwd = $valid; profile = 'PowerShell'; title = 'valid' }
+            [pscustomobject]@{ cwd = $missing; profile = 'Ubuntu'; title = 'missing' }
+            [pscustomobject]@{ cwd = $file; profile = 'Command Prompt'; title = 'file' }
+            [pscustomobject]@{ cwd = ' '; profile = 'PowerShell'; title = 'blank' }
+        )
+        $plan = [pscustomobject]@{ apps = @(); explorer = @(); browsers = @(); monitors = @(); remote = @(); tabMode = 'Smart'
+            dev = @([pscustomobject]@{ kind = 'terminal'; tool = 'Windows Terminal'; tabs = $tabs; folders = @() }) }
+        $before = $plan | ConvertTo-Json -Depth 10
+        $expected = 'new-tab -p "PowerShell" -d "' + $valid + '" --title "valid" ; new-tab -p "Ubuntu" --title "missing" ; new-tab -p "Command Prompt" --title "file" ; new-tab -p "PowerShell" --title "blank"'
+        $result = @(Invoke-SRRestore -Plan $plan)
+        Should -Invoke Start-Process -ModuleName SessionRecovery -Times 1 -Exactly -ParameterFilter {
+            $FilePath -like '*\WindowsApps\wt.exe' -and $ArgumentList -eq $expected
+        }
+        Should -Invoke Test-Path -ModuleName SessionRecovery -Times 3 -Exactly -ParameterFilter { $PathType -eq 'Container' }
+        ($plan | ConvertTo-Json -Depth 10) | Should -BeExactly $before
+        $result[0].Started | Should -BeTrue
+    }
+
+    It 'validates legacy folders after conversion without mutating the snapshot' {
+        $valid = Join-Path $TestDrive 'legacy'
+        $missing = Join-Path $TestDrive 'gone'
+        New-Item -ItemType Directory -Path $valid -Force | Out-Null
+        $plan = [pscustomobject]@{ apps = @(); explorer = @(); browsers = @(); monitors = @(); remote = @(); tabMode = 'Smart'
+            dev = @([pscustomobject]@{ kind = 'terminal'; tool = 'Windows Terminal'; tabs = @(); folders = @($valid, $missing) }) }
+        $before = $plan | ConvertTo-Json -Depth 10
+        $expected = 'new-tab -d "' + $valid + '" ; new-tab'
+        $null = Invoke-SRRestore -Plan $plan
+        Should -Invoke Start-Process -ModuleName SessionRecovery -Times 1 -Exactly -ParameterFilter { $ArgumentList -eq $expected }
+        Should -Invoke Test-Path -ModuleName SessionRecovery -Times 2 -Exactly -ParameterFilter { $PathType -eq 'Container' }
+        ($plan | ConvertTo-Json -Depth 10) | Should -BeExactly $before
     }
 }
 

@@ -305,7 +305,8 @@ function Get-SRStrings {
         EncryptHint = 'Snapshots are sealed with your Windows user key. Encrypted exports only restore on this PC and user.'
         SetVDesk = 'Remember virtual desktops'
         VDeskHint = 'Each window remembers which Windows desktop it was on, and restore moves it back when that desktop still exists.'
-        SetEvents = 'Capture on lock, sleep and low battery'
+        SetEvents = 'Capture workspace and system events'
+        SetEventsHint = 'Window changes, lock, sleep and low battery; shutdown/sign-out are best-effort. Requires the tray; periodic capture stays on.'
         SetDev = 'Capture dev workspaces (VS Code, Cursor, JetBrains, Windows Terminal)'
         DiagShutdown = 'Last shutdown'
         RstDev = 'DEV WORKSPACES'
@@ -666,6 +667,14 @@ function Get-SRStrings {
         RestoreHistorySourceAuto = 'Automatic restore'
         DiagStorageHealth = 'Storage health'
         DiagStorageDesc = 'Unreadable snapshots, orphaned thumbnails and leftover temporary files are found here. Everything stays local.'
+        DiagTerminalCapture = 'Windows Terminal capture'
+        DiagTerminalUnavailable = 'No Windows Terminal state file is available to capture tabs.'
+        DiagTerminalCapturing = 'Capturing {0} terminal tab(s) from the saved layout.'
+        DiagTerminalSavedLayout = 'Windows Terminal saves layouts when a window closes. A crash may leave no tabs on disk; only tabs in the last saved layout can be captured.'
+        DiagTerminalPreferenceUnset = 'Terminal tabs are not captured: firstWindowPreference is unset (defaults to defaultProfile). Set it to persistedWindowLayout to save layouts.'
+        DiagTerminalPreferenceOther = 'Terminal tabs are not captured: firstWindowPreference is "{0}". Set it to persistedWindowLayout to save layouts.'
+        DiagEstimatedStorage = 'Estimated retention storage'
+        DiagEstimatedStorageDetail = 'Rough snapshot-file estimate: {0} for {1} projected retained snapshot(s), averaging {2} each. Not a full disk budget.'
         StorageHealthy = 'Storage looks clean'
         StorageIssues = '{0} issue(s)  •  {1} can be reclaimed'
         StorageUnreadable = '{0} unreadable snapshot(s)'
@@ -721,7 +730,8 @@ function Get-SRStrings {
         ThumbsHint = 'يحفظ صورة JPEG صغيرة لكل نافذة. معطّل افتراضيًا؛ التطبيقات المستثناة لا تُصوَّر أبدًا.'
         SetRedact = 'إزالة نص الاستعلام من عناوين URL'
         SetCompress = 'ضغط ملفات اللقطات (gzip)'
-        SetEvents = 'الالتقاط عند القفل والنوم وانخفاض البطارية'
+        SetEvents = 'التقاط أحداث مساحة العمل والنظام'
+        SetEventsHint = 'تغيّر النوافذ والقفل والسكون وضعف البطارية؛ محاولة عند الإيقاف/الخروج. يتطلب تطبيق الخلفية؛ يستمر الالتقاط الدوري.'
         SetDev = 'التقاط مساحات عمل المطوّرين (VS Code وCursor وJetBrains وWindows Terminal)'
         SetEncrypt = 'تشفير ملفات اللقطات (DPAPI)'
         EncryptHint = 'تُختم اللقطات بمفتاح مستخدم ويندوز لديك. النسخ المشفرة تُستعاد على هذا الجهاز ولهذا المستخدم فقط.'
@@ -856,7 +866,8 @@ function Get-SRStrings {
         ThumbsHint = 'Enregistre un petit JPEG de chaque fenêtre. Désactivé par défaut ; les applications exclues ne sont jamais capturées.'
         SetRedact = 'Retirer les chaînes de requête des URL'
         SetCompress = 'Compresser les instantanés (gzip)'
-        SetEvents = 'Capturer au verrouillage, à la mise en veille et sur batterie faible'
+        SetEvents = 'Capturer les événements du bureau et du système'
+        SetEventsHint = 'Fenêtres, verrouillage, veille, batterie faible ; arrêt/déconnexion sans garantie. Appli de fond requise ; capture périodique maintenue.'
         SetDev = 'Capturer les espaces de travail dev (VS Code, Cursor, JetBrains, Windows Terminal)'
         SetEncrypt = 'Chiffrer les instantanés (DPAPI)'
         EncryptHint = 'Les instantanés sont scellés avec votre clé utilisateur Windows. Les exports chiffrés ne se restaurent que sur ce PC et ce compte.'
@@ -991,7 +1002,8 @@ function Get-SRStrings {
         ThumbsHint = 'Guarda un JPEG pequeño de cada ventana. Desactivado por defecto; las apps excluidas nunca se capturan.'
         SetRedact = 'Quitar cadenas de consulta de las URL'
         SetCompress = 'Comprimir instantáneas (gzip)'
-        SetEvents = 'Capturar al bloquear, dormir y con batería baja'
+        SetEvents = 'Capturar eventos del escritorio y del sistema'
+        SetEventsHint = 'Ventanas, bloqueo, suspensión y batería baja; apagado/cierre de sesión sin garantía. Requiere la bandeja; sigue la captura periódica.'
         SetDev = 'Capturar espacios de trabajo dev (VS Code, Cursor, JetBrains, Windows Terminal)'
         SetEncrypt = 'Cifrar capturas (DPAPI)'
         EncryptHint = 'Las capturas se sellan con tu clave de usuario de Windows. Las copias cifradas solo se restauran en este PC y usuario.'
@@ -1126,7 +1138,8 @@ function Get-SRStrings {
         ThumbsHint = 'Speichert ein kleines JPEG pro Fenster. Standardmäßig aus; ausgeschlossene Apps werden nie erfasst.'
         SetRedact = 'Query-Strings aus URLs entfernen'
         SetCompress = 'Snapshots gzip-komprimieren'
-        SetEvents = 'Bei Sperren, Standby und niedrigem Akku aufnehmen'
+        SetEvents = 'Bei Arbeitsbereich- und Systemereignissen aufnehmen'
+        SetEventsHint = 'Fenster, Sperren, Standby, niedriger Akku; Herunterfahren/Abmelden ohne Garantie. Tray-App nötig; regelmäßige Aufnahme bleibt aktiv.'
         SetDev = 'Dev-Arbeitsbereiche erfassen (VS Code, Cursor, JetBrains, Windows Terminal)'
         SetEncrypt = 'Snapshots verschlüsseln (DPAPI)'
         EncryptHint = 'Snapshots werden mit deinem Windows-Benutzerschlüssel versiegelt. Verschlüsselte Exporte lassen sich nur auf diesem PC und Benutzer wiederherstellen.'
@@ -1261,7 +1274,8 @@ function Get-SRStrings {
         ThumbsHint = 'Guarda um JPEG pequeno de cada janela. Desativado por defeito; apps excluídas nunca são capturadas.'
         SetRedact = 'Remover cadeias de consulta dos URLs'
         SetCompress = 'Comprimir instantâneos (gzip)'
-        SetEvents = 'Capturar ao bloquear, suspender e com bateria fraca'
+        SetEvents = 'Capturar eventos da área de trabalho e do sistema'
+        SetEventsHint = 'Janelas, bloqueio, suspensão e bateria fraca; desligar/sair sem garantia. Requer a app na bandeja; mantém a captura periódica.'
         SetDev = 'Capturar espaços de trabalho dev (VS Code, Cursor, JetBrains, Windows Terminal)'
         SetEncrypt = 'Encriptar capturas (DPAPI)'
         EncryptHint = 'As capturas são seladas com a sua chave de utilizador do Windows. As exportações encriptadas só são restauradas neste PC e utilizador.'
@@ -1396,7 +1410,8 @@ function Get-SRStrings {
         ThumbsHint = 'Сохраняет небольшой JPEG каждого окна. По умолчанию выключено; исключённые приложения никогда не снимаются.'
         SetRedact = 'Убирать строки запроса из URL'
         SetCompress = 'Сжимать снимки (gzip)'
-        SetEvents = 'Снимать при блокировке, сне и низком заряде'
+        SetEvents = 'Снимать при событиях рабочего стола и системы'
+        SetEventsHint = 'Окна, блокировка, сон, низкий заряд; выключение/выход без гарантии. Нужен значок в трее; периодическая съёмка продолжается.'
         SetDev = 'Снимать рабочие папки разработчика (VS Code, Cursor, JetBrains, Windows Terminal)'
         SetEncrypt = 'Шифровать снимки (DPAPI)'
         EncryptHint = 'Снимки запечатываются ключом вашего пользователя Windows. Зашифрованные копии восстанавливаются только на этом ПК и у этого пользователя.'
@@ -1531,7 +1546,8 @@ function Get-SRStrings {
         ThumbsHint = '为每个窗口保存一张小 JPEG。默认关闭；已排除的应用永远不会被截图。'
         SetRedact = '去除网址中的查询参数'
         SetCompress = '压缩快照文件（gzip）'
-        SetEvents = '在锁定、睡眠和低电量时捕获'
+        SetEvents = '在工作区和系统事件发生时捕获'
+        SetEventsHint = '窗口变化、锁定、睡眠和低电量时捕获；关机/注销时尽力尝试，不保证成功。需要托盘程序运行；定期捕获仍会继续。'
         SetDev = '捕获开发工作区（VS Code、Cursor、JetBrains、Windows Terminal）'
         SetEncrypt = '加密快照文件（DPAPI）'
         EncryptHint = '快照用你的 Windows 用户密钥密封。加密的导出只能在这台电脑和该用户下恢复。'
@@ -1666,7 +1682,8 @@ function Get-SRStrings {
         ThumbsHint = 'Her pencere için küçük bir JPEG kaydeder. Varsayılan kapalı; hariç tutulan uygulamalar asla yakalanmaz.'
         SetRedact = 'URL''lerden sorgu dizelerini kaldır'
         SetCompress = 'Anlık görüntüleri gzip ile sıkıştır'
-        SetEvents = 'Kilitlenme, uyku ve düşük pilde yakala'
+        SetEvents = 'Çalışma alanı ve sistem olaylarında yakala'
+        SetEventsHint = 'Pencere değişimi, kilit, uyku ve düşük pil; kapanış/oturum kapatmada garanti yoktur. Tepsi uygulaması gerekir; düzenli yakalama sürer.'
         SetDev = 'Geliştirici çalışma alanlarını yakala (VS Code, Cursor, JetBrains, Windows Terminal)'
         SetEncrypt = 'Anlık görüntüleri şifrele (DPAPI)'
         EncryptHint = 'Görüntüler Windows kullanıcı anahtarınla mühürlenir. Şifreli kopyalar yalnızca bu PC ve bu kullanıcıda geri yüklenir.'
@@ -4280,6 +4297,96 @@ function Get-SRStrings {
         if ($null -eq $overlays[$extraLang]) { $overlays[$extraLang] = @{} }
         foreach ($extraKey in @($featureExtra[$extraLang].Keys)) {
             $overlays[$extraLang][$extraKey] = $featureExtra[$extraLang][$extraKey]
+        }
+    }
+
+    # Diagnostics: terminal capture reasons and the rough retention estimate.
+    $diagnosticsExtra = @{
+        ar = @{
+            DiagTerminalCapture = 'التقاط Windows Terminal'
+            DiagTerminalUnavailable = 'لا يتوفر ملف حالة Windows Terminal لالتقاط علامات التبويب.'
+            DiagTerminalCapturing = 'جارٍ التقاط {0} علامة تبويب طرفية من التخطيط المحفوظ.'
+            DiagTerminalSavedLayout = 'يحفظ Windows Terminal التخطيطات عند إغلاق النافذة. قد لا تبقى علامات تبويب على القرص بعد التعطل؛ يمكن التقاط علامات التبويب في آخر تخطيط محفوظ فقط.'
+            DiagTerminalPreferenceUnset = 'لا تُلتقط علامات تبويب الطرفية: firstWindowPreference غير مضبوط (القيمة الافتراضية defaultProfile). اضبطه على persistedWindowLayout لحفظ التخطيطات.'
+            DiagTerminalPreferenceOther = 'لا تُلتقط علامات تبويب الطرفية: firstWindowPreference هو "{0}". اضبطه على persistedWindowLayout لحفظ التخطيطات.'
+            DiagEstimatedStorage = 'تقدير مساحة الاحتفاظ'
+            DiagEstimatedStorageDetail = 'تقدير تقريبي لملفات اللقطات: {0} لعدد متوقع قدره {1} لقطة محتفظ بها، بمتوسط {2} لكل لقطة. ليس تقديرًا لكامل مساحة القرص المطلوبة.'
+        }
+        fr = @{
+            DiagTerminalCapture = 'Capture de Windows Terminal'
+            DiagTerminalUnavailable = 'Aucun fichier d''état Windows Terminal disponible pour capturer les onglets.'
+            DiagTerminalCapturing = 'Capture de {0} onglet(s) de terminal depuis la disposition enregistrée.'
+            DiagTerminalSavedLayout = 'Windows Terminal enregistre les dispositions à la fermeture d''une fenêtre. Un plantage peut ne laisser aucun onglet sur disque ; seuls ceux de la dernière disposition enregistrée peuvent être capturés.'
+            DiagTerminalPreferenceUnset = 'Onglets du terminal non capturés : firstWindowPreference est absent (defaultProfile par défaut). Réglez-le sur persistedWindowLayout pour enregistrer les dispositions.'
+            DiagTerminalPreferenceOther = 'Onglets du terminal non capturés : firstWindowPreference vaut "{0}". Réglez-le sur persistedWindowLayout pour enregistrer les dispositions.'
+            DiagEstimatedStorage = 'Stockage de rétention estimé'
+            DiagEstimatedStorageDetail = 'Estimation approximative des fichiers d''instantanés : {0} pour {1} instantané(s) conservé(s) prévus, à {2} en moyenne chacun. Ce n''est pas un budget disque complet.'
+        }
+        es = @{
+            DiagTerminalCapture = 'Captura de Windows Terminal'
+            DiagTerminalUnavailable = 'No hay un archivo de estado de Windows Terminal disponible para capturar pestañas.'
+            DiagTerminalCapturing = 'Capturando {0} pestaña(s) de terminal del diseño guardado.'
+            DiagTerminalSavedLayout = 'Windows Terminal guarda los diseños al cerrar una ventana. Un fallo puede no dejar pestañas en disco; solo se capturan las del último diseño guardado.'
+            DiagTerminalPreferenceUnset = 'No se capturan pestañas de terminal: firstWindowPreference no está definido (defaultProfile por defecto). Usa persistedWindowLayout para guardar los diseños.'
+            DiagTerminalPreferenceOther = 'No se capturan pestañas de terminal: firstWindowPreference es "{0}". Usa persistedWindowLayout para guardar los diseños.'
+            DiagEstimatedStorage = 'Almacenamiento de retención estimado'
+            DiagEstimatedStorageDetail = 'Estimación aproximada de archivos de instantáneas: {0} para {1} instantánea(s) retenida(s) previstas, con una media de {2} cada una. No es un presupuesto de disco completo.'
+        }
+        de = @{
+            DiagTerminalCapture = 'Windows-Terminal-Erfassung'
+            DiagTerminalUnavailable = 'Keine Windows-Terminal-Zustandsdatei zum Erfassen von Tabs verfügbar.'
+            DiagTerminalCapturing = '{0} Terminal-Tab(s) aus dem gespeicherten Layout werden erfasst.'
+            DiagTerminalSavedLayout = 'Windows Terminal speichert Layouts beim Schließen eines Fensters. Nach einem Absturz sind eventuell keine Tabs auf dem Datenträger vorhanden; nur Tabs im zuletzt gespeicherten Layout können erfasst werden.'
+            DiagTerminalPreferenceUnset = 'Terminal-Tabs werden nicht erfasst: firstWindowPreference ist nicht gesetzt (Standard: defaultProfile). Zum Speichern von Layouts auf persistedWindowLayout setzen.'
+            DiagTerminalPreferenceOther = 'Terminal-Tabs werden nicht erfasst: firstWindowPreference ist "{0}". Zum Speichern von Layouts auf persistedWindowLayout setzen.'
+            DiagEstimatedStorage = 'Geschätzter Aufbewahrungsspeicher'
+            DiagEstimatedStorageDetail = 'Grobe Schätzung der Snapshot-Dateien: {0} für voraussichtlich {1} aufbewahrte Snapshots, durchschnittlich je {2}. Kein vollständiges Speicherplatzbudget.'
+        }
+        pt = @{
+            DiagTerminalCapture = 'Captura do Windows Terminal'
+            DiagTerminalUnavailable = 'Nenhum ficheiro de estado do Windows Terminal disponível para capturar separadores.'
+            DiagTerminalCapturing = 'A capturar {0} separador(es) de terminal da disposição guardada.'
+            DiagTerminalSavedLayout = 'O Windows Terminal guarda disposições ao fechar uma janela. Uma falha pode não deixar separadores no disco; só podem ser capturados os da última disposição guardada.'
+            DiagTerminalPreferenceUnset = 'Os separadores do terminal não são capturados: firstWindowPreference não está definido (predefinição: defaultProfile). Defina persistedWindowLayout para guardar disposições.'
+            DiagTerminalPreferenceOther = 'Os separadores do terminal não são capturados: firstWindowPreference é "{0}". Defina persistedWindowLayout para guardar disposições.'
+            DiagEstimatedStorage = 'Armazenamento de retenção estimado'
+            DiagEstimatedStorageDetail = 'Estimativa aproximada dos ficheiros de instantâneos: {0} para {1} instantâneo(s) retido(s) previstos, com média de {2} cada. Não é um orçamento total de espaço em disco.'
+        }
+        ru = @{
+            DiagTerminalCapture = 'Захват Windows Terminal'
+            DiagTerminalUnavailable = 'Нет доступного файла состояния Windows Terminal для захвата вкладок.'
+            DiagTerminalCapturing = 'Захват вкладок терминала из сохранённого макета: {0}.'
+            DiagTerminalSavedLayout = 'Windows Terminal сохраняет макеты при закрытии окна. После сбоя вкладок на диске может не оказаться; захватываются только вкладки из последнего сохранённого макета.'
+            DiagTerminalPreferenceUnset = 'Вкладки терминала не захватываются: firstWindowPreference не задан (по умолчанию defaultProfile). Установите persistedWindowLayout для сохранения макетов.'
+            DiagTerminalPreferenceOther = 'Вкладки терминала не захватываются: firstWindowPreference — "{0}". Установите persistedWindowLayout для сохранения макетов.'
+            DiagEstimatedStorage = 'Оценка места для хранения истории'
+            DiagEstimatedStorageDetail = 'Грубая оценка файлов снимков: {0} для ожидаемых {1} сохраняемых снимков, в среднем по {2}. Это не полный расчёт места на диске.'
+        }
+        zh = @{
+            DiagTerminalCapture = 'Windows Terminal 捕获'
+            DiagTerminalUnavailable = '没有可用于捕获标签页的 Windows Terminal 状态文件。'
+            DiagTerminalCapturing = '正在从已保存的布局捕获 {0} 个终端标签页。'
+            DiagTerminalSavedLayout = 'Windows Terminal 在窗口关闭时保存布局。崩溃后磁盘上可能没有标签页；只能捕获上次保存的布局中的标签页。'
+            DiagTerminalPreferenceUnset = '未捕获终端标签页：firstWindowPreference 未设置（默认为 defaultProfile）。请设为 persistedWindowLayout 以保存布局。'
+            DiagTerminalPreferenceOther = '未捕获终端标签页：firstWindowPreference 为“{0}”。请设为 persistedWindowLayout 以保存布局。'
+            DiagEstimatedStorage = '预计保留存储空间'
+            DiagEstimatedStorageDetail = '快照文件粗略估算：预计保留 {1} 个快照，共 {0}，平均每个 {2}。这不是完整的磁盘空间预算。'
+        }
+        tr = @{
+            DiagTerminalCapture = 'Windows Terminal yakalama'
+            DiagTerminalUnavailable = 'Sekmeleri yakalamak için kullanılabilir Windows Terminal durum dosyası yok.'
+            DiagTerminalCapturing = 'Kaydedilmiş düzenden {0} terminal sekmesi yakalanıyor.'
+            DiagTerminalSavedLayout = 'Windows Terminal, pencere kapatıldığında düzenleri kaydeder. Çökme sonrasında diskte sekme kalmayabilir; yalnızca son kaydedilen düzendeki sekmeler yakalanabilir.'
+            DiagTerminalPreferenceUnset = 'Terminal sekmeleri yakalanmıyor: firstWindowPreference ayarlanmamış (varsayılan: defaultProfile). Düzenleri kaydetmek için persistedWindowLayout olarak ayarlayın.'
+            DiagTerminalPreferenceOther = 'Terminal sekmeleri yakalanmıyor: firstWindowPreference "{0}". Düzenleri kaydetmek için persistedWindowLayout olarak ayarlayın.'
+            DiagEstimatedStorage = 'Tahmini saklama alanı'
+            DiagEstimatedStorageDetail = 'Kaba anlık görüntü dosyası tahmini: saklanması öngörülen {1} anlık görüntü için {0}, her biri ortalama {2}. Tam disk alanı bütçesi değildir.'
+        }
+    }
+    foreach ($diagnosticsLang in @($diagnosticsExtra.Keys)) {
+        if ($null -eq $overlays[$diagnosticsLang]) { $overlays[$diagnosticsLang] = @{} }
+        foreach ($diagnosticsKey in @($diagnosticsExtra[$diagnosticsLang].Keys)) {
+            $overlays[$diagnosticsLang][$diagnosticsKey] = $diagnosticsExtra[$diagnosticsLang][$diagnosticsKey]
         }
     }
 
