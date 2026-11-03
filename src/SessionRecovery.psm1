@@ -1772,9 +1772,9 @@ function ConvertTo-SRTerminalArgument {
     #
     # wt splits sub-commands on ';' and documents exactly one escape, \';'
     # (AppCommandlineArgs.cpp: the delimiter regex is '(^;|[^\\];)').
-    # That is the whole escape grammar, so this must NOT double backslashes:
-    # doing so turns every Windows path into C:\\Users\\..., which wt
-    # then fails to resolve. Only ';' is escaped.
+    # Preserve interior backslashes in Windows paths. Only the trailing run
+    # is doubled for Windows command-line quoting, so it cannot escape the
+    # closing quote and swallow the following title or tab arguments.
     #
     # Embedded double quotes are stripped rather than escaped: wt has no
     # documented quote escape, and an unbalanced quote would swallow the
@@ -1784,6 +1784,7 @@ function ConvertTo-SRTerminalArgument {
     if ([string]::IsNullOrEmpty($Value)) { return '""' }
     $clean = $Value.Replace('"', '')
     $clean = $clean.Replace(';', '\;')
+    $clean = [regex]::Replace($clean, '\\+$', '$0$0')
     return ('"{0}"' -f $clean)
 }
 
@@ -7231,7 +7232,22 @@ function Invoke-SRRestore {
                     $tabList = @(@($workspace.folders) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
                         ForEach-Object { [pscustomobject]@{ title = ''; profile = ''; cwd = [string]$_ } })
                 }
-                foreach ($tab in $tabList) { if ($null -ne $tab) { $allTabs.Add($tab) } }
+                foreach ($tab in $tabList) {
+                    if ($null -eq $tab) { continue }
+                    # A stale folder must not prevent the profile/title from
+                    # reopening. Validate here, not in the pure builder, and
+                    # copy the tab so the captured snapshot stays unchanged.
+                    $restoreTab = [pscustomobject]@{
+                        profile = [string]$tab.profile
+                        title   = [string]$tab.title
+                        cwd     = [string]$tab.cwd
+                    }
+                    if (-not [string]::IsNullOrWhiteSpace($restoreTab.cwd) -and
+                        -not (Test-Path -LiteralPath $restoreTab.cwd -PathType Container)) {
+                        $restoreTab.cwd = ''
+                    }
+                    $allTabs.Add($restoreTab)
+                }
             }
 
             $chunkLimit = 20
@@ -8580,18 +8596,22 @@ function Get-SRTerminalCaptureStatus {
         TabsInState     = 0
         PreferenceValue = ''
         Reason          = ''
+        ReasonKey       = ''
+        ReasonArg       = $null
     }
 
     $candidates = @(
         (Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState'),
         (Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe\LocalState'),
-        (Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminalCanary_8wekyb3d8bbwe\LocalState')
+        (Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminalCanary_8wekyb3d8bbwe\LocalState'),
+        (Join-Path $env:LOCALAPPDATA 'Microsoft\Windows Terminal\LocalState')
     )
     $stateDir = $null
     foreach ($dir in $candidates) {
         if (Test-Path -LiteralPath (Join-Path $dir 'state.json')) { $stateDir = $dir; break }
     }
     if ($null -eq $stateDir) {
+        $result.ReasonKey = 'DiagTerminalUnavailable'
         $result.Reason = 'Windows Terminal is not installed, so it has no tabs to capture.'
         return $result
     }
@@ -8616,6 +8636,8 @@ function Get-SRTerminalCaptureStatus {
             $tabs = @($terminal[0].tabs)
             if ($tabs.Count -gt 0) {
                 $result.TabsInState = $tabs.Count
+                $result.ReasonKey = 'DiagTerminalCapturing'
+                $result.ReasonArg = $tabs.Count
                 $result.Reason = ('Capturing {0} terminal tab(s) from the saved layout.' -f $tabs.Count)
                 return $result
             }
@@ -8623,10 +8645,14 @@ function Get-SRTerminalCaptureStatus {
     } catch { }
 
     if ($result.PreferenceValue -eq 'persistedWindowLayout') {
+        $result.ReasonKey = 'DiagTerminalSavedLayout'
         $result.Reason = 'Windows Terminal writes window layouts when a window closes, so a crash leaves no tabs on disk. Tabs still present at the last clean close are captured.'
     } elseif ([string]::IsNullOrWhiteSpace($result.PreferenceValue)) {
+        $result.ReasonKey = 'DiagTerminalPreferenceUnset'
         $result.Reason = 'Terminal tabs are not captured: Windows Terminal saves window layouts only when firstWindowPreference is persistedWindowLayout, and it is unset (defaults to defaultProfile).'
     } else {
+        $result.ReasonKey = 'DiagTerminalPreferenceOther'
+        $result.ReasonArg = $result.PreferenceValue
         $result.Reason = ('Terminal tabs are not captured: firstWindowPreference is "{0}". Set it to persistedWindowLayout to save window layouts.' -f $result.PreferenceValue)
     }
     return $result

@@ -300,7 +300,7 @@ Use the Studio **Settings** page, or edit `%LOCALAPPDATA%\SessionRecovery\config
 
 ## 🩺 Diagnostics
 
-Open **Studio → Diagnostics** or **Start Menu → Run Diagnostics** for snapshot freshness, background mode, browsers and recent errors. For a script-friendly report:
+Open **Studio → Diagnostics** or **Start Menu → Run Diagnostics** for snapshot freshness, background mode, browsers, Windows Terminal capture status and recent errors. Studio also shows a rough snapshot-file storage estimate for the projected retention count, based on average snapshot size—not a full disk budget. Terminal capture uses the last saved layout, not live tabs; its status explains when the `firstWindowPreference` setting prevents layout capture. For a script-friendly report:
 
 ```powershell
 $d = "$env:LOCALAPPDATA\SessionRecovery\app\Diagnostics.ps1"

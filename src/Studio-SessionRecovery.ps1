@@ -4516,6 +4516,26 @@ function Render-StudioDiagnostics {
         } else {
             Add-StudioDiagnosticRow -Ok $false -Text (T 'CheckStorageNone' 'Snapshot folder is missing') -Detail ([string]$diag.SnapshotDirectory)
         }
+        $terminalDetail = ''
+        if ($null -ne $diag.TerminalCapture) {
+            $terminal = $diag.TerminalCapture
+            $terminalDetail = [string]$terminal.Reason
+            $reasonKey = [string]$terminal.ReasonKey
+            if (-not [string]::IsNullOrWhiteSpace($reasonKey) -and $script:L.ContainsKey($reasonKey)) {
+                $template = [string]$script:L[$reasonKey]
+                if (-not [string]::IsNullOrWhiteSpace($template)) {
+                    $terminalDetail = $template -f [string]$terminal.ReasonArg
+                }
+            }
+            $terminalOk = (-not [bool]$terminal.Supported -or [int]$terminal.TabsInState -gt 0 -or [string]$terminal.PreferenceValue -eq 'persistedWindowLayout')
+            Add-StudioDiagnosticRow -Ok $terminalOk -Text (T 'DiagTerminalCapture' 'Windows Terminal capture') -Detail $terminalDetail
+        }
+        $estimatedStorageDetail = ''
+        if ($null -ne $diag.EstimatedStorage) {
+            $estimate = $diag.EstimatedStorage
+            $estimatedStorageDetail = (T 'DiagEstimatedStorageDetail' 'Rough snapshot-file estimate: {0} for {1} projected retained snapshot(s), averaging {2} each. Not a full disk budget.') -f (Format-StudioBytes -Bytes ([int64]$estimate.TotalBytes)), [int64]$estimate.TotalCount, (Format-StudioBytes -Bytes ([int64]$estimate.AverageBytes))
+            Add-StudioDiagnosticRow -Ok $true -Text (T 'DiagEstimatedStorage' 'Estimated retention storage') -Detail $estimatedStorageDetail
+        }
         if (-not [string]::IsNullOrWhiteSpace([string]$diag.ShutdownReason) -or -not [string]::IsNullOrWhiteSpace([string]$diag.ShutdownReasonKey)) {
             $ok = ([string]$diag.ShutdownKind -ne 'crash')
             $shutdownInfo = [pscustomobject]@{
@@ -4560,6 +4580,8 @@ function Render-StudioDiagnostics {
             'Schedule mode: ' + $diag.ScheduleMode,
             'Scheduled tasks: ' + ((@($diag.ScheduledTasks) | ForEach-Object { '{0} ({1})' -f $_.Name, $_.State }) -join ', '),
             'Browsers: ' + (($browsers | ForEach-Object { $_.Name }) -join ', '),
+            ((T 'DiagTerminalCapture' 'Windows Terminal capture') + ': ' + $terminalDetail),
+            ((T 'DiagEstimatedStorage' 'Estimated retention storage') + ': ' + $estimatedStorageDetail),
             'Log: ' + $diag.LogPath
         ) -join "`r`n"
         Update-StudioInsights
