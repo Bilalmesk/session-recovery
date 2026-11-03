@@ -13,7 +13,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string]$Version = '3.0.6',
+    [string]$Version = '3.0.7',
     [switch]$NoRestore
 )
 
@@ -75,8 +75,25 @@ Session Recovery {0}
 Reopen the apps, File Explorer folders and browser tabs that were open before
 a crash, power cut or unexpected restart.
 
-What's new in 3.0.6
+What's new in 3.0.7
 -------------------
+- VLC playback positions recover from drift. VLC 3.x exposes no live
+  position, so the estimate between snapshots could walk past the end of
+  the file and pin itself there. A position VLC writes when you stop or
+  close it now replaces the estimate in either direction, so the capture
+  self-corrects at the next natural break instead of staying stuck.
+- Paused players no longer drift. The estimate treated wall-clock time as
+  playback time, so VLC paused overnight ended up parked at the end of the
+  file. The player's CPU use between snapshots now freezes the position
+  while it is paused.
+- Duplicate tabs are reopened once. The snapshot keeps every copy of a tab
+  on purpose, but a crash restore no longer puts three copies of the same
+  page back on screen; one copy per URL, window groups intact. Turn it off
+  with the new deduplicateTabs setting.
+- Version 3.0.7.
+
+Also in 3.0.6
+-------------
 - Event-driven snapshots: while the tray is running, opening, closing or
   renaming a top-level window, locking or unlocking Windows, resuming from
   sleep and low-battery transitions can trigger a capture instead of waiting
