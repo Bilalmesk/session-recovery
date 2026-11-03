@@ -6,18 +6,21 @@ BeforeAll {
     $script:pvRoot = Split-Path $PSScriptRoot -Parent
     Import-Module (Join-Path $script:pvRoot 'src\SessionRecovery.psm1') -Force
 
-    function Import-PVFunction {
-        param([string]$File, [string]$Name)
+    . (Join-Path $script:pvRoot 'src\Strings.ps1')
+    # Dot-sourced at BeforeAll scope (not inside a helper) so the functions stay visible to the tests.
+    $pvTargets = @(
+        @{ File = 'src\Tray-SessionRecovery.ps1'; Name = 'Get-SRTrayPausedNoticeText' },
+        @{ File = 'src\Studio-SessionRecovery.ps1'; Name = 'Get-StudioPauseDetail' },
+        @{ File = 'src\Restore-Session.ps1'; Name = 'Get-RSPausedNote' }
+    )
+    foreach ($target in $pvTargets) {
         $tokens = $null; $errors = $null
-        $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $script:pvRoot $File), [ref]$tokens, [ref]$errors)
-        $function = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $Name }, $true)
-        if ($null -eq $function) { throw "Function $Name not found in $File" }
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $script:pvRoot $target.File), [ref]$tokens, [ref]$errors)
+        $pvName = $target.Name
+        $function = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $pvName }, $true)
+        if ($null -eq $function) { throw "Function $pvName not found in $($target.File)" }
         . ([scriptblock]::Create($function.Extent.Text))
     }
-    # Defined in the test scope on purpose: these are the app-script helpers.
-    Import-PVFunction 'src\Tray-SessionRecovery.ps1' 'Get-SRTrayPausedNoticeText'
-    Import-PVFunction 'src\Studio-SessionRecovery.ps1' 'Get-StudioPauseDetail'
-    Import-PVFunction 'src\Restore-Session.ps1' 'Get-RSPausedNote'
     function T { param($Key, $Default) return $Default }
     function Format-StudioDate { param($Date, $Format) return ([datetime]$Date).ToString($Format, [System.Globalization.CultureInfo]::InvariantCulture) }
 }
