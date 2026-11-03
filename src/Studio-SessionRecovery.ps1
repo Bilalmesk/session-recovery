@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
     Studio-SessionRecovery.ps1
     Session Recovery 2.2 control center.
