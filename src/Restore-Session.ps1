@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
     Restore-Session.ps1
     Shows the restore prompt after an unexpected shutdown, or restores a
