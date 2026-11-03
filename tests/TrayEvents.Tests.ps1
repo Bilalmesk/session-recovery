@@ -419,3 +419,62 @@ Export-ModuleMember -Function Save-SRSnapshot
         $script:snapshotJob | Should -BeNullOrEmpty
     }
 }
+
+Describe 'Native window filter and event classification' {
+    BeforeAll {
+        $script:wsVisible = 0x10000000; $script:wsChild = 0x40000000; $script:exTool = 0x80
+        $script:filter = [SessionRecovery.TrayWindowEvents]
+    }
+    It 'accepts a visible, unowned, titled top-level window' {
+        $script:filter::IsRelevantWindow($script:wsVisible, 0, $false, 'Notes', 'Notepad') | Should -BeTrue
+    }
+    It 'rejects invisible windows' {
+        $script:filter::IsRelevantWindow(0, 0, $false, 'Notes', 'Notepad') | Should -BeFalse
+    }
+    It 'rejects child windows' {
+        $script:filter::IsRelevantWindow(($script:wsVisible -bor $script:wsChild), 0, $false, 'Notes', 'Notepad') | Should -BeFalse
+    }
+    It 'rejects tool windows' {
+        $script:filter::IsRelevantWindow($script:wsVisible, $script:exTool, $false, 'Palette', 'Notepad') | Should -BeFalse
+    }
+    It 'rejects owned windows' {
+        $script:filter::IsRelevantWindow($script:wsVisible, 0, $true, 'Dialog', 'Notepad') | Should -BeFalse
+    }
+    It 'rejects blank titles' {
+        $script:filter::IsRelevantWindow($script:wsVisible, 0, $false, '', 'Notepad') | Should -BeFalse
+        $script:filter::IsRelevantWindow($script:wsVisible, 0, $false, '   ', 'Notepad') | Should -BeFalse
+        $script:filter::IsRelevantWindow($script:wsVisible, 0, $false, $null, 'Notepad') | Should -BeFalse
+    }
+    It 'rejects shell and system classes regardless of case' {
+        foreach ($class in 'Shell_TrayWnd','progman','WorkerW','tooltips_class32','#32768') {
+            $script:filter::IsRelevantWindow($script:wsVisible, 0, $false, 'Title', $class) | Should -BeFalse -Because $class
+        }
+    }
+    It 'ignores every event on a window that is not top level and unknown' {
+        foreach ($kind in 0x8001,0x8002,0x8003,0x800C) {
+            $script:filter::ClassifyEvent($kind, $false, $false) | Should -Be 0 -Because ('0x{0:X}' -f $kind)
+        }
+    }
+    It 'treats show, hide and destroy on a relevant window as structural' {
+        foreach ($kind in 0x8001,0x8002,0x8003) {
+            $script:filter::ClassifyEvent($kind, $true, $false) | Should -Be 1
+            $script:filter::ClassifyEvent($kind, $true, $true) | Should -Be 1
+        }
+    }
+    It 'treats a destroy of a known handle as structural even if it no longer passes the filter' {
+        $script:filter::ClassifyEvent(0x8001, $false, $true) | Should -Be 1
+    }
+    It 'treats the first title on a not-yet-known relevant window as structural' {
+        $script:filter::ClassifyEvent(0x800C, $true, $false) | Should -Be 1
+    }
+    It 'treats later title changes on a known window as title-only' {
+        $script:filter::ClassifyEvent(0x800C, $true, $true) | Should -Be 2
+    }
+    It 'ignores title changes on windows that are not relevant' {
+        $script:filter::ClassifyEvent(0x800C, $false, $false) | Should -Be 0
+        $script:filter::ClassifyEvent(0x800C, $false, $true) | Should -Be 0
+    }
+    It 'ignores unrelated event kinds' {
+        $script:filter::ClassifyEvent(0x9999, $true, $true) | Should -Be 0
+    }
+}

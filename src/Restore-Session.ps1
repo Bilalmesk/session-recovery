@@ -570,6 +570,13 @@ if ($DryRun) {
     Write-Output ('Captured: {0} ({1})' -f $entry.CapturedAt.ToString('g'), (Format-RSAge -CapturedAt $entry.CapturedAt))
     Write-Output ('Contents: {0} app(s), {1} folder(s), {2} browser(s), {3} tab(s)' -f $stats.Apps, $stats.Folders, $stats.Browsers, $stats.Tabs)
     Write-Output ('Tab mode: {0}' -f $TabMode)
+    try {
+        $dryRunPause = Get-SRSnapshotPause
+        if ($dryRunPause.Paused) {
+            $pausedSince = if ($null -ne $dryRunPause.PausedAt) { $dryRunPause.PausedAt.ToString('g') } else { 'an unknown time' }
+            Write-Output ('Snapshots paused: since {0}; the newest snapshot may be older than the crash' -f $pausedSince)
+        }
+    } catch { }
     $unsavedApps = @($planAll.apps | Where-Object {
         $p = $_.PSObject.Properties['unsavedWindows']
         ($null -ne $p) -and ([int]$p.Value -gt 0)
@@ -1558,6 +1565,16 @@ function Update-RSSelectAllState {
     try { $selectAll.Checked = $all } finally { $script:rsUpdating = $false }
 }
 
+function Get-RSPausedNote {
+    # Short footer note while snapshots are paused: the newest snapshot may be
+    # older than the crash. Empty when snapshots are running.
+    $pause = $null
+    try { $pause = Get-SRSnapshotPause } catch { return '' }
+    if ($null -eq $pause -or -not [bool]$pause.Paused) { return '' }
+    if ($null -eq $pause.PausedAt) { return (T 'RstPausedShortUnknown' 'Snapshots are paused') }
+    return ((T 'RstPausedShort' 'Snapshots paused since {0}') -f ([datetime]$pause.PausedAt).ToString('MMM d, HH:mm'))
+}
+
 function Update-RSSelection {
     param([int]$Index)
     if ($Index -lt 0 -or $Index -ge $script:rsSnapshotEntries.Count) { return }
@@ -1593,6 +1610,15 @@ function Update-RSSelection {
                 $unsavedNote = ((T 'RstUnsavedShort' '{0} with unsaved work') -f $unsavedCount)
                 if ($null -eq $script:rsFooterPreview) { $script:rsFooterPreview = $unsavedNote }
                 else { $script:rsFooterPreview = ($script:rsFooterPreview + '  ·  ' + $unsavedNote) }
+            }
+        } catch { }
+        # A paused tray stops every automatic snapshot, so the newest snapshot
+        # may be older than the crash. Say so before the user commits.
+        try {
+            $pausedNote = Get-RSPausedNote
+            if (-not [string]::IsNullOrWhiteSpace($pausedNote)) {
+                if ($null -eq $script:rsFooterPreview) { $script:rsFooterPreview = $pausedNote }
+                else { $script:rsFooterPreview = ($script:rsFooterPreview + '  ·  ' + $pausedNote) }
             }
         } catch { }
         Update-RSFooterStatus
