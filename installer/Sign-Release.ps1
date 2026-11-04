@@ -90,5 +90,18 @@ foreach ($file in $files) {
     }
 }
 
+# Signing rewrites the files in place, so any .sha256 written by the build
+# now describes bytes that no longer exist. The in-app updater and winget
+# verify downloads against these sidecars - recompute them or the release
+# would fail its own verification.
+foreach ($file in $files) {
+    $hashPath = $file.FullName + '.sha256'
+    if (Test-Path -LiteralPath $hashPath) {
+        $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+        Set-Content -LiteralPath $hashPath -Value ("{0}  {1}" -f $hash, $file.Name) -Encoding ASCII
+        Write-Output ("Refreshed hash: {0}" -f (Split-Path -Leaf $hashPath))
+    }
+}
+
 Write-Output ('Signed {0} file(s).' -f $files.Count)
 exit 0

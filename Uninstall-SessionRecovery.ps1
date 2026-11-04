@@ -61,8 +61,12 @@ try {
     $backgroundProcesses = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object {
         $_.CommandLine -and ($_.CommandLine -match '(?i)Watch-Session\.ps1|Tray-SessionRecovery\.ps1')
     })
+    # Every mode of the native host holds the exe and its folder open, not
+    # just the tray: a restore prompt can sit open for hours and a scheduled
+    # snapshot runs every few minutes, so killing --tray only left the files
+    # locked and the whole app folder behind.
     $backgroundProcesses += @(Get-CimInstance Win32_Process -Filter "Name='SessionRecovery.exe'" -ErrorAction SilentlyContinue | Where-Object {
-        $_.CommandLine -and ($_.CommandLine -match '(?i)--tray')
+        $_.CommandLine -and ($_.CommandLine -match '(?i)--tray|--snapshot|--restore|--hibernate|--diagnostics|--studio')
     })
     foreach ($process in $backgroundProcesses) {
         try {
@@ -80,6 +84,9 @@ foreach ($name in $taskNames) {
     try {
         $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
         if ($task) {
+            # A running instance re-creates nothing, but it can hold the exe
+            # and folder open; stop it before unregistering and deleting.
+            try { Stop-ScheduledTask -TaskName $name -ErrorAction Stop } catch { }
             Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction Stop
             Write-Host ("  Removed scheduled task: {0}" -f $name)
         }

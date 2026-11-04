@@ -94,11 +94,32 @@ $productCode = Get-MsiProperty -Database $database -Name 'ProductCode'
 $productVersion = Get-MsiProperty -Database $database -Name 'ProductVersion'
 Write-Host ("ProductCode: {0}  Version: {1}" -f $productCode, $productVersion)
 
+# The scheduled snapshot task fires SessionRecovery.exe every few minutes.
+# An instance alive during the uninstall leaves the exe on disk, and the
+# reinstall then keeps that equal-version file instead of replacing it, so
+# the payload check below would compare against a stale binary. Stop the
+# tasks and any running app first, exactly like the real uninstaller does.
+foreach ($taskName in @('SessionRecovery-Snapshot', 'SessionRecovery-RestorePrompt')) {
+    try { Stop-ScheduledTask -TaskName $taskName -ErrorAction Stop } catch { }
+}
+Get-Process -Name 'SessionRecovery' -ErrorAction SilentlyContinue | ForEach-Object {
+    try { Stop-Process -Id $_.Id -Force -ErrorAction Stop } catch { }
+}
+
 # Remove a previous copy so this test covers a clean install too. 1605 means
 # the product was not installed, which is fine.
 $beforeExit = Invoke-MsiExec -Arguments @('/x', $productCode) -LogPath (Join-Path $OutputRoot 'uninstall-before.log')
 if ($beforeExit -notin @(0, 1605)) {
     throw "Could not remove a previous installation (exit $beforeExit)."
+}
+
+# An uninstall that raced a running app can leave orphaned program files
+# behind; Windows Installer then refuses to overwrite an equal-version file
+# and the payload check would compare against a stale binary. The app folder
+# holds only program files (user data lives one level up), so clearing it is
+# safe and makes every run a true clean install.
+if (Test-Path -LiteralPath $appDir) {
+    Remove-Item -LiteralPath $appDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 $installExit = Invoke-MsiExec -Arguments @('/i', ('"' + $MsiPath + '"')) -LogPath $installLog

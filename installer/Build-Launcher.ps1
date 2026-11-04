@@ -8,6 +8,11 @@
 [CmdletBinding()]
 param(
     [string]$OutputPath,
+    # The release version to stamp into the exe. The Studio's update check
+    # compares the installed exe's version against the latest release, so a
+    # launcher that keeps a stale hardcoded version re-offers the same
+    # update after every install.
+    [string]$Version = '',
     [switch]$Force
 )
 
@@ -46,9 +51,28 @@ if ((Test-Path -LiteralPath $OutputPath) -and -not $Force) {
     $outputTime = (Get-Item -LiteralPath $OutputPath).LastWriteTimeUtc
     $sourceTime = (Get-Item -LiteralPath $source).LastWriteTimeUtc
     $manifestTime = (Get-Item -LiteralPath $manifest).LastWriteTimeUtc
-    if ($outputTime -ge $sourceTime -and $outputTime -ge $manifestTime) {
+    $outputTimeOk = ($outputTime -ge $sourceTime -and $outputTime -ge $manifestTime)
+    $versionOk = $true
+    if (-not [string]::IsNullOrWhiteSpace($Version)) {
+        $outputVersion = (Get-Item -LiteralPath $OutputPath).VersionInfo.FileVersion
+        $versionOk = ($outputVersion -eq $Version)
+    }
+    if ($outputTimeOk -and $versionOk) {
         Write-Host ("Launcher is up to date: {0}" -f $OutputPath)
         return
+    }
+}
+
+# Stamp the requested version into a temporary copy of the source. The
+# AssemblyVersion attributes in the tracked source stay a safe fallback.
+$compileSource = $source
+if (-not [string]::IsNullOrWhiteSpace($Version)) {
+    $sourceText = Get-Content -LiteralPath $source -Raw
+    $stamped = $sourceText -replace 'AssemblyVersion\("[0-9.]+"\)', ('AssemblyVersion("{0}.0")' -f $Version)
+    $stamped = $stamped -replace 'AssemblyFileVersion\("[0-9.]+"\)', ('AssemblyFileVersion("{0}.0")' -f $Version)
+    if ($stamped -ne $sourceText) {
+        $compileSource = Join-Path $env:TEMP ('SessionRecoveryLauncher-{0}.cs' -f [guid]::NewGuid().ToString('N'))
+        Set-Content -LiteralPath $compileSource -Value $stamped -Encoding UTF8
     }
 }
 
@@ -65,13 +89,19 @@ $arguments = @(
     '/reference:System.Windows.Forms.dll',
     '/reference:System.Drawing.dll',
     ('/reference:"{0}"' -f $automation),
-    ('"{0}"' -f $source)
+    ('"{0}"' -f $compileSource)
 )
 
 Write-Host 'Building native Session Recovery host...'
-& $csc @arguments
-if ($LASTEXITCODE -ne 0) {
-    throw "Launcher build failed with exit code $LASTEXITCODE."
+try {
+    & $csc @arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Launcher build failed with exit code $LASTEXITCODE."
+    }
+} finally {
+    if ($compileSource -ne $source -and (Test-Path -LiteralPath $compileSource)) {
+        Remove-Item -LiteralPath $compileSource -Force -ErrorAction SilentlyContinue
+    }
 }
 if (-not (Test-Path -LiteralPath $OutputPath)) {
     throw "Launcher build completed but the output was not found: $OutputPath"

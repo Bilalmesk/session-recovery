@@ -4041,6 +4041,11 @@ function Reset-StudioSettings {
         $defaults.excludeApps = @($current.excludeApps)
         $defaults.excludeFolders = @($current.excludeFolders)
         $defaults.excludeUrls = @($current.excludeUrls)
+        # Pins and notes are user data that live in config.json, not settings:
+        # resetting must not delete them (and with the pins gone, retention
+        # would delete the pinned snapshots on the next cleanup).
+        $defaults.pinnedSnapshots = @($current.pinnedSnapshots)
+        $defaults.snapshotNotes = $current.snapshotNotes
         Save-SRConfig -Config $defaults
         $script:Config = Get-SRConfig
         $script:SettingsLoaded = $false

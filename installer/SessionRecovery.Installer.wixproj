@@ -1,12 +1,13 @@
 <Project Sdk="WixToolset.Sdk/5.0.2">
   <PropertyGroup>
     <OutputType>Package</OutputType>
-    <ProductVersion Condition="'$(ProductVersion)' == ''">3.0.7</ProductVersion>
+    <ProductVersion Condition="'$(ProductVersion)' == ''">3.0.8</ProductVersion>
     <OutputName>SessionRecovery-$(ProductVersion)</OutputName>
     <OutputPath>..\dist\</OutputPath>
     <DefineConstants>ProductVersion=$(ProductVersion)</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="WixToolset.UI.wixext" Version="5.0.2" />
+    <PackageReference Include="WixToolset.Util.wixext" Version="5.0.2" />
   </ItemGroup>
 </Project>

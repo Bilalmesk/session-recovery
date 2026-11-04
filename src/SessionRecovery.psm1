@@ -363,11 +363,18 @@ namespace SessionRecovery
                 int contentLength = size - 1;
                 byte command = data[pos];
                 pos += size;
-                if (command != 16 || contentLength < 12) continue;
+                if (command != 16 || contentLength < 16) continue;
                 try
                 {
-                    long micros = BitConverter.ToInt64(data, content + 4);
-                    if (micros > 0) closed.Add((long)(micros / 1000));
+                    // TabClosed layout: [tabId(4)][pad(4)][close time in
+                    // Windows-epoch microseconds at +8]. The old code read
+                    // +4 (padding, garbage) and returned Windows-epoch
+                    // milliseconds, while every caller compares against
+                    // Unix-epoch milliseconds - an 11.6 billion millisecond
+                    // skew that made the recently-closed filter match
+                    // nothing.
+                    long micros = BitConverter.ToInt64(data, content + 8);
+                    if (micros > 0) closed.Add((long)(micros / 1000) - 11644473600000L);
                 }
                 catch { }
             }
@@ -1532,8 +1539,19 @@ function Save-SRConfig {
     if (-not (Test-Path -LiteralPath $parent)) {
         New-Item -ItemType Directory -Path $parent -Force | Out-Null
     }
+    # Atomic replace: a capture running while the Studio saves must never
+    # read a half-written config and silently run on defaults.
+    $tempPath = $script:SRConfigPath + '.tmp'
     $json = $Config | ConvertTo-Json -Depth 5
-    [System.IO.File]::WriteAllText($script:SRConfigPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+    [System.IO.File]::WriteAllText($tempPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+    if (Test-Path -LiteralPath $script:SRConfigPath -PathType Leaf) {
+        $backupPath = $script:SRConfigPath + '.bak'
+        if (Test-Path -LiteralPath $backupPath) { Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue }
+        [System.IO.File]::Replace($tempPath, $script:SRConfigPath, $backupPath)
+        Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
+    } else {
+        [System.IO.File]::Move($tempPath, $script:SRConfigPath)
+    }
 }
 
 function Write-SRLog {
@@ -1551,7 +1569,9 @@ function Write-SRLog {
             Remove-Item -LiteralPath $oldPath -Force -ErrorAction SilentlyContinue
             Move-Item -LiteralPath $logPath -Destination $oldPath -Force -ErrorAction SilentlyContinue
         }
-        $line = '{0:yyyy-MM-dd HH:mm:ss.fff} [{1}] {2}' -f (Get-Date), $Level, $Message
+        # Invariant calendar and digits: a Hijri locale must not produce log
+        # lines the rest of the tooling cannot parse.
+        $line = '{0} [{1}] {2}' -f ([datetime]::Now.ToString('yyyy-MM-dd HH:mm:ss.fff', [System.Globalization.CultureInfo]::InvariantCulture)), $Level, $Message
         [System.IO.File]::AppendAllText($logPath, $line + [Environment]::NewLine, (New-Object System.Text.UTF8Encoding($false)))
     } catch {
         # Logging must never take down the snapshot or restore path.
@@ -1648,6 +1668,10 @@ function Test-SRPatternMatch {
         if ([string]::IsNullOrWhiteSpace([string]$pattern)) { continue }
         foreach ($value in @($Values)) {
             if ([string]::IsNullOrWhiteSpace([string]$value)) { continue }
+            # An exact match wins before wildcard interpretation: -like reads
+            # [ and ] as a character class, so a user excluding a real folder
+            # or URL that contains square brackets could never match it.
+            if ([string]::Equals([string]$value, [string]$pattern, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
             if ([string]$value -like [string]$pattern) { return $true }
         }
     }
@@ -1807,6 +1831,10 @@ function Start-SRDetached {
         if ($null -eq $argument) { continue }
         $clean = [string]$argument
         $clean = $clean.Replace('"', '\"')
+        # CommandLineToArgvW reads a backslash before the closing quote as an
+        # escape for the quote itself, so "C:\" arrives as C:". Double any
+        # trailing backslashes first.
+        $clean = [regex]::Replace($clean, '\\+$', '$0$0')
         '"' + $clean + '"'
     }
 
@@ -1821,6 +1849,12 @@ function Start-SRDetached {
     $info.Arguments = ($quoted -join ' ')
     $info.UseShellExecute = $true
     $info.WindowStyle = $styleValue
+    # Launch from the app's own folder, the way a Start Menu shortcut does.
+    # Without this every restored app inherits the restorer's working
+    # directory - the Session Recovery install folder - and apps hold that
+    # open for their lifetime, which blocks uninstall cleanup and breaks
+    # anything that writes next to its working directory.
+    $info.WorkingDirectory = Split-Path -Parent $FilePath
     return [System.Diagnostics.Process]::Start($info)
 }
 
@@ -1887,7 +1921,12 @@ function Start-SRApplication {
         }
     }
 
-    $windowStyle = if ($App.startMinimized) { 'Minimized' } else { 'Normal' }
+    # Snapshots can predate startMinimized; a bare read throws under
+    # StrictMode and aborts the whole restore loop mid-way.
+    $startMinimized = $false
+    $minimizedProperty = $App.PSObject.Properties['startMinimized']
+    if ($null -ne $minimizedProperty) { try { $startMinimized = [bool]$minimizedProperty.Value } catch { } }
+    $windowStyle = if ($startMinimized) { 'Minimized' } else { 'Normal' }
     try {
         # A captured media entry (playing video) replaces the plain command
         # line so the player reopens the same file at the saved position.
@@ -1904,7 +1943,7 @@ function Start-SRApplication {
             $placeProperty = $config.PSObject.Properties['restoreWindowPositions']
             if ($null -ne $placeProperty) { $placeWindows = [bool]$placeProperty.Value }
         } catch { }
-        if ($placeWindows -and -not $App.startMinimized -and $null -ne $process -and ('SessionRecovery.WindowPlacer' -as [type])) {
+        if ($placeWindows -and -not $startMinimized -and $null -ne $process -and ('SessionRecovery.WindowPlacer' -as [type])) {
             $placement = Get-SRWindowPlacement -App $App
             if ($null -ne $placement) {
                 # Translate the captured position into the current monitor
@@ -2282,6 +2321,9 @@ function Get-SRExplorerFolders {
 function Get-SRBrowserDefinitions {
     $programFiles = $env:ProgramFiles
     $programFilesX86 = ${env:ProgramFiles(x86)}
+    # 32-bit Windows has no ProgramFiles(x86); a null here made every
+    # Join-Path below throw and with it the entire snapshot capture.
+    if ([string]::IsNullOrWhiteSpace($programFilesX86)) { $programFilesX86 = $programFiles }
     $localAppData = $env:LOCALAPPDATA
     $roaming = $env:APPDATA
 
@@ -3063,13 +3105,26 @@ function Get-SRFirefoxDefaultProfiles {
             if ($current.Count -gt 0) { $sections += [pscustomobject]$current }
 
             foreach ($entry in $sections) {
-                if ($entry.Section -notmatch '^Profile\d+$') { continue }
-                if (-not $entry.Path) { continue }
-                $relative = if ($entry.IsRelative -eq '0') { $false } else { $true }
-                $path = if ($relative) { Join-Path $profileRoot $entry.Path } else { $entry.Path }
+                # profiles.ini keys are read defensively: sections can miss
+                # IsRelative or Default, and StrictMode turns a bare read on
+                # the converted hashtable entry into a throw that abandons
+                # every remaining profile.
+                $sectionProperty = $entry.PSObject.Properties['Section']
+                if ($null -eq $sectionProperty -or $sectionProperty.Value -notmatch '^Profile\d+$') { continue }
+                $pathProperty = $entry.PSObject.Properties['Path']
+                if ($null -eq $pathProperty -or [string]::IsNullOrWhiteSpace([string]$pathProperty.Value)) { continue }
+                $isRelativeProperty = $entry.PSObject.Properties['IsRelative']
+                $relative = $true
+                if ($null -ne $isRelativeProperty -and $isRelativeProperty.Value -eq '0') { $relative = $false }
+                # A relative Path is relative to the Firefox root, and real
+                # inis include the Profiles segment themselves ("Profiles/
+                # abc.default-release"). Joining onto Profiles again produced
+                # Profiles\Profiles\... and skipped every real profile.
+                $path = if ($relative) { Join-Path $Definition.userDataDir ([string]$pathProperty.Value) } else { [string]$pathProperty.Value }
                 if (Test-Path -LiteralPath $path) {
                     $all.Add($path)
-                    if ($entry.Default -eq '1') { $defaults.Add($path) }
+                    $defaultProperty = $entry.PSObject.Properties['Default']
+                    if ($null -ne $defaultProperty -and $defaultProperty.Value -eq '1') { $defaults.Add($path) }
                 }
             }
         } catch { }
@@ -3125,7 +3180,18 @@ function Get-SRFirefoxTabs {
                 foreach ($tab in @($window.tabs)) {
                     $entries = @($tab.entries)
                     if ($entries.Count -eq 0) { continue }
-                    $index = [int]$tab.index
+                    # Firefox omits "pinned" for unpinned tabs and can omit
+                    # "index"; StrictMode turns either bare read into a throw
+                    # that aborts the whole session file and with it every
+                    # Firefox tab this profile has open.
+                    $pinned = $false
+                    $pinnedProperty = $tab.PSObject.Properties['pinned']
+                    if ($null -ne $pinnedProperty) { $pinned = [bool]$pinnedProperty.Value }
+                    $index = $entries.Count
+                    $indexProperty = $tab.PSObject.Properties['index']
+                    if ($null -ne $indexProperty) {
+                        try { $index = [int]$indexProperty.Value } catch { $index = $entries.Count }
+                    }
                     if ($index -lt 1 -or $index -gt $entries.Count) { $index = $entries.Count }
                     $entry = $entries[$index - 1]
                     $url = [string]$entry.url
@@ -3133,7 +3199,7 @@ function Get-SRFirefoxTabs {
                     $tabs.Add([pscustomobject]@{
                         url      = $url
                         title    = [string]$entry.title
-                        pinned   = [bool]$tab.pinned
+                        pinned   = $pinned
                         windowId = $windowIndex
                     })
                 }
@@ -3468,15 +3534,20 @@ function Get-SRVlcRecentMedia {
         }
     }
 
-    # Heal URIs that contain a literal comma (the list separator).
+    # Heal URIs that contain a literal comma (the list separator). Each healed
+    # entry remembers the index of the times= slot it started at: list= and
+    # times= are parallel arrays, so merging two URIs must not shift every
+    # later file onto its neighbour's saved position.
     $healed = New-Object System.Collections.Generic.List[string]
-    foreach ($part in $uris) {
-        $trimmed = ([string]$part).Trim()
+    $healedIndex = New-Object System.Collections.Generic.List[int]
+    for ($part = 0; $part -lt $uris.Count; $part++) {
+        $trimmed = ([string]$uris[$part]).Trim()
         if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
         if ($healed.Count -gt 0 -and $trimmed -notmatch '^[a-z][a-z0-9+.\-]*:') {
             $healed[$healed.Count - 1] = $healed[$healed.Count - 1] + ', ' + $trimmed
         } else {
             $healed.Add($trimmed)
+            $healedIndex.Add($part)
         }
     }
 
@@ -3487,9 +3558,10 @@ function Get-SRVlcRecentMedia {
         try { $path = ([uri]$uri).LocalPath } catch { continue }
         if ([string]::IsNullOrWhiteSpace($path)) { continue }
         $result.Paths.Add($path)
-        if ($i -lt $flatTimes.Count) {
+        $timeSlot = $healedIndex[$i]
+        if ($timeSlot -lt $flatTimes.Count) {
             $ms = [long]0
-            try { $ms = [long][double]::Parse($flatTimes[$i], [System.Globalization.CultureInfo]::InvariantCulture) } catch { $ms = 0 }
+            try { $ms = [long][double]::Parse($flatTimes[$timeSlot], [System.Globalization.CultureInfo]::InvariantCulture) } catch { $ms = 0 }
             if ($ms -gt 0 -and -not $result.TimesMs.ContainsKey($path)) { $result.TimesMs[$path] = $ms }
         }
     }
@@ -3718,12 +3790,25 @@ function Get-SRMediaState {
 function Save-SRMediaState {
     param([Parameter(Mandatory = $true)]$State)
     try {
+        # Atomic replace, not an in-place write: the scheduled task and the
+        # tray both rewrite this file, and a reader that catches a torn write
+        # would silently drop every playback anchor (position, freshness,
+        # CPU baseline) back to unknown.
         $parent = Split-Path -Parent $script:SRMediaStatePath
         if (-not (Test-Path -LiteralPath $parent)) {
             New-Item -ItemType Directory -Path $parent -Force | Out-Null
         }
+        $tempPath = $script:SRMediaStatePath + '.tmp'
         $json = $State | ConvertTo-Json -Depth 6
-        [System.IO.File]::WriteAllText($script:SRMediaStatePath, $json, (New-Object System.Text.UTF8Encoding($false)))
+        [System.IO.File]::WriteAllText($tempPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+        if (Test-Path -LiteralPath $script:SRMediaStatePath -PathType Leaf) {
+            $backupPath = $script:SRMediaStatePath + '.bak'
+            if (Test-Path -LiteralPath $backupPath) { Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue }
+            [System.IO.File]::Replace($tempPath, $script:SRMediaStatePath, $backupPath)
+            Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
+        } else {
+            [System.IO.File]::Move($tempPath, $script:SRMediaStatePath)
+        }
     } catch {
         Write-SRLog -Level DEBUG -Message "Could not save media state: $($_.Exception.Message)"
     }
@@ -4112,6 +4197,15 @@ function Get-SRMediaLaunchArguments {
     if ($null -eq $Media) { return $null }
     $file = [string]$Media.file
     if ([string]::IsNullOrWhiteSpace($file) -or -not (Test-Path -LiteralPath $file)) { return $null }
+    # The media path reaches this point from the snapshot, which is user
+    # data: an imported or hand-edited snapshot must not send the restore to
+    # a network share (an outbound SMB handshake) or a removable drive. The
+    # media file gets exactly the same screen as a program path.
+    $fileCheck = Test-SRLocalFixedPath -Path $file
+    if (-not $fileCheck.Ok) {
+        Write-SRLog -Level WARN -Message ("Media file not restored: {0} ({1})" -f $file, $fileCheck.Reason)
+        return $null
+    }
 
     $leaf = [System.IO.Path]::GetFileNameWithoutExtension($ExePath).ToLowerInvariant()
     # A snapshot may hold no position at all when nothing observed one. Opening
@@ -4293,7 +4387,11 @@ function Get-SRMpvPlayback {
             $writer.AutoFlush = $true
             $writer.NewLine = "`n"
             $reader = New-Object System.IO.StreamReader($pipe)
-            [void]$reader.ReadLine() # greeting line
+            # mpv sends no greeting on connect - the only unsolicited lines
+            # are events, and a paused player emits none. A synchronous
+            # ReadLine here had no timeout, so one idle mpv could block the
+            # snapshot pipeline (which holds the save lock) indefinitely.
+            # Requests go out immediately; the reply loop below is bounded.
 
             $answers = @{}
             $requests = @(
@@ -4327,6 +4425,9 @@ function Get-SRMpvPlayback {
             try { if ($answers.ContainsKey(103) -and $null -ne $answers[103].data) { $duration = [double]$answers[103].data } } catch { }
             try { if ($answers.ContainsKey(104)) { $paused = [bool]$answers[104].data } } catch { }
             if ([string]::IsNullOrWhiteSpace($path) -and $null -eq $timePos) { continue }
+            try { $reader.Dispose() } catch { }
+            try { $writer.Dispose() } catch { }
+            try { $pipe.Dispose() } catch { }
             return [pscustomobject]@{
                 File        = $path
                 Position    = $timePos
@@ -4631,7 +4732,11 @@ function Compare-SRSnapshot {
     )
     $appNameOf = {
         param($App)
-        $n = [string]$App.displayName
+        # Older snapshots can miss displayName; StrictMode makes a bare read
+        # throw and would kill the whole comparison.
+        $n = ''
+        $displayNameProperty = $App.PSObject.Properties['displayName']
+        if ($null -ne $displayNameProperty) { $n = [string]$displayNameProperty.Value }
         if ([string]::IsNullOrWhiteSpace($n)) { $n = [string]$App.name }
         if ([string]::IsNullOrWhiteSpace($n)) { $n = [string]$App.exe }
         return $n
@@ -4644,18 +4749,32 @@ function Compare-SRSnapshot {
     $diffUrls = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     foreach ($browser in @($Reference.browsers)) {
         foreach ($profile in @($browser.profiles)) {
-            foreach ($tab in @($profile.tabs)) { if ($tab.url) { [void]$refUrls.Add([string]$tab.url) } }
+            foreach ($tab in @($profile.tabs)) {
+                $urlProperty = $tab.PSObject.Properties['url']
+                if ($null -ne $urlProperty -and $urlProperty.Value) { [void]$refUrls.Add([string]$urlProperty.Value) }
+            }
         }
     }
     foreach ($browser in @($Difference.browsers)) {
         foreach ($profile in @($browser.profiles)) {
-            foreach ($tab in @($profile.tabs)) { if ($tab.url) { [void]$diffUrls.Add([string]$tab.url) } }
+            foreach ($tab in @($profile.tabs)) {
+                $urlProperty = $tab.PSObject.Properties['url']
+                if ($null -ne $urlProperty -and $urlProperty.Value) { [void]$diffUrls.Add([string]$urlProperty.Value) }
+            }
         }
     }
     $refDev = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     $diffDev = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-    foreach ($workspace in @($Reference.devWorkspaces)) { foreach ($folder in @($workspace.folders)) { [void]$refDev.Add([string]$folder) } }
-    foreach ($workspace in @($Difference.devWorkspaces)) { foreach ($folder in @($workspace.folders)) { [void]$diffDev.Add([string]$folder) } }
+    foreach ($workspace in @($Reference.devWorkspaces)) {
+        $foldersProperty = $workspace.PSObject.Properties['folders']
+        if ($null -eq $foldersProperty) { continue }
+        foreach ($folder in @($foldersProperty.Value)) { [void]$refDev.Add([string]$folder) }
+    }
+    foreach ($workspace in @($Difference.devWorkspaces)) {
+        $foldersProperty = $workspace.PSObject.Properties['folders']
+        if ($null -eq $foldersProperty) { continue }
+        foreach ($folder in @($foldersProperty.Value)) { [void]$diffDev.Add([string]$folder) }
+    }
 
     return [pscustomobject]@{
         AppsAdded        = @($diffApps | Where-Object { $refApps -notcontains $_ })
@@ -4723,7 +4842,7 @@ function Send-SRControl {
     # named pipe. Commands: snapshot, pause, resume, status, restore-latest,
     # workspace-save <name>, workspace-restore <name>.
     param(
-        [Parameter(Mandatory = $true)][ValidateSet('snapshot', 'pause', 'resume', 'status', 'restore-latest', 'workspace-save', 'workspace-restore')][string]$Command,
+        [Parameter(Mandatory = $true)][ValidateSet('snapshot', 'pause', 'resume', 'status', 'restore-latest', 'undo-restore', 'workspace-save', 'workspace-restore', 'workspace-delete')][string]$Command,
         [string]$Name = '',
         [int]$TimeoutMilliseconds = 4000
     )
@@ -5029,6 +5148,27 @@ function Get-SRSnapshotStateHash {
             if ($null -ne $unsavedProperty) { $unsaved = [int]$unsavedProperty.Value }
         } catch { }
         $parts.Add('a:' + [string]$app.exe + ':' + @($app.windows).Count + ':' + $unsaved)
+        # Media position is part of the fingerprint, quantized to 30 seconds
+        # so a playing video keeps producing snapshots without writing one
+        # every few seconds. Without this a movie played windowed would never
+        # change the fingerprint, every snapshot during it would be skipped
+        # as unchanged, and a crash would restore the episode at wherever it
+        # was when the last window somewhere on the desktop changed.
+        try {
+            $mediaProperty = $app.PSObject.Properties['media']
+            if ($null -ne $mediaProperty -and $null -ne $mediaProperty.Value) {
+                $media = $mediaProperty.Value
+                $position = -1
+                $positionProperty = $media.PSObject.Properties['positionSeconds']
+                if ($null -ne $positionProperty -and $null -ne $positionProperty.Value) {
+                    try { $position = [int][Math]::Floor([double]$positionProperty.Value / 30) } catch { $position = -1 }
+                }
+                $known = $false
+                $knownProperty = $media.PSObject.Properties['positionKnown']
+                if ($null -ne $knownProperty) { try { $known = [bool]$knownProperty.Value } catch { } }
+                $parts.Add('p:' + [string]$media.file + ':' + $position + ':' + $known)
+            }
+        } catch { }
     }
     foreach ($folder in @($Snapshot.explorer)) { $parts.Add('f:' + [string]$folder) }
     foreach ($browser in @($Snapshot.browsers)) {
@@ -5409,9 +5549,12 @@ function Get-SRJetBrainsLauncher {
     $roots = @(
         (Join-Path $env:LOCALAPPDATA 'Programs'),
         (Join-Path $env:LOCALAPPDATA 'JetBrains\Toolbox\apps'),
-        (Join-Path $env:ProgramFiles 'JetBrains'),
-        (Join-Path ${env:ProgramFiles(x86)} 'JetBrains')
+        (Join-Path $env:ProgramFiles 'JetBrains')
     )
+    # 32-bit Windows has no ProgramFiles(x86); a null would throw Join-Path.
+    if (-not [string]::IsNullOrWhiteSpace(${env:ProgramFiles(x86)})) {
+        $roots += (Join-Path ${env:ProgramFiles(x86)} 'JetBrains')
+    }
     foreach ($root in $roots) {
         if ([string]::IsNullOrWhiteSpace([string]$root) -or -not (Test-Path -LiteralPath $root)) { continue }
         try {
@@ -6126,7 +6269,7 @@ function Invoke-SRStorageCleanup {
 
     $quarantined = 0
     if ($health.UnreadableCount -gt 0) {
-        $quarantineRoot = Join-Path (Get-SRRoot) ('quarantine\' + (Get-Date).ToString('yyyyMMdd-HHmmss'))
+        $quarantineRoot = Join-Path (Get-SRRoot) ('quarantine\' + (Get-Date).ToString('yyyyMMdd-HHmmss', [System.Globalization.CultureInfo]::InvariantCulture))
         try {
             New-Item -ItemType Directory -Path $quarantineRoot -Force | Out-Null
             foreach ($item in @($health.UnreadableSnapshots)) {
@@ -6628,12 +6771,12 @@ function Get-SRTieredRetention {
         $seenHours = New-Object 'System.Collections.Generic.HashSet[string]'
         foreach ($file in $ordered) {
             if (-not $keep.Contains([string]$file.Name)) { continue }
-            [void]$seenHours.Add($file.LastWriteTime.ToString('yyyyMMdd-HH'))
+            [void]$seenHours.Add($file.LastWriteTime.ToString('yyyyMMdd-HH', [System.Globalization.CultureInfo]::InvariantCulture))
         }
         foreach ($file in $ordered) {
             if ($keep.Contains([string]$file.Name)) { continue }
             if ($file.LastWriteTime -lt $hourlyCut) { $remaining.Add($file); continue }
-            $hourKey = $file.LastWriteTime.ToString('yyyyMMdd-HH')
+            $hourKey = $file.LastWriteTime.ToString('yyyyMMdd-HH', [System.Globalization.CultureInfo]::InvariantCulture)
             if ($seenHours.Add($hourKey)) { [void]$keep.Add([string]$file.Name) }
         }
     } else {
@@ -6645,7 +6788,7 @@ function Get-SRTieredRetention {
         $seenDays = New-Object 'System.Collections.Generic.HashSet[string]'
         foreach ($file in @($remaining.ToArray() | Sort-Object -Property LastWriteTime -Descending)) {
             if ($file.LastWriteTime -lt $dailyCut) { continue }
-            $dayKey = $file.LastWriteTime.ToString('yyyyMMdd')
+            $dayKey = $file.LastWriteTime.ToString('yyyyMMdd', [System.Globalization.CultureInfo]::InvariantCulture)
             if ($seenDays.Add($dayKey)) { [void]$keep.Add([string]$file.Name) }
         }
     }
@@ -7007,7 +7150,7 @@ function Save-SRSnapshot {
         } catch { }
         if ($captureThumbs -and -not $Shutdown) {
             try {
-                $thumbName = $captured.ToString('yyyyMMdd-HHmmss-fff')
+                $thumbName = $captured.ToString('yyyyMMdd-HHmmss-fff', [System.Globalization.CultureInfo]::InvariantCulture)
                 [void](New-SRThumbnailSet -Snapshot $snapshot -Windows @($script:SRLastWindows) -Name $thumbName)
             } catch { Write-SRLog -Level DEBUG -Message ("Thumbnails failed: {0}" -f $_.Exception.Message) }
         }
@@ -7018,7 +7161,7 @@ function Save-SRSnapshot {
             if ($null -ne $encryptProperty) { $encrypt = [bool]$encryptProperty.Value }
         } catch { }
 
-        $fileName = 'session-{0}.json{1}' -f $captured.ToString('yyyyMMdd-HHmmss-fff'), $(if ($compress -and -not $encrypt) { '.gz' } else { '' })
+        $fileName = 'session-{0}.json{1}' -f $captured.ToString('yyyyMMdd-HHmmss-fff', [System.Globalization.CultureInfo]::InvariantCulture), $(if ($compress -and -not $encrypt) { '.gz' } else { '' })
         $path = Join-Path $script:SRSnapshotDir $fileName
         $json = $snapshot | ConvertTo-Json -Depth 12
         # Payload pipeline: JSON text -> (optional gzip) -> (optional DPAPI).
@@ -7352,19 +7495,27 @@ function Get-SRBrowserProfileState {
     foreach ($entry in @($Browser.profiles)) { $profileList.Add($entry) }
     foreach ($profile in $profileList.ToArray()) {
         $current = $null
-        $restoreOnStartup = $profile.restoreOnStartup
-        if ($PreferLiveTabs -and $profile.path -and (Test-Path -LiteralPath $profile.path)) {
+        # Snapshot fields are read defensively: snapshots written by older
+        # releases can miss any of these, and StrictMode turns a bare read
+        # into an error that would abort the whole browser restore.
+        $profilePath = $null
+        $field = $profile.PSObject.Properties['path']
+        if ($null -ne $field) { $profilePath = [string]$field.Value }
+        $restoreOnStartup = $null
+        $field = $profile.PSObject.Properties['restoreOnStartup']
+        if ($null -ne $field) { try { $restoreOnStartup = [int]$field.Value } catch { $restoreOnStartup = $null } }
+        if ($PreferLiveTabs -and $profilePath -and (Test-Path -LiteralPath $profilePath)) {
             if ($Browser.kind -eq 'chromium') {
-                $current = Get-SRChromiumTabs -ProfileDirectory $profile.path
+                $current = Get-SRChromiumTabs -ProfileDirectory $profilePath
             } elseif ($Browser.kind -eq 'firefox') {
-                $current = Get-SRFirefoxTabs -ProfileDirectory $profile.path
+                $current = Get-SRFirefoxTabs -ProfileDirectory $profilePath
             }
         }
-        if ($Browser.kind -eq 'chromium' -and $profile.path -and (Test-Path -LiteralPath $profile.path)) {
-            $preference = Get-SRChromiumRestoreOnStartup -ProfileDirectory $profile.path
+        if ($Browser.kind -eq 'chromium' -and $profilePath -and (Test-Path -LiteralPath $profilePath)) {
+            $preference = Get-SRChromiumRestoreOnStartup -ProfileDirectory $profilePath
             if ($null -ne $preference) { $restoreOnStartup = $preference }
-        } elseif ($Browser.kind -eq 'firefox' -and $profile.path -and (Test-Path -LiteralPath $profile.path)) {
-            $preference = Get-SRFirefoxRestoreOnStartup -ProfileDirectory $profile.path
+        } elseif ($Browser.kind -eq 'firefox' -and $profilePath -and (Test-Path -LiteralPath $profilePath)) {
+            $preference = Get-SRFirefoxRestoreOnStartup -ProfileDirectory $profilePath
             if ($null -ne $preference) { $restoreOnStartup = $preference }
         }
 
@@ -7372,7 +7523,9 @@ function Get-SRBrowserProfileState {
         foreach ($tab in @($profile.tabs)) { $snapshotTabs.Add($tab) }
 
         $tabs = $snapshotTabs.ToArray()
-        $tabsSource = $profile.tabsSource
+        $tabsSource = $null
+        $field = $profile.PSObject.Properties['tabsSource']
+        if ($null -ne $field) { $tabsSource = [string]$field.Value }
         if ($null -ne $current) {
             $liveTabs = New-Object System.Collections.Generic.List[object]
             foreach ($tab in @($current.tabs)) { $liveTabs.Add($tab) }
@@ -7385,7 +7538,7 @@ function Get-SRBrowserProfileState {
         $profiles.Add([pscustomobject]@{
             directory        = [string]$profile.directory
             displayName      = [string]$profile.displayName
-            path             = [string]$profile.path
+            path             = [string]$profilePath
             restoreOnStartup = $restoreOnStartup
             tabs             = $tabs
             tabsSource       = $tabsSource
@@ -7682,21 +7835,42 @@ function Invoke-SRRestore {
         }
         $appKey = ([string]$app.name).ToLowerInvariant()
         if ($appWaits.ContainsKey($appKey)) {
+            # Config values are user input: a bad number must cost this app
+            # its wait, not abort the restore half way through the launch
+            # order. The wait is capped the same way appLaunchDelays is.
             $waitMinutes = 0
             $rawWait = [string]$appWaits[$appKey]
-            if ($rawWait -match '^(.+?)\s+after\s+(.+)$') { $rawWait = $Matches[1]; $waitMinutes = [int]$Matches[2] }
+            if ($rawWait -match '^(.+?)\s+after\s+(.+)$') {
+                $rawWait = $Matches[1]
+                try { $waitMinutes = [int]$Matches[2] } catch { $waitMinutes = 0 }
+            }
             $waitFor = ([string]$rawWait).Trim()
             if (-not [string]::IsNullOrWhiteSpace($waitFor) -and -not (Get-Process -Name $waitFor -ErrorAction SilentlyContinue)) {
-                $deadline = (Get-Date).AddMinutes([Math]::Max(1, $waitMinutes))
+                $deadline = (Get-Date).AddMinutes([Math]::Min(15, [Math]::Max(1, $waitMinutes)))
                 while ((Get-Date) -lt $deadline -and -not (Get-Process -Name $waitFor -ErrorAction SilentlyContinue)) {
                     Start-Sleep -Milliseconds 1500
+                    # The interactive restore window pumps its message loop
+                    # from this callback; without the pulse the window sits
+                    # frozen ("Not Responding") for the whole wait.
+                    if ($null -ne $Progress) {
+                        try { & $Progress $index $total ([string]$app.name) } catch { }
+                    }
                 }
             }
         }
         if ($appDelays.ContainsKey($appKey)) {
             $delaySeconds = 0
             try { $delaySeconds = [int]$appDelays[$appKey] } catch { }
-            if ($delaySeconds -gt 0) { Start-Sleep -Seconds ([Math]::Min(120, $delaySeconds)) }
+            if ($delaySeconds -gt 0) {
+                $remaining = [Math]::Min(120, $delaySeconds)
+                while ($remaining -gt 0) {
+                    Start-Sleep -Seconds ([Math]::Min(1, $remaining))
+                    $remaining--
+                    if ($null -ne $Progress) {
+                        try { & $Progress $index $total ([string]$app.name) } catch { }
+                    }
+                }
+            }
         }
         $appResult = Start-SRApplication -App $app -Force:$Force -SnapshotMonitors $Plan.monitors
         $appResult | Add-Member -NotePropertyName Target -NotePropertyValue ([string]$app.name) -Force
@@ -7819,9 +7993,11 @@ function Invoke-SRRestore {
             } else {
                 $launcherCandidates = @(
                     (Join-Path $env:LOCALAPPDATA 'Programs\Microsoft VS Code\bin\code.cmd'),
-                    (Join-Path $env:ProgramFiles 'Microsoft VS Code\bin\code.cmd'),
-                    (Join-Path ${env:ProgramFiles(x86)} 'Microsoft VS Code\bin\code.cmd')
+                    (Join-Path $env:ProgramFiles 'Microsoft VS Code\bin\code.cmd')
                 )
+                if (-not [string]::IsNullOrWhiteSpace(${env:ProgramFiles(x86)})) {
+                    $launcherCandidates += (Join-Path ${env:ProgramFiles(x86)} 'Microsoft VS Code\bin\code.cmd')
+                }
             }
             foreach ($candidate in $launcherCandidates) {
                 if (Test-Path -LiteralPath $candidate) { $launcher = $candidate; break }
@@ -8127,9 +8303,9 @@ function Import-SRSnapshotFile {
     if ($leaf -notlike 'session-*') { $leaf = '' }
     $targetName = $leaf
     if ([string]::IsNullOrWhiteSpace($targetName) -or (Test-Path -LiteralPath (Join-Path $script:SRSnapshotDir $targetName))) {
-        $targetName = 'session-imported-{0}.json' -f (Get-Date).ToString('yyyyMMdd-HHmmss-fff')
+        $targetName = 'session-imported-{0}.json' -f (Get-Date).ToString('yyyyMMdd-HHmmss-fff', [System.Globalization.CultureInfo]::InvariantCulture)
         while (Test-Path -LiteralPath (Join-Path $script:SRSnapshotDir $targetName)) {
-            $targetName = 'session-imported-{0}.json' -f (Get-Date).ToString('yyyyMMdd-HHmmss-fff')
+            $targetName = 'session-imported-{0}.json' -f (Get-Date).ToString('yyyyMMdd-HHmmss-fff', [System.Globalization.CultureInfo]::InvariantCulture)
         }
     }
     $targetPath = Join-Path $script:SRSnapshotDir $targetName
@@ -9039,12 +9215,31 @@ function Start-SRUpdateInstall {
     if (-not (Test-Path -LiteralPath $MsiPath -PathType Leaf)) {
         throw "Update package not found: $MsiPath"
     }
+    # Every instance of the app that Windows Installer might find in use has
+    # to be gone before msiexec starts. The tray alone used to be stopped,
+    # but a restore prompt or a snapshot from the scheduled task holds the
+    # exe just as firmly, and the passive upgrade would then stall or demand
+    # a restart instead of finishing cleanly.
     try {
-        $trayProcesses = @(Get-CimInstance Win32_Process -Filter "Name='SessionRecovery.exe'" -ErrorAction SilentlyContinue | Where-Object {
-            $_.CommandLine -and $_.CommandLine -match '(?i)--tray'
-        })
-        foreach ($process in $trayProcesses) {
+        @('SessionRecovery-Snapshot', 'SessionRecovery-RestorePrompt') | ForEach-Object {
+            try { Stop-ScheduledTask -TaskName $_ -ErrorAction Stop } catch { }
+        }
+    } catch { }
+    try {
+        $appProcesses = @(Get-CimInstance Win32_Process -Filter "Name='SessionRecovery.exe'" -ErrorAction SilentlyContinue)
+        foreach ($process in $appProcesses) {
             try { Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction Stop } catch { }
+        }
+    } catch { }
+    # Older downloads are never revisited; without this the updates folder
+    # grows by one MSI per release forever.
+    try {
+        $updatesRoot = Join-Path (Get-SRRoot) 'updates'
+        if (Test-Path -LiteralPath $updatesRoot) {
+            foreach ($stale in @(Get-ChildItem -LiteralPath $updatesRoot -Directory -ErrorAction SilentlyContinue)) {
+                if ($MsiPath.StartsWith($stale.FullName, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+                Remove-Item -LiteralPath $stale.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            }
         }
     } catch { }
     $arguments = '/i "' + $MsiPath.Replace('"', '""') + '" /passive /norestart REBOOT=ReallySuppress'

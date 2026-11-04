@@ -13,7 +13,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string]$Version = '3.0.7',
+    [string]$Version = '3.0.8',
     [switch]$NoRestore
 )
 
@@ -40,9 +40,16 @@ $launcherBuilder = Join-Path $PSScriptRoot 'Build-Launcher.ps1'
 if (-not (Test-Path -LiteralPath $launcherBuilder)) {
     throw "Launcher build script not found: $launcherBuilder"
 }
-& $launcherBuilder -Force
+& $launcherBuilder -Force -Version $Version
 if ($LASTEXITCODE -ne 0) {
     throw "Launcher build failed with exit code $LASTEXITCODE."
+}
+# The Studio's update check compares the installed exe's version against the
+# latest release. Catch a stale launcher here rather than shipping a release
+# that re-offers itself forever.
+$launcherVersion = (Get-Item -LiteralPath (Join-Path $dist 'SessionRecovery.exe')).VersionInfo.FileVersion
+if ($launcherVersion -notlike "$Version*") {
+    throw ("Launcher FileVersion {0} does not match the release version {1}." -f $launcherVersion, $Version)
 }
 
 $buildArgs = @(
@@ -51,6 +58,12 @@ $buildArgs = @(
     ('-p:ProductVersion={0}' -f $Version)
 )
 if ($NoRestore) { $buildArgs += '--no-restore' }
+
+# WiX's incremental bind cache has been observed serving a stale payload
+# file (a launcher rebuilt seconds before the MSI build) because the .wxs
+# inputs were unchanged. A clean bind removes that class of stale release.
+$objPath = Join-Path $PSScriptRoot 'obj'
+if (Test-Path -LiteralPath $objPath) { Remove-Item -LiteralPath $objPath -Recurse -Force -ErrorAction SilentlyContinue }
 
 Write-Host ("Building Session Recovery {0} MSI..." -f $Version)
 & dotnet @buildArgs
@@ -75,8 +88,41 @@ Session Recovery {0}
 Reopen the apps, File Explorer folders and browser tabs that were open before
 a crash, power cut or unexpected restart.
 
-What's new in 3.0.7
+What's new in 3.0.8
 -------------------
+- Firefox tabs are captured again. Firefox omits the "pinned" flag for
+  unpinned tabs, and one strict-mode read of it aborted the whole session
+  file, so no Firefox tab ever reached a snapshot. A regression test with
+  a real-format session fixture now guards this.
+- Chromium closed-tab records decode at the right offset and epoch, so a
+  crash restore again reopens the tabs you closed seconds before it.
+- Firefox profiles resolve from profiles.ini correctly (the path doubling
+  sent discovery to a folder that does not exist) and 32-bit Windows can
+  capture at all again.
+- Playing a video keeps producing snapshots: the change fingerprint now
+  includes the media position, so a crash mid-episode restores close to
+  where you were instead of wherever the desktop last visibly changed.
+- Restored apps start in their own folder instead of inheriting the
+  Session Recovery install folder, which they held open and blocked
+  uninstall cleanup.
+- Pausing during playback freezes the position, one idle mpv can no
+  longer wedge the snapshot pipeline, VLC recents containing a comma in
+  the file name no longer shift every saved position, and snapshot file
+  names stay Gregorian and ASCII on Arabic and other non-English locales.
+- Restores no longer abort half-way on older snapshots (missing optional
+  fields now degrade instead of throwing), a PuTTY/RDP-only restore is no
+  longer refused with "Nothing is selected", the restore window stays
+  responsive while launch waits run, and RTL layouts toggle the checkbox
+  you actually see.
+- Media files are screened like program files at restore (no network or
+  removable paths), update installs stop every running instance first and
+  prune old downloads, Reset settings no longer deletes snapshot pins and
+  notes, reinstalling no longer reverts tuned settings, and the signed
+  release hash file matches the signed bytes.
+- Version 3.0.8.
+
+Also in 3.0.7
+-------------
 - VLC playback positions recover from drift. VLC 3.x exposes no live
   position, so the estimate between snapshots could walk past the end of
   the file and pin itself there. A position VLC writes when you stop or

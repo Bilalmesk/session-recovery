@@ -385,12 +385,29 @@ function Populate-RSList {
             if ([string]::IsNullOrWhiteSpace($name)) { $name = Split-Path -Leaf ([string]$app.exe) }
             $mediaProperty = $app.PSObject.Properties['media']
             if ($null -ne $mediaProperty -and $null -ne $mediaProperty.Value) {
-                $media = $mediaProperty.Value
-                $mediaTitle = Split-Path -Leaf ([string]$media.file)
-                $clock = Format-RSMediaClock -Seconds ([double]$media.positionSeconds)
-                $details = ('Playing {0} at {1}' -f $mediaTitle, $clock)
-                Add-RSListItem -List $List -Kind 'app' -Name $name -Details $details -Value $app -IconPath ([string]$app.exe)
-                continue
+                # Imported or hand-edited snapshots can carry a media block
+                # with no usable file; degrade to the plain app row instead
+                # of aborting the whole restore window.
+                try {
+                    $media = $mediaProperty.Value
+                    $mediaTitle = 'media'
+                    $fileProperty = $media.PSObject.Properties['file']
+                    if ($null -ne $fileProperty -and -not [string]::IsNullOrWhiteSpace([string]$fileProperty.Value)) {
+                        $mediaTitle = Split-Path -Leaf ([string]$fileProperty.Value)
+                    }
+                    $clock = ''
+                    $positionProperty = $media.PSObject.Properties['positionSeconds']
+                    if ($null -ne $positionProperty -and $null -ne $positionProperty.Value) {
+                        $clock = Format-RSMediaClock -Seconds ([double]$positionProperty.Value)
+                    }
+                    if ([string]::IsNullOrEmpty($clock)) {
+                        $details = ('Playing {0}' -f $mediaTitle)
+                    } else {
+                        $details = ('Playing {0} at {1}' -f $mediaTitle, $clock)
+                    }
+                    Add-RSListItem -List $List -Kind 'app' -Name $name -Details $details -Value $app -IconPath ([string]$app.exe)
+                    continue
+                } catch { }
             }
             $titles = @($app.windows | ForEach-Object { [string]$_.title } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
             $details = 'Application'
@@ -1412,7 +1429,17 @@ $list.Add_MouseDown({
     $item = $sender.GetItemAt($e.X, $e.Y)
     if ($null -eq $item -or $null -eq $item.Tag) { return }
     $bounds = $item.GetBounds([System.Windows.Forms.ItemBoundsPortion]::Entire)
-    if ($e.X -ge ($bounds.Left + 4) -and $e.X -le ($bounds.Left + 28)) {
+    # The checkbox is drawn at the left edge, or at the right edge of the
+    # first column in RTL layouts; the hit-test has to follow the drawing or
+    # users click the visible checkbox and nothing happens.
+    $hitStart = $bounds.Left + 4
+    $hitEnd = $bounds.Left + 28
+    if ($script:rsRtl) {
+        $firstWidth = if ($sender.Columns.Count -gt 0) { $sender.Columns[0].Width } else { 0 }
+        $hitStart = $bounds.Left + $firstWidth - 28
+        $hitEnd = $bounds.Left + $firstWidth - 4
+    }
+    if ($e.X -ge $hitStart -and $e.X -le $hitEnd) {
         $checkedProperty = $item.Tag.PSObject.Properties['Checked']
         if ($null -eq $checkedProperty) { return }
         $item.Tag.Checked = -not [bool]$checkedProperty.Value
@@ -1683,7 +1710,10 @@ $restoreButton.Add_Click({
     }
 
     if ($selectedApps.Count -eq 0 -and $selectedFolders.Count -eq 0 -and
-        $selectedBrowsers.Count -eq 0 -and $mode -eq 'None') {
+        $selectedBrowsers.Count -eq 0 -and $selectedRemote.Count -eq 0 -and $mode -eq 'None') {
+        # Remote sessions restore regardless of the browser tab mode, so they
+        # count as a selection here; without this a PuTTY/RDP-only restore
+        # was refused with "Nothing is selected."
         [void][System.Windows.Forms.MessageBox]::Show((T 'RstNothingSelected' 'Nothing is selected.'), 'Session Recovery', 'OK', 'Information')
         return
     }

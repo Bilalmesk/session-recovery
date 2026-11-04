@@ -15,8 +15,8 @@ using WinFormsTimer = System.Windows.Forms.Timer;
 [assembly: AssemblyDescription("Session Recovery desktop host")]
 [assembly: AssemblyProduct("Session Recovery")]
 [assembly: AssemblyCompany("Bilalmesk")]
-[assembly: AssemblyVersion("3.0.7.0")]
-[assembly: AssemblyFileVersion("3.0.7.0")]
+[assembly: AssemblyVersion("3.0.8.0")]
+[assembly: AssemblyFileVersion("3.0.8.0")]
 
 namespace SessionRecoveryLauncher
 {
@@ -338,9 +338,22 @@ namespace SessionRecoveryLauncher
             {
                 using (NotifyIcon icon = new NotifyIcon())
                 {
+                    // ExtractAssociatedIcon returns an HICON that nothing else
+                    // frees, and assigning it to the NotifyIcon does not
+                    // transfer ownership - one handle leaked per toast. The
+                    // icon owns its handle, so clone it for the NotifyIcon and
+                    // dispose the original (its Dispose destroys the HICON).
                     Icon appIcon = null;
                     try { appIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
-                    icon.Icon = appIcon ?? SystemIcons.Application;
+                    if (appIcon != null)
+                    {
+                        try { icon.Icon = (Icon)appIcon.Clone(); }
+                        finally { appIcon.Dispose(); }
+                    }
+                    else
+                    {
+                        icon.Icon = SystemIcons.Application;
+                    }
                     icon.Text = AppName;
                     icon.Visible = true;
                     icon.BalloonTipTitle = AppName;

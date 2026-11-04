@@ -862,6 +862,15 @@ function Invoke-SRTrayEventPoll {
 }
 
 function Invoke-SRTrayHibernate {
+    # The confirmation dialog pumps messages, so the snapshot timer can start
+    # an automatic capture while it is up. Do not ask for confirmation when a
+    # capture is already running, and after the dialog give such a capture a
+    # moment to finish instead of silently dropping an explicitly confirmed
+    # hibernate.
+    if ($script:snapshotBusy) {
+        Show-SRTrayBalloon -Text (T 'TrayBalloonBusy' 'A snapshot is already in progress.') -Icon Information
+        return
+    }
     $answer = [System.Windows.Forms.MessageBox]::Show(
         (T 'HibernateConfirmText' 'Session Recovery will save and pin a recovery snapshot, then hibernate this PC. Unsaved work can still be lost if an app cannot reopen it. Continue?'),
         (T 'HibernateConfirmTitle' 'Hibernate with checkpoint'),
@@ -872,7 +881,16 @@ function Invoke-SRTrayHibernate {
 
     try {
         Show-SRTrayBalloon -Text (T 'TrayHibernateSaving' 'Saving a recovery checkpoint, then hibernating...') -Icon Information
-        if (-not (Start-SRTrayCapture -Operation Hibernate)) {
+        $started = Start-SRTrayCapture -Operation Hibernate
+        if (-not $started) {
+            $waited = [datetime]::Now.AddSeconds(90)
+            while ($script:snapshotBusy -and [datetime]::Now -lt $waited) {
+                Start-Sleep -Milliseconds 400
+                [void][System.Windows.Forms.Application]::DoEvents()
+            }
+            $started = Start-SRTrayCapture -Operation Hibernate
+        }
+        if (-not $started) {
             Show-SRTrayBalloon -Text (T 'TrayBalloonBusy' 'A snapshot is already in progress.') -Icon Information
         }
     } catch {
@@ -1026,7 +1044,11 @@ try {
     }
     if (-not $haveTrayMutex) { exit 0 }
 } catch {
+    # The mutex exists to guarantee one full tray. If it cannot even be
+    # created, starting a second full tray is exactly the failure it guards
+    # against, so degrade to monitor-only like the snapshot mutex does.
     $script:trayMutex = $null
+    if (-not $MonitorOnly) { $MonitorOnly = $true }
 }
 
 $script:intervalMinutes = Get-SRTrayIntervalMinutes
@@ -1252,7 +1274,17 @@ $exitItem = New-Object System.Windows.Forms.ToolStripMenuItem((T 'TrayExit' 'Exi
     Update-SRTraySettings
     Update-SRTrayStatus
     try {
-        $checkpoint = Get-SRRestoreCheckpoint
+        # When no checkpoint marker exists, Get-SRRestoreCheckpoint parses up
+        # to 30 snapshot files on this UI thread - a multi-second stall on
+        # every menu open for users who never restored. Re-probe that case
+        # at most every 90 seconds; a marker read stays immediate.
+        $checkpoint = $null
+        $now = Get-Date
+        if ($null -eq $script:trayNoCheckpointUntil -or $now -ge $script:trayNoCheckpointUntil) {
+            $checkpoint = Get-SRRestoreCheckpoint
+            if ($null -eq $checkpoint) { $script:trayNoCheckpointUntil = $now.AddSeconds(90) }
+            else { $script:trayNoCheckpointUntil = $null }
+        }
         $script:undoMenuItem.Enabled = ($null -ne $checkpoint)
         if ($null -ne $checkpoint) {
             $when = ''
@@ -1415,7 +1447,12 @@ namespace SessionRecovery.Tray
                     {
                         using (StreamReader reader = new StreamReader(pipe, Encoding.UTF8, false, 4096, true))
                         {
-                            line = reader.ReadLine();
+                            // A client that connects and never sends must not
+                            // park the only server thread - and with a single
+                            // pipe instance, the whole control API - forever.
+                            // Drop silent connections after 10 seconds.
+                            var readTask = System.Threading.Tasks.Task.Factory.StartNew(reader.ReadLine);
+                            if (readTask.Wait(10000)) { line = readTask.Result; }
                         }
                         if (!string.IsNullOrWhiteSpace(line))
                         {

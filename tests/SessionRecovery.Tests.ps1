@@ -411,6 +411,81 @@ Describe 'Test-SRPatternMatch' {
     It 'returns false when nothing matches' {
         Test-SRPatternMatch -Patterns @('steam.exe') -Values @('vlc.exe') | Should -BeFalse
     }
+
+    It 'matches a literal value containing wildcard metacharacters' {
+        # -like reads [ ] as a character class, so an exclusion rule naming a
+        # real folder like "OneDrive [Old]" could never match its own target.
+        Test-SRPatternMatch -Patterns @('C:\Users\me\OneDrive [Old]\Budget') -Values @('C:\Users\me\OneDrive [Old]\Budget') | Should -BeTrue
+        Test-SRPatternMatch -Patterns @('OneDrive [Old]') -Values @('OneDrive XOld') | Should -BeFalse -Because 'a bracketed rule is no longer a character class'
+    }
+}
+
+Describe 'Firefox session capture' {
+    # Regression: Firefox omits "pinned" for unpinned tabs, and StrictMode
+    # turned that bare read into a throw that abandoned the whole session
+    # file - Firefox tabs were never captured on any machine. The fixture is
+    # a real-format mozLz4 container built from literal-only lz4 blocks.
+    It 'captures unpinned tabs whose session record omits "pinned"' {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes('{"windows":[{"tabs":[{"index":1,"entries":[{"url":"https://example.com/firefox-one","title":"One"}]},{"index":1,"entries":[{"url":"https://example.com/firefox-two","title":"Two"}],"pinned":true}]}]}')
+        $stream = New-Object System.IO.MemoryStream
+        $header = [System.Text.Encoding]::ASCII.GetBytes('mozLz40' + [char]0)
+        $stream.Write($header, 0, 8)
+        $stream.Write([System.BitConverter]::GetBytes([uint32]$bytes.Length), 0, 4)
+        $offset = 0
+        while ($offset -lt $bytes.Length) {
+            $literals = [Math]::Min(255, $bytes.Length - $offset)
+            if ($literals -ge 15) {
+                $stream.WriteByte(0xF0)
+                $stream.WriteByte([byte]($literals - 15))
+            } else {
+                $stream.WriteByte([byte]($literals -shl 4))
+            }
+            $stream.Write($bytes, $offset, $literals)
+            $offset += $literals
+        }
+        $profile = Join-Path $TestDrive 'ff-profile'
+        $backupDir = Join-Path $profile 'sessionstore-backups'
+        New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+        [System.IO.File]::WriteAllBytes((Join-Path $backupDir 'recovery.jsonlz4'), $stream.ToArray())
+        $result = Get-SRFirefoxTabs -ProfileDirectory $profile
+        @($result.tabs).Count | Should -Be 2
+        @($result.tabs)[0].pinned | Should -BeFalse -Because 'Firefox omits the key for unpinned tabs'
+        @($result.tabs)[1].pinned | Should -BeTrue
+    }
+
+    It 'still reports no tabs for an unparsable session file' {
+        $profile = Join-Path $TestDrive 'ff-broken'
+        $backupDir = Join-Path $profile 'sessionstore-backups'
+        New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+        [System.IO.File]::WriteAllBytes((Join-Path $backupDir 'recovery.jsonlz4'), [byte[]]@(1, 2, 3))
+        $result = Get-SRFirefoxTabs -ProfileDirectory $profile
+        @($result.tabs).Count | Should -Be 0
+    }
+}
+
+Describe 'Chromium closed-tab timestamps' {
+    # Regression: the TabClosed record stores Windows-epoch microseconds at
+    # content+8; the parser read the padding at +4 and left the result in
+    # the Windows epoch, so the recently-closed filter never matched.
+    It 'decodes TabClosed records as Unix-epoch milliseconds at the correct offset' {
+        $nowUnixMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+        $nowWindowsMicros = ($nowUnixMs + 11644473600000) * 1000
+        $stream = New-Object System.IO.MemoryStream
+        $snssHeader = [System.Text.Encoding]::ASCII.GetBytes('SNSS')
+        $stream.Write($snssHeader, 0, 4)
+        $stream.Write((New-Object byte[] 4), 0, 4)
+        $content = New-Object byte[] 16
+        [System.BitConverter]::GetBytes([int]7).CopyTo($content, 0)
+        [System.BitConverter]::GetBytes([int64]$nowWindowsMicros).CopyTo($content, 8)
+        $record = New-Object byte[] (3 + $content.Length)
+        [System.BitConverter]::GetBytes([uint16]($content.Length + 1)).CopyTo($record, 0)
+        $record[2] = 16
+        [Array]::Copy($content, 0, $record, 3, $content.Length)
+        $stream.Write($record, 0, $record.Length)
+        $closed = @([SessionRecovery.SessionFileReader]::ReadClosedTabTimes($stream.ToArray()))
+        $closed.Count | Should -Be 1
+        [Math]::Abs($closed[0] - $nowUnixMs) | Should -BeLessThan 60000
+    }
 }
 
 # ---------------------------------------------------------------------------

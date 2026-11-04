@@ -220,11 +220,14 @@ try {
     Import-Module $modulePath -Force -ErrorAction Stop
 
     $config = Get-SRConfig
-    $config.snapshotIntervalMinutes = [Math]::Max(1, $IntervalMinutes)
-    $config.keepSnapshots = [Math]::Max(1, $KeepSnapshots)
-    $config.keepSnapshotDays = [Math]::Max(0, $KeepSnapshotDays)
-    $config.promptOnLogon = $PromptOnLogon
-    $config.defaultTabMode = $DefaultTabMode
+    # Re-running the installer is a normal repair. Only a setting the caller
+    # actually passed changes the config; parameter defaults must never
+    # silently revert settings the user tuned in the Studio.
+    if ($PSBoundParameters.ContainsKey('IntervalMinutes')) { $config.snapshotIntervalMinutes = [Math]::Max(1, $IntervalMinutes) }
+    if ($PSBoundParameters.ContainsKey('KeepSnapshots')) { $config.keepSnapshots = [Math]::Max(1, $KeepSnapshots) }
+    if ($PSBoundParameters.ContainsKey('KeepSnapshotDays')) { $config.keepSnapshotDays = [Math]::Max(0, $KeepSnapshotDays) }
+    if ($PSBoundParameters.ContainsKey('PromptOnLogon')) { $config.promptOnLogon = $PromptOnLogon }
+    if ($PSBoundParameters.ContainsKey('DefaultTabMode')) { $config.defaultTabMode = $DefaultTabMode }
     Save-SRConfig -Config $config
     Write-Step "Wrote configuration to $(Get-SRConfigPath)."
 
