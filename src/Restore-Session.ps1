@@ -738,7 +738,7 @@ $script:FontTitle = New-Object System.Drawing.Font('Segoe UI Semibold', 19)
 $script:FontMono = New-Object System.Drawing.Font('Consolas', 8.25)
 $script:FontMonoSmall = New-Object System.Drawing.Font('Consolas', 7.5)
 
-$script:AppVersion = '3.0.7'
+$script:AppVersion = '3.0.8'
 $hostCandidates = @()
 if ($env:SESSIONRECOVERY_HOST_EXE) { $hostCandidates += $env:SESSIONRECOVERY_HOST_EXE }
 $hostCandidates += (Join-Path $PSScriptRoot 'SessionRecovery.exe')
