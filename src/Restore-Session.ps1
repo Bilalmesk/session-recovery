@@ -706,6 +706,7 @@ if (-not ('SessionRecovery.Studio.StudioCard' -as [type])) {
     Add-Type -Path $controlsPath -ReferencedAssemblies 'System.Windows.Forms', 'System.Drawing'
 }
 . (Join-Path $PSScriptRoot 'StudioTheme.ps1')
+[void](Set-StudioWindowDpiUnaware)
 
 if (-not ('SRRestoreThemeNative' -as [type])) {
     Add-Type -TypeDefinition @'
