@@ -119,6 +119,7 @@ if ($script:HostExe) {
 }
 
 . (Join-Path $PSScriptRoot 'StudioTheme.ps1')
+[void](Set-StudioWindowDpiUnaware)
 
 $studioTheme = 'Aurora'
 try {

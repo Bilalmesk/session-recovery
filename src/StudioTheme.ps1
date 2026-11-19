@@ -6,6 +6,30 @@
     labels can fall back to English when a translation is missing.
 #>
 
+# The Studio and the restore window are laid out in fixed 96-DPI pixel
+# coordinates. The launcher is per-monitor DPI aware, so at 150% scaling and up
+# fonts grew while positions and sizes stayed put and the UI came out garbled
+# (issue #5: 4K at 250%). Running the window's own thread DPI-unaware lets
+# Windows scale the finished window as one piece, so the layout stays intact.
+# Set SESSIONRECOVERY_DPI=aware to opt out. Call before creating any form.
+function Set-StudioWindowDpiUnaware {
+    if ([string]$env:SESSIONRECOVERY_DPI -eq 'aware') { return $false }
+    try {
+        if (-not ('SessionRecovery.Native.DpiContext' -as [type])) {
+            Add-Type -Namespace SessionRecovery.Native -Name DpiContext -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern System.IntPtr SetThreadDpiAwarenessContext(System.IntPtr dpiContext);
+'@
+        }
+        # DPI_AWARENESS_CONTEXT_UNAWARE is -1. Returns NULL when unsupported
+        # (before Windows 10 1607), in which case the window keeps its default.
+        $previous = [SessionRecovery.Native.DpiContext]::SetThreadDpiAwarenessContext([System.IntPtr]::new(-1))
+        return ($previous -ne [System.IntPtr]::Zero)
+    } catch {
+        return $false
+    }
+}
+
 $script:StudioThemeCatalog = $null
 function Get-StudioThemeCatalog {
     if ($null -ne $script:StudioThemeCatalog) { return $script:StudioThemeCatalog }
