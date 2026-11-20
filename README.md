@@ -6,7 +6,7 @@
 
 ![Windows 10/11](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?logo=windows&logoColor=white)
 ![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-5391FE?logo=powershell&logoColor=white)
-![Version](https://img.shields.io/badge/version-3.0.8-8B5CF6)
+![Version](https://img.shields.io/badge/version-3.0.9-8B5CF6)
 ![Local only](https://img.shields.io/badge/privacy-100%25%20local-22C55E)
 
 [Install](#-install) · [Restore](#-restore) · [Configure](#%EF%B8%8F-configure) · [Troubleshoot](#-troubleshooting) · [Uninstall](#-uninstall)
@@ -408,6 +408,7 @@ Get-ScheduledTask -TaskName 'SessionRecovery-*' -ErrorAction SilentlyContinue | 
 | Tabs missing or wrong | Use **Captured** mode; Chromium session files can lag, and fallback tabs are marked approximate |
 | Extra blank browser window | A quirk of some Chromium builds: close it |
 | Apps start twice | Leave **Force** off and untick apps Windows already starts at logon |
+| Garbled UI on a high-DPI display | Update to 3.0.9 or later; the Studio and restore window render their 96-DPI layout as one piece and let Windows scale it |
 | Uninstall leaves files | Sign out and back in, delete `%LOCALAPPDATA%\SessionRecovery`, run the uninstaller elevated if tasks remain |
 
 <details>

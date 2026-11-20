@@ -13,7 +13,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string]$Version = '3.0.8',
+    [string]$Version = '3.0.9',
     [switch]$NoRestore
 )
 
@@ -88,8 +88,18 @@ Session Recovery {0}
 Reopen the apps, File Explorer folders and browser tabs that were open before
 a crash, power cut or unexpected restart.
 
-What's new in 3.0.8
+What's new in 3.0.9
 -------------------
+- The Studio and restore window no longer come out garbled on high-DPI
+  displays. They render their fixed 96-DPI layout as one piece and let
+  Windows scale it, so on a 4K monitor at 250% text stays inside its
+  controls and the sidebar, cards and buttons stay aligned.
+- The custom Studio controls compile cleanly again; an unfinished
+  DPI-scaling edit had left them referring to a missing helper.
+- Version 3.0.9.
+
+Also in 3.0.8
+-------------
 - Firefox tabs are captured again. Firefox omits the "pinned" flag for
   unpinned tabs, and one strict-mode read of it aborted the whole session
   file, so no Firefox tab ever reached a snapshot. A regression test with

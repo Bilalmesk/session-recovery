@@ -27,4 +27,17 @@ Describe 'High-DPI window layout' {
         . (Join-Path $script:srcRoot 'StudioTheme.ps1')
         (Set-StudioWindowDpiUnaware) | Should -BeOfType [bool]
     }
+    It 'the custom Studio controls compile' {
+        # StudioControls.cs is compiled at runtime by the Studio and restore
+        # window. Compile it in a child process so a broken edit fails here
+        # instead of only when someone opens the app.
+        $controls = (Join-Path $script:srcRoot 'StudioControls.cs').Replace("'", "''")
+        $probe = Join-Path $TestDrive 'compile-studio-controls.ps1'
+        @"
+`$ErrorActionPreference = 'Stop'
+Add-Type -Path '$controls' -ReferencedAssemblies 'System.Windows.Forms', 'System.Drawing'
+"@ | Set-Content -LiteralPath $probe -Encoding ASCII
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $probe
+        $LASTEXITCODE | Should -Be 0
+    }
 }
