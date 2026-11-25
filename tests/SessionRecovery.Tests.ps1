@@ -468,6 +468,9 @@ Describe 'Chromium closed-tab timestamps' {
     # content+8; the parser read the padding at +4 and left the result in
     # the Windows epoch, so the recently-closed filter never matched.
     It 'decodes TabClosed records as Unix-epoch milliseconds at the correct offset' {
+        # The native session parser is lazy now so Studio startup does not pay
+        # for compiling it; direct type access opts in explicitly.
+        Initialize-SRNativeSessionHelpers
         $nowUnixMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
         $nowWindowsMicros = ($nowUnixMs + 11644473600000) * 1000
         $stream = New-Object System.IO.MemoryStream
@@ -550,6 +553,17 @@ Describe 'Compare-SRSnapshot' {
         $diff.AppsAdded | Should -BeNullOrEmpty
         $diff.AppsRemoved | Should -BeNullOrEmpty
         $diff.TabsAdded | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Running process lookup' {
+    It 'finds the current PowerShell process without scanning every path' {
+        $path = (Get-Process -Id $PID).Path
+        Test-SRExeRunning -ExePath $path | Should -BeTrue
+    }
+
+    It 'returns false for a missing executable' {
+        Test-SRExeRunning -ExePath 'Z:\missing\never-running.exe' | Should -BeFalse
     }
 }
 
@@ -764,6 +778,69 @@ Describe 'Snapshot state hash' {
         Get-SRSnapshotStateHash -Snapshot $base | Should -Not -Be (Get-SRSnapshotStateHash -Snapshot $changed)
     }
 
+    It 'changes when only a restored window moves, resizes or maximizes' {
+        $base = [pscustomobject]@{
+            apps          = @([pscustomobject]@{
+                exe            = 'a.exe'
+                windows        = @()
+                startMinimized = $false
+                restore        = [pscustomobject]@{ x = 10; y = 20; width = 800; height = 600; maximized = $false }
+            })
+            explorer      = @()
+            browsers      = @()
+            devWorkspaces = @()
+        }
+        $moved = [pscustomobject]@{
+            apps          = @([pscustomobject]@{
+                exe            = 'a.exe'
+                windows        = @()
+                startMinimized = $false
+                restore        = [pscustomobject]@{ x = 200; y = 20; width = 800; height = 600; maximized = $false }
+            })
+            explorer      = @()
+            browsers      = @()
+            devWorkspaces = @()
+        }
+        $resized = [pscustomobject]@{
+            apps          = @([pscustomobject]@{
+                exe            = 'a.exe'
+                windows        = @()
+                startMinimized = $false
+                restore        = [pscustomobject]@{ x = 10; y = 20; width = 1200; height = 600; maximized = $false }
+            })
+            explorer      = @()
+            browsers      = @()
+            devWorkspaces = @()
+        }
+        $maximized = [pscustomobject]@{
+            apps          = @([pscustomobject]@{
+                exe            = 'a.exe'
+                windows        = @()
+                startMinimized = $false
+                restore        = [pscustomobject]@{ x = 10; y = 20; width = 800; height = 600; maximized = $true }
+            })
+            explorer      = @()
+            browsers      = @()
+            devWorkspaces = @()
+        }
+        $minimized = [pscustomobject]@{
+            apps          = @([pscustomobject]@{
+                exe            = 'a.exe'
+                windows        = @()
+                startMinimized = $true
+                restore        = [pscustomobject]@{ x = 10; y = 20; width = 800; height = 600; maximized = $false }
+            })
+            explorer      = @()
+            browsers      = @()
+            devWorkspaces = @()
+        }
+        $before = Get-SRSnapshotStateHash -Snapshot $base
+        $before | Should -Not -Be (Get-SRSnapshotStateHash -Snapshot $moved)
+        $before | Should -Not -Be (Get-SRSnapshotStateHash -Snapshot $resized)
+        $before | Should -Not -Be (Get-SRSnapshotStateHash -Snapshot $maximized)
+        $before | Should -Not -Be (Get-SRSnapshotStateHash -Snapshot $minimized)
+    }
+
     It 'changes when only the monitor layout changes' {
         $apps = @([pscustomobject]@{ exe = 'a.exe'; windows = @() })
         $single = [pscustomobject]@{
@@ -784,6 +861,36 @@ Describe 'Snapshot state hash' {
             )
         }
         Get-SRSnapshotStateHash -Snapshot $single | Should -Not -Be (Get-SRSnapshotStateHash -Snapshot $docked)
+    }
+}
+
+Describe 'Snapshot ordering' {
+    BeforeEach {
+        $script:orderingDir = Get-SRSnapshotDirectory
+        if (-not (Test-Path -LiteralPath $script:orderingDir)) { New-Item -ItemType Directory -Path $script:orderingDir -Force | Out-Null }
+        @(Get-ChildItem -LiteralPath $script:orderingDir -Filter 'session-*' -File -ErrorAction SilentlyContinue) | Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+
+    AfterEach {
+        @(Get-ChildItem -LiteralPath $script:orderingDir -Filter 'session-*' -File -ErrorAction SilentlyContinue) | Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'orders by capturedAt instead of the file write time' {
+        $older = Join-Path $script:orderingDir 'session-ordering-older.json'
+        $newer = Join-Path $script:orderingDir 'session-ordering-newer.json'
+        $olderJson = '{"capturedAt":"2026-11-20T10:00:00+00:00","apps":[],"explorer":[],"browsers":[]}'
+        $newerJson = '{"capturedAt":"2026-11-21T10:00:00+00:00","apps":[],"explorer":[],"browsers":[]}'
+        [System.IO.File]::WriteAllText($older, $olderJson, (New-Object System.Text.UTF8Encoding($false)))
+        [System.IO.File]::WriteAllText($newer, $newerJson, (New-Object System.Text.UTF8Encoding($false)))
+
+        # Simulate an import: the older capture has the newest file timestamp.
+        (Get-Item -LiteralPath $older).LastWriteTime = (Get-Date)
+        (Get-Item -LiteralPath $newer).LastWriteTime = (Get-Date).AddHours(-1)
+
+        $entries = @(Get-SRSnapshots)
+        $entries.Count | Should -Be 2
+        $entries[0].Path | Should -Be $newer
+        $entries[1].Path | Should -Be $older
     }
 }
 
@@ -1325,6 +1432,32 @@ Describe 'Install manifest and uninstaller safety' {
 # ---------------------------------------------------------------------------
 
 Describe 'Update supply chain' {
+    It 'rejects a release asset name that escapes the update folder' {
+        $payload = [pscustomobject]@{
+            Version        = '9.9.9'
+            MsiName        = '..\evil.msi'
+            ShaName        = 'SessionRecovery-9.9.9.msi.sha256'
+            MsiDownloadUrl = 'https://github.com/example/repo/releases/download/v9.9.9/evil.msi'
+            ShaDownloadUrl = 'https://github.com/example/repo/releases/download/v9.9.9/SessionRecovery-9.9.9.msi.sha256'
+        } | ConvertTo-Json -Compress
+        $result = Save-SRUpdate -UpdateJson $payload
+        $result.Ok | Should -BeFalse
+        $result.Error | Should -Match 'safe file name'
+    }
+
+    It 'rejects an unexpected MSI asset name' {
+        $payload = [pscustomobject]@{
+            Version        = '9.9.9'
+            MsiName        = 'payload.exe'
+            ShaName        = 'SessionRecovery-9.9.9.msi.sha256'
+            MsiDownloadUrl = 'https://github.com/example/repo/releases/download/v9.9.9/payload.exe'
+            ShaDownloadUrl = 'https://github.com/example/repo/releases/download/v9.9.9/SessionRecovery-9.9.9.msi.sha256'
+        } | ConvertTo-Json -Compress
+        $result = Save-SRUpdate -UpdateJson $payload
+        $result.Ok | Should -BeFalse
+        $result.Error | Should -Match 'MSI asset name'
+    }
+
     It 'does not read or send GitHub tokens' {
         $text = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\SessionRecovery.psm1') -Raw
         $text | Should -Not -Match 'Get-SRGitHubToken'
@@ -1557,7 +1690,9 @@ Describe '2.7 recovery features' {
             $result.NoteCount | Should -Be 1
             $result.ExclusionCount | Should -Be 3
             $result.EncryptedCount | Should -Be 0
+            $result.Protected | Should -BeFalse
             $result.Bytes | Should -BeGreaterThan 0
+            (Test-SRRecoveryKitEncrypted -Path $kit) | Should -BeFalse
 
             $archive = [System.IO.Compression.ZipFile]::OpenRead($kit)
             try {
@@ -1605,6 +1740,40 @@ Describe '2.7 recovery features' {
             @($config.excludeUrls) | Should -Contain '*bank*'
             Get-SRSnapshotNote -Path (Join-Path $dir 'session-20261003-090000-000.json') | Should -Be 'Carry me'
             @(Get-ChildItem -LiteralPath $dir -Filter 'session-*' -File).Count | Should -Be 1
+        }
+
+        It 'round-trips a password-protected kit and rejects a wrong password' {
+            [void](New-TestSnapshotFile -Name 'session-20261004-090000-000.json' -CapturedAt ([datetime]::ParseExact('2026-10-04T09:00:00', 'yyyy-MM-ddTHH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)))
+            $kit = Join-Path $env:SR_TEST_HOME ('kit-' + [guid]::NewGuid().ToString('N') + '.srkit')
+            $exported = Export-SRRecoveryKit -Destination $kit -AppVersion '3.1.0' -Password 'correct-horse-battery'
+            $exported.Protected | Should -BeTrue
+            (Test-SRRecoveryKitEncrypted -Path $kit) | Should -BeTrue
+
+            { Import-SRRecoveryKit -Path $kit } | Should -Throw '*password*'
+            { Import-SRRecoveryKit -Path $kit -Password 'wrong-password' } | Should -Throw '*wrong*'
+
+            $dir = Get-SRSnapshotDirectory
+            @(Get-ChildItem -LiteralPath $dir -Filter 'session-*' -File) | Remove-Item -Force
+            $imported = Import-SRRecoveryKit -Path $kit -Password 'correct-horse-battery'
+            $imported.Imported | Should -Be 1
+            $imported.ContainerEncrypted | Should -BeTrue
+        }
+
+        It 'rejects a tampered password-protected kit before importing' {
+            [void](New-TestSnapshotFile -Name 'session-20261005-090000-000.json' -CapturedAt ([datetime]::ParseExact('2026-10-05T09:00:00', 'yyyy-MM-ddTHH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)))
+            $kit = Join-Path $env:SR_TEST_HOME ('kit-' + [guid]::NewGuid().ToString('N') + '.srkit')
+            [void](Export-SRRecoveryKit -Destination $kit -Password 'correct-horse-battery')
+            $bytes = [System.IO.File]::ReadAllBytes($kit)
+            $bytes[60] = $bytes[60] -bxor 0xFF
+            [System.IO.File]::WriteAllBytes($kit, $bytes)
+
+            { Import-SRRecoveryKit -Path $kit -Password 'correct-horse-battery' } | Should -Throw '*wrong*'
+        }
+
+        It 'rejects a short export password before creating the kit' {
+            $kit = Join-Path $env:SR_TEST_HOME ('kit-' + [guid]::NewGuid().ToString('N') + '.srkit')
+            { Export-SRRecoveryKit -Destination $kit -Password 'short' } | Should -Throw '*8*'
+            Test-Path -LiteralPath $kit | Should -BeFalse
         }
 
         It 'rejects a kit whose entry paths escape the archive' {
@@ -2220,6 +2389,30 @@ Describe 'Retention wiring' {
         (Test-Path -LiteralPath $configPath) | Should -Be $hadConfig
         if ($hadConfig) { (Get-Content -LiteralPath $configPath -Raw) | Should -BeExactly $backupConfig }
         (Get-SRSnapshotDirectory) | Should -Be $previousDir
+    }
+
+    It 'keeps the snapshot when retention fails after the save' {
+        $dir = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $previousDir = Get-SRSnapshotDirectory
+        try {
+            Set-SRTestSnapshotDirectory -Path $dir
+            Save-SRConfig -Config (Get-SRDefaultConfig)
+            Mock New-SRSnapshot -ModuleName SessionRecovery {
+                [pscustomobject]@{
+                    capturedAt = [DateTimeOffset]::Now.ToString('o')
+                    apps = @(); explorer = @(); browsers = @(); devWorkspaces = @()
+                    stats = [pscustomobject]@{ apps = 0; folders = 0; browsers = 0; tabs = 0 }
+                }
+            }
+            Mock Invoke-SRRetention -ModuleName SessionRecovery { throw 'retention boom' }
+
+            $path = Save-SRSnapshot -Force
+            $path | Should -Not -BeNullOrEmpty
+            Test-Path -LiteralPath $path | Should -BeTrue
+        } finally {
+            Set-SRTestSnapshotDirectory -Path $previousDir
+        }
     }
 }
 

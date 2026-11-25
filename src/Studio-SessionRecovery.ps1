@@ -17,7 +17,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-$script:AppVersion = '3.0.9'
+$script:AppVersion = '3.1.0'
 $script:ScriptDir = $PSScriptRoot
 $script:AppDir = if ($env:SESSIONRECOVERY_HOST_EXE) { Split-Path -Parent $env:SESSIONRECOVERY_HOST_EXE } else { $PSScriptRoot }
 $script:HostExe = $null
@@ -92,9 +92,9 @@ if (-not (Test-Path -LiteralPath $controlsPath)) {
 }
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-if (-not ('SessionRecovery.Studio.StudioCard' -as [type])) {
-    Add-Type -Path $controlsPath -ReferencedAssemblies 'System.Windows.Forms', 'System.Drawing'
-}
+
+. (Join-Path $PSScriptRoot 'StudioControlsLoader.ps1')
+Import-StudioControls -Path $controlsPath
 
 $hostCandidates = @()
 if ($env:SESSIONRECOVERY_HOST_EXE) { $hostCandidates += $env:SESSIONRECOVERY_HOST_EXE }
@@ -1288,6 +1288,9 @@ function Refresh-StudioData {
 # ---------------------------------------------------------------------------
 
 $form = New-Object System.Windows.Forms.Form
+# Build the whole shell and all pages without incremental layout passes. One
+# ResumeLayout before ShowDialog is materially faster and removes flicker.
+$form.SuspendLayout()
 $form.Text = 'Session Recovery'
 $form.ClientSize = New-Object System.Drawing.Size(1160, 680)
 $form.MinimumSize = New-Object System.Drawing.Size(1040, 700)
@@ -1315,12 +1318,14 @@ $accentBar.Add_Paint({
 $form.Controls.Add($accentBar)
 
 $sidebar = New-Object System.Windows.Forms.Panel
+$sidebar.SuspendLayout()
 $sidebar.Dock = [System.Windows.Forms.DockStyle]::Left
 $sidebar.Width = 236
 $sidebar.BackColor = $script:P.Sidebar
 $form.Controls.Add($sidebar)
 
 $main = New-Object System.Windows.Forms.Panel
+$main.SuspendLayout()
 $main.Dock = [System.Windows.Forms.DockStyle]::Fill
 $main.BackColor = $script:P.Bg
 $form.Controls.Add($main)
@@ -1457,6 +1462,7 @@ $header.Controls.Add($captureButton)
 $script:Ui.CaptureButton = $captureButton
 
 $pageHost = New-Object System.Windows.Forms.Panel
+$pageHost.SuspendLayout()
 $pageHost.Location = New-Object System.Drawing.Point(0, 88)
 $pageHost.Size = New-Object System.Drawing.Size(984, 692)
 $pageHost.BackColor = $script:P.Bg
@@ -1471,6 +1477,7 @@ function New-StudioPage {
     $page.BackColor = $script:P.Bg
     $page.Visible = $false
     $page.Size = $script:PageHost.ClientSize
+    $page.SuspendLayout()
     Enable-StudioDoubleBuffer $page
     $script:PageHost.Controls.Add($page)
     $script:Pages[$Name] = $page
@@ -4861,6 +4868,89 @@ function Update-StudioKitSummary {
     }
 }
 
+function Show-StudioKitPasswordDialog {
+    param([ValidateSet('Export', 'Import')][string]$Mode)
+    $isExport = $Mode -eq 'Export'
+
+    $dialog = New-Object System.Windows.Forms.Form
+    $dialog.Text = if ($isExport) { (T 'KitExportDialogTitle' 'Export recovery kit') } else { (T 'KitImportDialogTitle' 'Import recovery kit') }
+    $dialog.ClientSize = New-Object System.Drawing.Size(440, $(if ($isExport) { 300 } else { 240 }))
+    $dialog.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+    $dialog.MaximizeBox = $false
+    $dialog.MinimizeBox = $false
+    $dialog.ShowInTaskbar = $false
+    $dialog.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterParent
+    $dialog.BackColor = $script:P.Bg
+    $dialog.ForeColor = $script:P.Text
+    $dialog.Font = $script:FontBody
+    try { if ($script:IconPath) { $dialog.Icon = New-Object System.Drawing.Icon($script:IconPath) } } catch { }
+
+    $hintText = if ($isExport) {
+        (T 'KitPasswordExportHint' 'Encrypt the whole kit with a password. Leave both fields empty to create a plain kit. The password cannot be recovered.')
+    } else {
+        (T 'KitPasswordImportHint' 'This kit is password-protected. Enter the password used when it was exported.')
+    }
+    $hint = New-StudioLabel -Text $hintText -X 18 -Y 14 -Width 404 -Height $(if ($isExport) { 52 } else { 40 }) -Font $script:FontBodySmall -Color $script:P.Muted
+    $dialog.Controls.Add($hint)
+
+    $passwordY = if ($isExport) { 96 } else { 84 }
+    $labelY = $passwordY - 20
+    $passwordLabel = New-StudioLabel -Text (T 'KitPasswordLabel' 'Password') -X 18 -Y $labelY -Width 404 -Height 18 -Font $script:FontBodySmall -Color $script:P.Muted
+    $dialog.Controls.Add($passwordLabel)
+    $password = New-StudioTextBox -X 18 -Y $passwordY -Width 404 -Height 28
+    $password.UseSystemPasswordChar = $true
+    $password.MaxLength = 1024
+    $dialog.Controls.Add($password)
+
+    $confirm = $null
+    if ($isExport) {
+        $confirmLabel = New-StudioLabel -Text (T 'KitPasswordConfirmLabel' 'Confirm password') -X 18 -Y 134 -Width 404 -Height 18 -Font $script:FontBodySmall -Color $script:P.Muted
+        $dialog.Controls.Add($confirmLabel)
+        $confirm = New-StudioTextBox -X 18 -Y 154 -Width 404 -Height 28
+        $confirm.UseSystemPasswordChar = $true
+        $confirm.MaxLength = 1024
+        $dialog.Controls.Add($confirm)
+    }
+
+    $buttonY = if ($isExport) { 248 } else { 188 }
+    $okText = if ($isExport) { (T 'BtnExport' 'Export') } else { (T 'BtnImport' 'Import') }
+    $ok = New-StudioButton -Text $okText -X 188 -Y $buttonY -Width 118 -Height 34 -Primary
+    $cancel = New-StudioButton -Text (T 'BtnCancel' 'Cancel') -X 314 -Y $buttonY -Width 108 -Height 34 -Glyph ''
+    $dialog.Controls.Add($ok)
+    $dialog.Controls.Add($cancel)
+
+    $result = [pscustomobject]@{ Canceled = $true; Password = '' }
+    $context = [pscustomobject]@{ Mode = $Mode; Password = $password; Confirm = $confirm; Result = $result }
+    $ok.Tag = $context
+    $ok.Add_Click({
+        param($sender, $eventArgs)
+        $state = $sender.Tag
+        $value = [string]$state.Password.Text
+        if ($state.Mode -eq 'Export') {
+            if ($value.Length -gt 0 -and $value.Length -lt 8) {
+                Show-StudioToast (T 'KitPasswordTooShort' 'Use at least 8 characters, or leave both fields empty.') $script:P.Red
+                return
+            }
+            if ($value -ne [string]$state.Confirm.Text) {
+                Show-StudioToast (T 'KitPasswordMismatch' 'The passwords do not match.') $script:P.Red
+                return
+            }
+        } elseif ([string]::IsNullOrEmpty($value)) {
+            Show-StudioToast (T 'KitPasswordRequired' 'Enter the kit password.') $script:P.Red
+            return
+        }
+        $state.Result.Canceled = $false
+        $state.Result.Password = $value
+        $sender.FindForm().Close()
+    })
+    $cancel.Add_Click({ param($sender, $eventArgs) $sender.FindForm().Close() })
+    $dialog.AcceptButton = $ok
+    $dialog.CancelButton = $cancel
+    $dialog.Add_Shown({ param($sender, $eventArgs) $sender.ActiveControl = $sender.Controls[2]; $sender.Controls[2].Focus() })
+    try { [void]$dialog.ShowDialog($form) } finally { $dialog.Dispose() }
+    return $result
+}
+
 function Export-StudioRecoveryKit {
     if ($script:KitBusy) { return }
     $dialog = New-Object System.Windows.Forms.SaveFileDialog
@@ -4869,12 +4959,19 @@ function Export-StudioRecoveryKit {
     $dialog.FileName = ('session-recovery-{0}.srkit' -f (Get-Date -Format 'yyyyMMdd-HHmm'))
     try {
         if ($dialog.ShowDialog($form) -ne [System.Windows.Forms.DialogResult]::OK) { return }
+        $passwordChoice = Show-StudioKitPasswordDialog -Mode Export
+        if ($passwordChoice.Canceled) { return }
         $script:KitBusy = $true
         [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::WaitCursor
-        $result = Export-SRRecoveryKit -Destination $dialog.FileName -AppVersion $script:AppVersion
+        $result = Export-SRRecoveryKit -Destination $dialog.FileName -AppVersion $script:AppVersion -Password $passwordChoice.Password
         Update-StudioKitSummary
         if ($script:Ui.KitImportStatus) {
-            $script:Ui.KitImportStatus.Text = ((T 'KitExportedStatus' 'Exported {0} snapshot(s), {1} note(s) and {2} exclusion rule(s) to {3}.') -f $result.SnapshotCount, $result.NoteCount, $result.ExclusionCount, (Split-Path -Leaf $result.Path))
+            $statusText = if ($result.Protected) {
+                (T 'KitExportedEncryptedStatus' 'Exported {0} snapshot(s), {1} note(s) and {2} exclusion rule(s) to {3} (password-protected).') -f $result.SnapshotCount, $result.NoteCount, $result.ExclusionCount, (Split-Path -Leaf $result.Path)
+            } else {
+                (T 'KitExportedStatus' 'Exported {0} snapshot(s), {1} note(s) and {2} exclusion rule(s) to {3}.') -f $result.SnapshotCount, $result.NoteCount, $result.ExclusionCount, (Split-Path -Leaf $result.Path)
+            }
+            $script:Ui.KitImportStatus.Text = $statusText
             $script:Ui.KitImportStatus.ForeColor = $script:P.Green
         }
         Show-StudioToast ((T 'ToastKitExported' 'Recovery kit saved to {0}.') -f (Split-Path -Leaf $result.Path)) $script:P.Green
@@ -4896,11 +4993,19 @@ function Import-StudioRecoveryKit {
     $dialog = New-Object System.Windows.Forms.OpenFileDialog
     $dialog.Title = (T 'KitImportDialogTitle' 'Import recovery kit')
     $dialog.Filter = (T 'KitFilter' 'Session Recovery kit (*.srkit)|*.srkit')
+    $password = ''
+    $encryptedKit = $false
     try {
         if ($dialog.ShowDialog($form) -ne [System.Windows.Forms.DialogResult]::OK) { return }
+        $encryptedKit = Test-SRRecoveryKitEncrypted -Path $dialog.FileName
+        if ($encryptedKit) {
+            $passwordChoice = Show-StudioKitPasswordDialog -Mode Import
+            if ($passwordChoice.Canceled) { return }
+            $password = $passwordChoice.Password
+        }
         $script:KitBusy = $true
         [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::WaitCursor
-        $result = Import-SRRecoveryKit -Path $dialog.FileName
+        $result = Import-SRRecoveryKit -Path $dialog.FileName -Password $password
         Refresh-StudioData
         $message = (T 'KitImportedStatus' 'Imported {0} snapshot(s), {1} note(s) and {2} exclusion rule(s). Skipped {3}, encrypted {4}.') -f $result.Imported, $result.NotesAdded, $result.ExclusionsAdded, $result.Skipped, $result.EncryptedSkipped
         if ($script:Ui.KitImportStatus) {
@@ -4909,11 +5014,15 @@ function Import-StudioRecoveryKit {
         }
         Show-StudioToast ((T 'ToastKitImported' 'Imported {0} snapshot(s) into this profile.') -f $result.Imported) $script:P.Green
     } catch {
+        $failure = [string]$_.Exception.Message
+        if ($encryptedKit -and $failure -match '(?i)password|modified') {
+            $failure = (T 'KitPasswordWrong' 'The password is wrong or the kit was modified.')
+        }
         if ($script:Ui.KitImportStatus) {
-            $script:Ui.KitImportStatus.Text = ((T 'ToastKitFailed' 'Recovery kit failed: {0}') -f $_.Exception.Message)
+            $script:Ui.KitImportStatus.Text = ((T 'ToastKitFailed' 'Recovery kit failed: {0}') -f $failure)
             $script:Ui.KitImportStatus.ForeColor = $script:P.Red
         }
-        Show-StudioToast ((T 'ToastKitFailed' 'Recovery kit failed: {0}') -f $_.Exception.Message) $script:P.Red
+        Show-StudioToast ((T 'ToastKitFailed' 'Recovery kit failed: {0}') -f $failure) $script:P.Red
     } finally {
         [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
         $script:KitBusy = $false
@@ -5907,10 +6016,30 @@ $studioTaskTimer.Add_Tick({
 $script:StudioTaskTimer = $studioTaskTimer
 
 $form.Add_Shown({
+    # The native launcher shows a splash while this script imports and builds
+    # the form. Signal it now that the real window is visible.
+    try {
+        $splashEventName = [string]$env:SESSIONRECOVERY_SPLASH_EVENT
+        if (-not [string]::IsNullOrWhiteSpace($splashEventName)) {
+            $splashEvent = [System.Threading.EventWaitHandle]::OpenExisting($splashEventName)
+            try { [void]$splashEvent.Set() } finally { $splashEvent.Dispose() }
+        }
+    } catch { }
     $script:UiReady = $true
     Layout-Studio
-    Refresh-StudioData
-    Show-StudioPage -Name $Page
+    # Paint the shell first. Reading 100+ snapshots and laying out the first
+    # page used to happen inside Shown, so the window stayed blank until all
+    # of it finished. Defaults keep the first page safe to build, then the
+    # real data refreshes once the message loop has painted the frame.
+    $script:Config = Get-SRDefaultConfig
+    $form.BeginInvoke([System.Windows.Forms.MethodInvoker]{
+        if ($form.IsDisposed) { return }
+        try { Show-StudioPage -Name $Page }
+        catch { try { Write-SRLog -Level WARN -Message ("Studio page failed: {0}" -f $_.Exception.Message) } catch { } }
+        if ($form.IsDisposed) { return }
+        try { Refresh-StudioData }
+        catch { try { Write-SRLog -Level WARN -Message ("Studio data load failed: {0}" -f $_.Exception.Message) } catch { } }
+    }) | Out-Null
     $statusTimer.Start()
     $studioTaskTimer.Start()
 })
@@ -5929,6 +6058,16 @@ $form.Add_FormClosing({
     if ($script:ToastTimer) { try { $script:ToastTimer.Stop(); $script:ToastTimer.Dispose() } catch { } }
     if ($script:CapturePollTimer) { try { $script:CapturePollTimer.Stop(); $script:CapturePollTimer.Dispose() } catch { } }
 })
+
+# Resume the containers suspended during construction. Doing this once, after
+# every control exists, avoids a layout pass per Add and a visible build-up.
+foreach ($studioPage in @($script:Pages.Values)) {
+    try { $studioPage.ResumeLayout($false) } catch { }
+}
+try { $pageHost.ResumeLayout($false) } catch { }
+try { $main.ResumeLayout($false) } catch { }
+try { $sidebar.ResumeLayout($false) } catch { }
+try { $form.ResumeLayout($false) } catch { }
 
 # One pass over the finished tree removes flicker from the panels that do not
 # opt into double buffering themselves.

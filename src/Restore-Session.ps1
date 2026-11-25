@@ -702,9 +702,8 @@ if (-not (Test-Path -LiteralPath $controlsPath)) {
     [System.Windows.Forms.MessageBox]::Show('StudioControls.cs is missing. Reinstall Session Recovery.', 'Session Recovery', 'OK', 'Error') | Out-Null
     exit 2
 }
-if (-not ('SessionRecovery.Studio.StudioCard' -as [type])) {
-    Add-Type -Path $controlsPath -ReferencedAssemblies 'System.Windows.Forms', 'System.Drawing'
-}
+. (Join-Path $PSScriptRoot 'StudioControlsLoader.ps1')
+Import-StudioControls -Path $controlsPath
 . (Join-Path $PSScriptRoot 'StudioTheme.ps1')
 [void](Set-StudioWindowDpiUnaware)
 
@@ -739,7 +738,7 @@ $script:FontTitle = New-Object System.Drawing.Font('Segoe UI Semibold', 19)
 $script:FontMono = New-Object System.Drawing.Font('Consolas', 8.25)
 $script:FontMonoSmall = New-Object System.Drawing.Font('Consolas', 7.5)
 
-$script:AppVersion = '3.0.9'
+$script:AppVersion = '3.1.0'
 $hostCandidates = @()
 if ($env:SESSIONRECOVERY_HOST_EXE) { $hostCandidates += $env:SESSIONRECOVERY_HOST_EXE }
 $hostCandidates += (Join-Path $PSScriptRoot 'SessionRecovery.exe')
@@ -1678,6 +1677,15 @@ $selectAll.Add_CheckedChanged({
 })
 
 $form.Add_Shown({
+    # Close the native launch splash only when the real restore window is
+    # visible; the launcher signals the same event for Studio and Restore.
+    try {
+        $splashEventName = [string]$env:SESSIONRECOVERY_SPLASH_EVENT
+        if (-not [string]::IsNullOrWhiteSpace($splashEventName)) {
+            $splashEvent = [System.Threading.EventWaitHandle]::OpenExisting($splashEventName)
+            try { [void]$splashEvent.Set() } finally { $splashEvent.Dispose() }
+        }
+    } catch { }
     $form.Activate()
     $form.BringToFront()
     if ($restoreButton.Enabled) { [void]$restoreButton.Select() }

@@ -1,10 +1,10 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
 # Winget manifest for Session Recovery.
 # Submit new versions as a PR to microsoft/winget-pkgs using:
-#   wingetcreate submit --token <GH_TOKEN> --urls <msi-url>,<sha256-url> --version 3.0.9
+#   wingetcreate submit --token <GH_TOKEN> --urls <msi-url>,<sha256-url> --version 3.1.0
 # The files below are the fully written-out equivalent manifest.
 PackageIdentifier: Bilalmesk.SessionRecovery
-PackageVersion: 3.0.9
+PackageVersion: 3.1.0
 InstallerType: wix
 Scope: user
 InstallModes:
@@ -17,12 +17,12 @@ InstallerSwitches:
 UpgradeBehavior: uninstallPrevious
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/Bilalmesk/session-recovery/releases/download/v3.0.9/SessionRecovery-3.0.9.msi
-    InstallerSha256: 174A1C56F0BD10E7269AB28754915ADD3450E251D473912503F9D3EC22D563D2
+    InstallerUrl: https://github.com/Bilalmesk/session-recovery/releases/download/v3.1.0/SessionRecovery-3.1.0.msi
+    InstallerSha256: FC9A5F18609BF05AECDEA987D37E2278CB9AD2EAAFCA7094B781A3E205CD4616
     AppsAndFeaturesEntries:
       - DisplayName: Session Recovery
-        DisplayVersion: 3.0.9
+        DisplayVersion: 3.1.0
         Publisher: Bilalmesk
-        ProductCode: '{5DB028F3-8831-443D-81AF-4D5470E46327}'
+        ProductCode: '{6FB7424F-1E9A-4812-9B71-1E0755C2B58C}'
 ManifestType: installer
 ManifestVersion: 1.12.0

@@ -6,7 +6,7 @@
 
 ![Windows 10/11](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?logo=windows&logoColor=white)
 ![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-5391FE?logo=powershell&logoColor=white)
-![Version](https://img.shields.io/badge/version-3.0.9-8B5CF6)
+![Version](https://img.shields.io/badge/version-3.1.0-8B5CF6)
 ![Local only](https://img.shields.io/badge/privacy-100%25%20local-22C55E)
 
 [Install](#-install) · [Restore](#-restore) · [Configure](#%EF%B8%8F-configure) · [Troubleshoot](#-troubleshooting) · [Uninstall](#-uninstall)
@@ -38,7 +38,7 @@ winget install --id Bilalmesk.SessionRecovery
 | 📝 **Snapshot notes** | Searchable note on each snapshot; included in kits, removed with the snapshot |
 | 🕵️ **Privacy scan** | Finds sensitive apps and sites from names and tab URLs, never page content |
 | 📝 **Unsaved-work radar** | Detects apps whose windows carried unsaved-change markers, opens them first on restore, and flags them in the Studio |
-| 🧳 **Recovery Kit** | Move snapshots, notes and exclusions between PCs in one `.srkit` file |
+| 🧳 **Recovery Kit** | Move snapshots, notes and exclusions between PCs in one `.srkit` file, optionally password-encrypted |
 | 📊 **Recovery insights** | Local counts for snapshots, apps, sites, pins, notes and storage |
 | 🩺 **Recovery timeline** | Restarts, power loss and blue screens from the last 30 days, read from the local event log |
 | 🔍 **Compare snapshots** | Pick an older moment and see which apps, folders and tabs opened or closed since |
@@ -50,7 +50,7 @@ winget install --id Bilalmesk.SessionRecovery
 | 🗂️ **Workspaces** | Save the current desktop as a named workspace, then reopen or delete it from the Studio or the tray |
 | 📦 **Export / import** | Back up snapshots as JSON or move them to another PC |
 | 📦 **winget** | `winget install --id Bilalmesk.SessionRecovery` installs the latest release; `winget upgrade` keeps it current |
-| 🖥️ **Native tray + Studio** | Dashboard, Snapshots, Workspaces, Exclusions, Recovery Kit, Settings, Diagnostics and About; 14 dark and light colour themes, no console windows |
+| 🖥️ **Native tray + Studio** | Dashboard, Snapshots, Workspaces, Exclusions, Recovery Kit, Settings, Diagnostics and About; 14 dark and light colour themes, no console windows, and an instant splash that reuses the open Studio window |
 
 ## 📥 Install
 
@@ -326,7 +326,7 @@ Use the Studio **Settings** page, or edit `%LOCALAPPDATA%\SessionRecovery\config
 
 - **Snapshot notes** hold up to 500 characters of searchable text per snapshot. They live in `config.json` keyed by snapshot file name, are included in Recovery Kits, and are removed when their snapshot is deleted. Notes are plain text even when snapshots are encrypted.
 - **Privacy scan** on the Exclusions page inspects visible app/process names and browser tab URLs and titles for categories such as password managers, banking, messaging, email, health and social media. It suggests wildcard exclusions you can add one at a time or all at once. It never reads screenshots, window pixels or page content.
-- **Recovery Kit** bundles every snapshot, note and exclusion rule into one portable `.srkit` file. Import merges notes and rules without overwriting existing settings, marks imported snapshots as untrusted, and skips DPAPI-encrypted snapshots because only the Windows account that created them can read them. A kit never contains settings, logs, screenshots or page content. The `.srkit` is a ZIP archive and is plaintext unless the snapshots inside are encrypted, so treat it like a private document.
+- **Recovery Kit** bundles every snapshot, note and exclusion rule into one portable `.srkit` file. Export can encrypt the whole kit with a password (PBKDF2-SHA256, AES-256 and HMAC-SHA256), which also protects notes and exclusion rules; without a password the file is a plain ZIP. Import merges notes and rules without overwriting existing settings, marks imported snapshots as untrusted, and skips DPAPI-encrypted snapshots because only the Windows account that created them can read them. A kit never contains settings, logs, screenshots or page content. Treat any kit without a password like a private document.
 - **Recovery insights** on Diagnostics summarize locally what the snapshot store contains: counts, time span, unique apps and sites, pins, notes, imports and storage use.
 
 </details>
@@ -368,13 +368,14 @@ Each snapshot also records the PC facts that affect placement — machine name, 
 ## 🔐 Privacy & data
 
 - Everything stays on your PC: no extension, no debugging port and no telemetry. The app makes no network requests unless you check for or download an update.
-- Snapshots hold executable paths, window titles, folder paths and URLs. They are plaintext by default; enable `encryptSnapshots` for DPAPI protection. Snapshot notes are always plaintext in `config.json`, and a Recovery Kit is a plain ZIP unless the snapshots inside are encrypted. Use BitLocker or account permissions on shared PCs.
+- Snapshots hold executable paths, window titles, folder paths and URLs. They are plaintext by default; enable `encryptSnapshots` for DPAPI protection. Snapshot notes are always plaintext in `config.json`. A Recovery Kit is a plain ZIP by default; set a password when exporting to encrypt the entire kit. DPAPI-encrypted snapshots inside a kit still cannot be imported on another Windows account. Use BitLocker or account permissions on shared PCs.
 - URLs are redacted before they are written, for browser tabs and for URL-shaped arguments in captured command lines. Two modes, set with `redactUrlMode`:
   - `Full` (default) drops the entire query string and fragment, so search terms, deep links and tokens never reach disk. The cost is that a restore reopens the site, not the exact page.
   - `Safe` keeps ordinary parameters so the exact page comes back, and blanks only values whose name looks like a credential (`token`, `secret`, `api_key`, `password`, `code`, `sid`, `signature` and similar). Fragments are always removed.
   - Both modes are bypassed when `redactUrls` is `false`. `excludeUrls` wildcards match the raw URL first, so an excluded domain is never captured at all.
   - Window titles and non-URL command-line arguments are still stored verbatim — a window title can contain a document name.
-- To back up a session, copy its JSON and restore it elsewhere with `-SnapshotPath`.
+- Auto-backup copies each new snapshot exactly as stored. With `encryptSnapshots` on, those copies remain DPAPI-encrypted and are not portable to another Windows account.
+- To back up a session, copy its JSON and restore it elsewhere with `-SnapshotPath`, or export a password-protected Recovery Kit from Studio.
 
 | Path (under `%LOCALAPPDATA%\SessionRecovery`) | Contents |
 |---|---|
@@ -475,6 +476,7 @@ session-recovery/
     ├── Studio-SessionRecovery.ps1  Studio UI
     ├── StudioTheme.ps1             Shared theme catalog for Studio and restore
     ├── StudioControls.cs           Custom WinForms controls
+    ├── StudioControlsLoader.ps1    Shared compiled-controls cache for Studio and Restore
     ├── Strings.ps1                 UI strings for all nine languages
     ├── SessionRecovery.psm1        Capture, exclusions, browsers, retention, diagnostics, restore engine
     ├── Save-Session.ps1            One-shot snapshot

@@ -13,7 +13,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string]$Version = '3.0.9',
+    [string]$Version = '3.1.0',
     [switch]$NoRestore
 )
 
@@ -88,8 +88,27 @@ Session Recovery {0}
 Reopen the apps, File Explorer folders and browser tabs that were open before
 a crash, power cut or unexpected restart.
 
-What's new in 3.0.9
+What's new in 3.1.0
 -------------------
+- Recovery Kits can now be password-protected. The whole .srkit is sealed
+  with PBKDF2-SHA256, AES-256-CBC and HMAC-SHA256; a wrong password or a
+  modified kit is rejected before import.
+- Moving or resizing a window now counts as a desktop change, so periodic
+  capture records the new position instead of skipping it.
+- The snapshot timeline, logon prompt and workspace save now use capture
+  time rather than file write time, so imported snapshots cannot jump ahead
+  of the real desktop.
+- A retention failure after a successful save no longer reports the snapshot
+  as failed, and snapshot writes are replaced atomically.
+- Release asset names are validated before an update is downloaded, and kit
+  manifests have a hard decompression limit.
+- Studio opens with a native splash, paints its shell before loading
+  snapshots, caches its compiled controls, and reuses the existing window
+  when opened again.
+- Version 3.1.0.
+
+Also in 3.0.9
+-------------
 - The Studio and restore window no longer come out garbled on high-DPI
   displays. They render their fixed 96-DPI layout as one piece and let
   Windows scale it, so on a 4K monitor at 250% text stays inside its

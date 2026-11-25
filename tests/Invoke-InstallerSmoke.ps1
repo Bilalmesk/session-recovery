@@ -145,6 +145,7 @@ $expected = @(
     @{ Name = 'Strings.ps1'; Source = 'src\Strings.ps1' },
     @{ Name = 'StudioTheme.ps1'; Source = 'src\StudioTheme.ps1' },
     @{ Name = 'StudioControls.cs'; Source = 'src\StudioControls.cs' },
+    @{ Name = 'StudioControlsLoader.ps1'; Source = 'src\StudioControlsLoader.ps1' },
     @{ Name = 'Control-SessionRecovery.ps1'; Source = 'src\Control-SessionRecovery.ps1' },
     @{ Name = 'SessionRecovery.ico'; Source = 'assets\SessionRecovery.ico' },
     @{ Name = 'README.md'; Source = 'README.md' }

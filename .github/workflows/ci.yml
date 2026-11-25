@@ -39,6 +39,7 @@ jobs:
             'src/Watch-Session.ps1',
             'src/Diagnostics.ps1',
             'src/InstallManifest.ps1',
+            'src/StudioControlsLoader.ps1',
             'Install-SessionRecovery.ps1',
             'Uninstall-SessionRecovery.ps1',
             'installer/Build-MSI.ps1',

@@ -5,7 +5,11 @@ $ErrorActionPreference = 'Stop'
 # Native helpers
 # ---------------------------------------------------------------------------
 
-if (-not ('SessionRecovery.WindowEnumerator' -as [type])) {
+function Initialize-SRNativeSessionHelpers {
+    # Lazy on purpose: compiling this 750-line helper dominated module import.
+    # Studio, Restore and control-only commands do not need it until they
+    # actually capture or privacy-scan the desktop.
+    if ('SessionRecovery.WindowEnumerator' -as [type]) { return }
     Add-Type -TypeDefinition @'
 using System;
 using System.Collections.Generic;
@@ -767,7 +771,11 @@ namespace SessionRecovery
 # through UI Automation and combine it with the local History database when
 # the structured session file has nothing useful. This is deliberately a
 # fallback: session files remain the exact source whenever they are available.
-if (-not ('SessionRecovery.BrowserUiAutomation' -as [type])) {
+function Initialize-SRBrowserUiAutomation {
+    # Kept lazy for the same reason as the window enumerator. The current
+    # capture paths use browser session files first; call this explicitly
+    # before using the UI Automation fallback.
+    if ('SessionRecovery.BrowserUiAutomation' -as [type]) { return }
     try {
         Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
         Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop
@@ -1412,7 +1420,10 @@ function Update-SRLegacySnapshotProvenance {
                 $packed.Dispose()
             }
             if ($encrypted) { $payload = Protect-SRSnapshotBytes -Bytes $payload }
-            [System.IO.File]::WriteAllBytes($file.FullName, $payload)
+            # One-time adoption rewrites every existing snapshot. Do it
+            # atomically so a crash during the upgrade cannot truncate the
+            # only copy of a user's last session.
+            Write-SRBytesAtomic -Path $file.FullName -Bytes $payload
             $adopted++
         } catch {
             Write-SRLog -Level DEBUG -Message ("Could not adopt snapshot {0}: {1}" -f $file.Name, $_.Exception.Message)
@@ -1804,6 +1815,7 @@ function Get-SRSafeArguments {
         [string]$CommandLine,
         [string]$ExePath
     )
+    Initialize-SRNativeSessionHelpers
     if ([string]::IsNullOrWhiteSpace($CommandLine)) { return @() }
     try {
         $parts = @([SessionRecovery.CommandLineSplitter]::Split($CommandLine))
@@ -1882,6 +1894,7 @@ function Start-SRApplication {
         [switch]$Force,
         $SnapshotMonitors = $null
     )
+    Initialize-SRNativeSessionHelpers
     $exePath = [string]$App.exe
     $appName = [string]$App.name
     if ([string]::IsNullOrWhiteSpace($appName)) { $appName = [System.IO.Path]::GetFileName($exePath) }
@@ -1912,13 +1925,8 @@ function Start-SRApplication {
         return [pscustomobject]@{ Started = $false; Message = ("Skipped unsafe arguments for {0}: {1}" -f $appName, $argumentCheck.Reason); App = $App }
     }
 
-    if (-not $Force) {
-        $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
-            try { $_.Path -and ($_.Path -ieq $exePath) } catch { $false }
-        })
-        if ($running.Count -gt 0) {
-            return [pscustomobject]@{ Started = $false; Message = "Already running: $appName"; App = $App }
-        }
+    if (-not $Force -and (Test-SRExeRunning -ExePath $exePath)) {
+        return [pscustomobject]@{ Started = $false; Message = "Already running: $appName"; App = $App }
     }
 
     # Snapshots can predate startMinimized; a bare read throws under
@@ -2931,6 +2939,7 @@ function Get-SRChromiumSessionTabs {
     # timestamps of closed-tab records. Never falls back to History.
     param([Parameter(Mandatory = $true)][string]$ProfileDirectory)
 
+    Initialize-SRNativeSessionHelpers
     $empty = [pscustomobject]@{ tabs = @(); closedAt = @(); windowOrder = @(); file = $null }
     $sessionsDir = Join-Path $ProfileDirectory 'Sessions'
     if (-not (Test-Path -LiteralPath $sessionsDir)) { return $empty }
@@ -2961,6 +2970,7 @@ function Get-SRChromiumTabs {
         [int]$HistoryLookbackHours = 24,
         [bool]$AllowApproximate = $true
     )
+    Initialize-SRNativeSessionHelpers
 
     $candidates = New-Object System.Collections.Generic.List[object]
 
@@ -3154,6 +3164,7 @@ function Get-SRFirefoxDefaultProfiles {
 function Get-SRFirefoxTabs {
     param([Parameter(Mandatory = $true)][string]$ProfileDirectory)
 
+    Initialize-SRNativeSessionHelpers
     $backups = Join-Path $ProfileDirectory 'sessionstore-backups'
     $candidates = @(
         (Join-Path $backups 'recovery.jsonlz4'),
@@ -5148,6 +5159,21 @@ function Get-SRSnapshotStateHash {
             if ($null -ne $unsavedProperty) { $unsaved = [int]$unsavedProperty.Value }
         } catch { }
         $parts.Add('a:' + [string]$app.exe + ':' + @($app.windows).Count + ':' + $unsaved)
+        # The restore block is what actually places the main window. Without
+        # it, moving, resizing or maximizing the only changed window produced
+        # the same fingerprint and periodic capture skipped the new position.
+        try {
+            $restoreProperty = $app.PSObject.Properties['restore']
+            if ($null -ne $restoreProperty -and $null -ne $restoreProperty.Value) {
+                $restore = $restoreProperty.Value
+                $parts.Add('r:' + [string]$restore.x + ',' + [string]$restore.y + ',' +
+                    [string]$restore.width + ',' + [string]$restore.height + ':' + [string]$restore.maximized)
+            }
+            $startMinimizedProperty = $app.PSObject.Properties['startMinimized']
+            if ($null -ne $startMinimizedProperty) {
+                $parts.Add('s:' + [string][bool]$startMinimizedProperty.Value)
+            }
+        } catch { }
         # Media position is part of the fingerprint, quantized to 30 seconds
         # so a playing video keeps producing snapshots without writing one
         # every few seconds. Without this a movie played windowed would never
@@ -5888,10 +5914,12 @@ function Save-SRWorkspace {
     param([Parameter(Mandatory = $true)][string]$Name)
     $safe = ($Name -replace '[^\w\-. ]', '_').Trim()
     if ([string]::IsNullOrWhiteSpace($safe)) { throw 'Workspace name is empty.' }
-    $files = @(Get-SRSnapshotFiles)
-    if ($files.Count -eq 0) { throw 'No snapshot exists yet.' }
-    $source = $files[0].FullName
-    $snapshot = Read-SRSnapshotFile -Path $source
+    # A workspace must save the newest captured desktop, not whichever file
+    # happens to have the newest write time after an import or copy.
+    $entries = @(Get-SRSnapshots)
+    if ($entries.Count -eq 0) { throw 'No snapshot exists yet.' }
+    $source = $entries[0].Path
+    $snapshot = $entries[0].Snapshot
     $dir = Join-Path $script:SRRoot 'workspaces'
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     $target = Join-Path $dir ($safe + '.json')
@@ -6496,6 +6524,7 @@ function Assert-SRSnapshotBudget {
 
 function Get-SRSnapshotWindows {
     # A separate collector boundary also lets tests avoid live desktop capture.
+    Initialize-SRNativeSessionHelpers
     return [SessionRecovery.WindowEnumerator]::GetVisibleWindows()
 }
 
@@ -7198,7 +7227,12 @@ function Save-SRSnapshot {
         # Same policy as the cleanup button. Passing the settings here is what
         # actually builds hourly and daily history; before this the automatic
         # path silently used flat count-only retention and deleted it.
-        if (-not $Shutdown) { [void](Invoke-SRRetention -Config $config) }
+        # Retention is post-save housekeeping: if it fails, the snapshot is
+        # already safely on disk and must not be reported as a failed capture.
+        if (-not $Shutdown) {
+            try { [void](Invoke-SRRetention -Config $config) }
+            catch { Write-SRLog -Level WARN -Message ("Snapshot saved, but retention failed: {0}" -f $_.Exception.Message) }
+        }
         if ($Shutdown) { Complete-SRShutdownAttempt -Path $path }
         Write-SRLog -Message ("Snapshot saved: {0} ({1} apps, {2} folders, {3} browsers, {4} tabs)" -f $path, $snapshot.stats.apps, $snapshot.stats.folders, $snapshot.stats.browsers, $snapshot.stats.tabs)
         try {
@@ -7356,7 +7390,10 @@ function Get-SRSnapshots {
             Write-SRLog -Level WARN -Message "Ignoring unreadable snapshot $($file.FullName): $($_.Exception.Message)"
         }
     }
-    return $snapshots.ToArray()
+    # LastWriteTime is only the storage order. Imports and copied files get a
+    # fresh write time while keeping their original capturedAt, so the logon
+    # prompt and timeline must sort by the moment the desktop was captured.
+    return @($snapshots.ToArray() | Sort-Object -Property CapturedAt -Descending)
 }
 
 function Get-SRLatestSnapshotBeforeLogon {
@@ -7430,10 +7467,19 @@ function Test-SRUnexpectedShutdown {
 function Test-SRExeRunning {
     param([Parameter(Mandatory = $true)][string]$ExePath)
     try {
-        $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
-            try { $_.Path -and ($_.Path -ieq $ExePath) } catch { $false }
-        })
-        return ($running.Count -gt 0)
+        # Reading Process.Path for every process can block for seconds on
+        # protected processes. Filter by process name first; the expensive
+        # path check then runs only for the few matching instances.
+        $leaf = [System.IO.Path]::GetFileNameWithoutExtension($ExePath)
+        if ([string]::IsNullOrWhiteSpace($leaf)) { return $false }
+        foreach ($process in @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+            try { $_.ProcessName -ieq $leaf } catch { $false }
+        })) {
+            try {
+                if ($process.Path -and ($process.Path -ieq $ExePath)) { return $true }
+            } catch { }
+        }
+        return $false
     } catch {
         return $false
     }
@@ -8327,7 +8373,7 @@ function Import-SRSnapshotFile {
     $snapshot | Add-Member -NotePropertyName importedFileHashAlgorithm -NotePropertyValue 'SHA256' -Force
     try {
         $json = $snapshot | ConvertTo-Json -Depth 100 -Compress
-        [System.IO.File]::WriteAllText($targetPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+        Write-SRBytesAtomic -Path $targetPath -Bytes ([System.Text.Encoding]::UTF8.GetBytes($json))
     } catch {
         Remove-Item -LiteralPath $targetPath -Force -ErrorAction SilentlyContinue
         throw ("The snapshot could not be imported: {0}" -f $_.Exception.Message)
@@ -8390,6 +8436,7 @@ function Get-SRPrivacyFindings {
     $scanTabs = @($Tabs)
     if (-not $explicitInput) {
         $config = Get-SRConfig
+        Initialize-SRNativeSessionHelpers
         $windows = @([SessionRecovery.WindowEnumerator]::GetVisibleWindows())
         $processMap = Get-SRProcessMap
         $scanApps = @(Get-SRApplications -Windows $windows -ProcessMap $processMap)
@@ -8567,22 +8614,261 @@ function Read-SRZipTextEntry {
     param([Parameter(Mandatory = $true)]$Entry, [int]$MaxBytes = 1MB)
     if ([int64]$Entry.Length -gt $MaxBytes) { throw 'A kit manifest is larger than the allowed size.' }
     $stream = $null
-    $reader = $null
+    $memory = $null
     try {
         $stream = $Entry.Open()
-        $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8)
-        return $reader.ReadToEnd()
+        $memory = New-Object System.IO.MemoryStream
+        $buffer = New-Object byte[] 8192
+        $total = 0
+        while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $total += $read
+            # Do not trust the ZIP directory length: a forged manifest can
+            # declare 1 KB and decompress to gigabytes.
+            if ($total -gt $MaxBytes) { throw 'A kit manifest is larger than the allowed size.' }
+            $memory.Write($buffer, 0, $read)
+        }
+        $bytes = $memory.ToArray()
+        $offset = 0
+        if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $offset = 3 }
+        return [System.Text.Encoding]::UTF8.GetString($bytes, $offset, $bytes.Length - $offset)
     } finally {
-        if ($null -ne $reader) { $reader.Dispose() }
-        elseif ($null -ne $stream) { $stream.Dispose() }
+        if ($null -ne $memory) { $memory.Dispose() }
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+}
+
+function Write-SRBytesAtomic {
+    # Same guarantee as Write-SRJsonAtomic, for binary payloads such as an
+    # encrypted recovery kit or a rewritten snapshot. A power cut must leave
+    # the old file intact rather than a truncated replacement.
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][byte[]]$Bytes
+    )
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $parent = Split-Path -Parent $fullPath
+    if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+    $temp = Join-Path $parent ('.' + [System.IO.Path]::GetFileName($fullPath) + '.' + [guid]::NewGuid().ToString('N') + '.tmp')
+    try {
+        [System.IO.File]::WriteAllBytes($temp, $Bytes)
+        if (Test-Path -LiteralPath $fullPath) {
+            # Hidden unique backup: a plain ".bak" next to a snapshot would
+            # match session-*.json* and appear as a second snapshot if cleanup
+            # ever failed.
+            $backup = Join-Path $parent ('.' + [System.IO.Path]::GetFileName($fullPath) + '.' + [guid]::NewGuid().ToString('N') + '.bak')
+            try {
+                [System.IO.File]::Replace($temp, $fullPath, $backup)
+                Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
+            } catch {
+                # FAT/exFAT and some network shares do not implement
+                # File.Replace. Keep a copy of the old file until the new one
+                # is in place, then remove the copy.
+                [System.IO.File]::Copy($fullPath, $backup, $true)
+                try {
+                    [System.IO.File]::Delete($fullPath)
+                    [System.IO.File]::Move($temp, $fullPath)
+                    Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
+                } catch {
+                    if (-not (Test-Path -LiteralPath $fullPath) -and (Test-Path -LiteralPath $backup)) {
+                        try { [System.IO.File]::Move($backup, $fullPath) } catch { }
+                    }
+                    throw
+                }
+            }
+        } else {
+            [System.IO.File]::Move($temp, $fullPath)
+        }
+    } catch {
+        try { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue } catch { }
+        throw
+    }
+}
+
+function Get-SRKitKeyMaterial {
+    param(
+        [Parameter(Mandatory = $true)][string]$Password,
+        [Parameter(Mandatory = $true)][byte[]]$Salt,
+        [Parameter(Mandatory = $true)][int]$Iterations
+    )
+    $kdf = New-Object System.Security.Cryptography.Rfc2898DeriveBytes($Password, $Salt, $Iterations, [System.Security.Cryptography.HashAlgorithmName]::SHA256)
+    try { $material = $kdf.GetBytes(64) } finally { $kdf.Dispose() }
+    $encryptionKey = New-Object byte[] 32
+    $macKey = New-Object byte[] 32
+    [Array]::Copy($material, 0, $encryptionKey, 0, 32)
+    [Array]::Copy($material, 32, $macKey, 0, 32)
+    [Array]::Clear($material, 0, $material.Length)
+    return [pscustomobject]@{ EncryptionKey = $encryptionKey; MacKey = $macKey }
+}
+
+function Test-SRRecoveryKitEncrypted {
+    # Encrypted kits start with SRKIT2. Reading only the header avoids
+    # decrypting a file just to decide whether the password prompt is needed.
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Recovery kit not found: $Path" }
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $header = New-Object byte[] 6
+        $read = $stream.Read($header, 0, 6)
+        return ($read -eq 6 -and [System.Text.Encoding]::ASCII.GetString($header) -eq 'SRKIT2')
+    } finally {
+        $stream.Dispose()
+    }
+}
+
+function Protect-SRRecoveryKitBytes {
+    # Authenticated password encryption for a whole kit:
+    #   SRKIT2 | version | PBKDF2 iterations | salt | IV | ciphertext | HMAC
+    # PBKDF2-SHA256 derives separate 256-bit encryption and MAC keys.
+    # AES-256-CBC provides confidentiality and HMAC-SHA256 (encrypt-then-MAC)
+    # detects a wrong password or any modification before decryption.
+    param(
+        [Parameter(Mandatory = $true)][byte[]]$Bytes,
+        [Parameter(Mandatory = $true)][string]$Password
+    )
+    if ([string]::IsNullOrEmpty($Password)) { throw 'A password is required to encrypt a recovery kit.' }
+    if ($Password.Length -lt 8) { throw 'Use a recovery kit password with at least 8 characters.' }
+    if ($Password.Length -gt 1024) { throw 'The recovery kit password is too long.' }
+    if ($null -eq $Bytes -or $Bytes.Length -eq 0) { throw 'The recovery kit is empty.' }
+
+    $salt = New-Object byte[] 16
+    $iv = New-Object byte[] 16
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $rng.GetBytes($salt)
+        $rng.GetBytes($iv)
+    } finally {
+        $rng.Dispose()
+    }
+
+    # 100k PBKDF2-SHA256 iterations costs about two seconds in Windows
+    # PowerShell 5.1's managed implementation, which is a reasonable balance
+    # for a user-initiated export. The count is stored per kit so it can be
+    # raised later without breaking older files.
+    $iterations = 100000
+    $keys = Get-SRKitKeyMaterial -Password $Password -Salt $salt -Iterations $iterations
+    try {
+        $aes = [System.Security.Cryptography.AesCryptoServiceProvider]::new()
+        $encryptor = $null
+        try {
+            $aes.KeySize = 256
+            $aes.Mode = [System.Security.Cryptography.CipherMode]::CBC
+            $aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
+            $aes.Key = $keys.EncryptionKey
+            $aes.IV = $iv
+            $encryptor = $aes.CreateEncryptor()
+            $cipher = $encryptor.TransformFinalBlock($Bytes, 0, $Bytes.Length)
+        } finally {
+            if ($null -ne $encryptor) { $encryptor.Dispose() }
+            $aes.Dispose()
+        }
+
+        # 6 magic + 1 version + 4 iterations + 16 salt + 16 IV = 43 bytes.
+        $headerLength = 43
+        $signedLength = $headerLength + $cipher.Length
+        $output = New-Object byte[] ($signedLength + 32)
+        [Array]::Copy([System.Text.Encoding]::ASCII.GetBytes('SRKIT2'), 0, $output, 0, 6)
+        $output[6] = 1
+        [Array]::Copy([System.BitConverter]::GetBytes([int]$iterations), 0, $output, 7, 4)
+        [Array]::Copy($salt, 0, $output, 11, 16)
+        [Array]::Copy($iv, 0, $output, 27, 16)
+        [Array]::Copy($cipher, 0, $output, $headerLength, $cipher.Length)
+
+        # Use the concrete constructor: on Windows PowerShell 5.1 the
+        # HMACSHA256.Create() factory can return the SHA-1 implementation.
+        $hmac = New-Object System.Security.Cryptography.HMACSHA256
+        try {
+            $hmac.Key = $keys.MacKey
+            $tag = $hmac.ComputeHash($output, 0, $signedLength)
+        } finally {
+            $hmac.Dispose()
+        }
+        [Array]::Copy($tag, 0, $output, $signedLength, 32)
+        return $output
+    } finally {
+        [Array]::Clear($keys.EncryptionKey, 0, $keys.EncryptionKey.Length)
+        [Array]::Clear($keys.MacKey, 0, $keys.MacKey.Length)
+    }
+}
+
+function Unprotect-SRRecoveryKitBytes {
+    param(
+        [Parameter(Mandatory = $true)][byte[]]$Bytes,
+        [Parameter(Mandatory = $true)][string]$Password
+    )
+    if ([string]::IsNullOrEmpty($Password)) { throw 'This recovery kit is password-protected. Enter its password to import it.' }
+    if ($null -eq $Bytes -or $Bytes.Length -lt 76) { throw 'The password-protected recovery kit is damaged.' }
+    if ([System.Text.Encoding]::ASCII.GetString($Bytes, 0, 6) -ne 'SRKIT2') { throw 'The file is not a password-protected Session Recovery kit.' }
+    if ([int]$Bytes[6] -ne 1) { throw 'This recovery kit encryption version is not supported.' }
+
+    $iterations = [System.BitConverter]::ToInt32($Bytes, 7)
+    # A tampered header must not turn into an unbounded amount of KDF work.
+    if ($iterations -lt 10000 -or $iterations -gt 2000000) { throw 'The recovery kit has invalid password settings.' }
+
+    $salt = New-Object byte[] 16
+    $iv = New-Object byte[] 16
+    [Array]::Copy($Bytes, 11, $salt, 0, 16)
+    [Array]::Copy($Bytes, 27, $iv, 0, 16)
+
+    $signedLength = $Bytes.Length - 32
+    $cipherLength = $signedLength - 43
+    if ($cipherLength -le 0) { throw 'The password-protected recovery kit is damaged.' }
+
+    $keys = Get-SRKitKeyMaterial -Password $Password -Salt $salt -Iterations $iterations
+    try {
+        # Use the concrete constructor: on Windows PowerShell 5.1 the
+        # HMACSHA256.Create() factory can return the SHA-1 implementation.
+        $hmac = New-Object System.Security.Cryptography.HMACSHA256
+        try {
+            $hmac.Key = $keys.MacKey
+            $expected = $hmac.ComputeHash($Bytes, 0, $signedLength)
+        } finally {
+            $hmac.Dispose()
+        }
+
+        # Constant-time tag comparison: do not reveal where a forged tag
+        # first differs from the valid one.
+        $difference = 0
+        for ($index = 0; $index -lt 32; $index++) {
+            $difference = $difference -bor ($expected[$index] -bxor $Bytes[$signedLength + $index])
+        }
+        if ($difference -ne 0) { throw 'The password is wrong or the recovery kit was modified.' }
+
+        $cipher = New-Object byte[] $cipherLength
+        [Array]::Copy($Bytes, 43, $cipher, 0, $cipherLength)
+        $aes = [System.Security.Cryptography.AesCryptoServiceProvider]::new()
+        $decryptor = $null
+        try {
+            $aes.KeySize = 256
+            $aes.Mode = [System.Security.Cryptography.CipherMode]::CBC
+            $aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
+            $aes.Key = $keys.EncryptionKey
+            $aes.IV = $iv
+            $decryptor = $aes.CreateDecryptor()
+            return $decryptor.TransformFinalBlock($cipher, 0, $cipher.Length)
+        } catch {
+            throw 'The password is wrong or the recovery kit was modified.'
+        } finally {
+            if ($null -ne $decryptor) { $decryptor.Dispose() }
+            $aes.Dispose()
+        }
+    } finally {
+        [Array]::Clear($keys.EncryptionKey, 0, $keys.EncryptionKey.Length)
+        [Array]::Clear($keys.MacKey, 0, $keys.MacKey.Length)
     }
 }
 
 function Export-SRRecoveryKit {
     param(
         [Parameter(Mandatory = $true)][string]$Destination,
-        [string]$AppVersion = ''
+        [string]$AppVersion = '',
+        [string]$Password = ''
     )
+    # Validate before doing the expensive snapshot reads and zip work.
+    if (-not [string]::IsNullOrEmpty($Password)) {
+        if ($Password.Length -lt 8) { throw 'Use a recovery kit password with at least 8 characters.' }
+        if ($Password.Length -gt 1024) { throw 'The recovery kit password is too long.' }
+    }
+
     $destinationFolder = Split-Path -Parent $Destination
     if (-not [string]::IsNullOrWhiteSpace($destinationFolder) -and -not (Test-Path -LiteralPath $destinationFolder)) {
         New-Item -ItemType Directory -Path $destinationFolder -Force | Out-Null
@@ -8593,6 +8879,7 @@ function Export-SRRecoveryKit {
     $notes = ConvertTo-SRNoteTable -Value $config.snapshotNotes
     $staging = Join-Path ([System.IO.Path]::GetTempPath()) ('sr-kit-' + [guid]::NewGuid().ToString('N'))
     $snapshotStaging = Join-Path $staging 'snapshots'
+    $tempZip = $null
     New-Item -ItemType Directory -Path $snapshotStaging -Force | Out-Null
     try {
         $manifestSnapshots = New-Object System.Collections.Generic.List[object]
@@ -8660,25 +8947,41 @@ function Export-SRRecoveryKit {
         [System.IO.File]::WriteAllText((Join-Path $staging 'README.txt'), $readme, (New-Object System.Text.UTF8Encoding($false)))
 
         Add-Type -AssemblyName System.IO.Compression.FileSystem
-        if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Force -ErrorAction Stop }
-        [System.IO.Compression.ZipFile]::CreateFromDirectory($staging, $Destination, [System.IO.Compression.CompressionLevel]::Optimal, $false)
-        $bytes = (Get-Item -LiteralPath $Destination).Length
-        Write-SRLog -Message ("Recovery kit exported: {0} ({1} snapshots, {2} notes)" -f $Destination, $snapshotCount, $manifestNotes.Count)
+        # Build the ZIP off to the side. If the user asked for a password, the
+        # destination must never briefly hold a plaintext kit.
+        $tempZip = Join-Path ([System.IO.Path]::GetTempPath()) ('sr-kit-' + [guid]::NewGuid().ToString('N') + '.zip')
+        [System.IO.Compression.ZipFile]::CreateFromDirectory($staging, $tempZip, [System.IO.Compression.CompressionLevel]::Optimal, $false)
+        $bytes = [System.IO.File]::ReadAllBytes($tempZip)
+        $protected = $false
+        if (-not [string]::IsNullOrEmpty($Password)) {
+            $bytes = Protect-SRRecoveryKitBytes -Bytes $bytes -Password $Password
+            $protected = $true
+        }
+        Write-SRBytesAtomic -Path $Destination -Bytes $bytes
+        $fileBytes = [int64]$bytes.Length
+        Write-SRLog -Message ("Recovery kit exported: {0} ({1} snapshots, {2} notes, protected={3})" -f $Destination, $snapshotCount, $manifestNotes.Count, $protected)
         return [pscustomobject]@{
             Path              = $Destination
             SnapshotCount     = [int]$snapshotCount
             NoteCount         = [int]$manifestNotes.Count
             ExclusionCount    = (@($config.excludeApps).Count + @($config.excludeFolders).Count + @($config.excludeUrls).Count)
             EncryptedCount    = [int]$encryptedCount
-            Bytes             = [int64]$bytes
+            Protected         = [bool]$protected
+            Bytes             = [int64]$fileBytes
         }
     } finally {
+        if (-not [string]::IsNullOrWhiteSpace([string]$tempZip)) {
+            try { Remove-Item -LiteralPath $tempZip -Force -ErrorAction SilentlyContinue } catch { }
+        }
         try { Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue } catch { }
     }
 }
 
 function Import-SRRecoveryKit {
-    param([Parameter(Mandatory = $true)][string]$Path)
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string]$Password = ''
+    )
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Recovery kit not found: $Path" }
     $source = Get-Item -LiteralPath $Path -ErrorAction Stop
     if ($source.Length -gt 512MB) { throw 'The recovery kit is too large to import (512 MB maximum).' }
@@ -8687,8 +8990,20 @@ function Import-SRRecoveryKit {
     $zip = $null
     $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('sr-kit-import-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+    $containerEncrypted = $false
+    $importPath = $Path
     try {
-        $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
+        $containerEncrypted = Test-SRRecoveryKitEncrypted -Path $Path
+        if ($containerEncrypted) {
+            if ([string]::IsNullOrEmpty($Password)) { throw 'This recovery kit is password-protected. Enter its password to import it.' }
+            $protectedBytes = [System.IO.File]::ReadAllBytes($Path)
+            $zipBytes = Unprotect-SRRecoveryKitBytes -Bytes $protectedBytes -Password $Password
+            if ($zipBytes.Length -gt 512MB) { throw 'The decrypted recovery kit is too large to import (512 MB maximum).' }
+            $importPath = Join-Path $tempRoot 'kit.zip'
+            [System.IO.File]::WriteAllBytes($importPath, $zipBytes)
+        }
+
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($importPath)
         if ($zip.Entries.Count -gt 512) { throw 'The recovery kit contains too many entries.' }
         $totalBytes = [int64]0
         $entryMap = @{}
@@ -8857,6 +9172,7 @@ function Import-SRRecoveryKit {
             EncryptedSkipped  = [int]$encryptedSkipped
             ExclusionsAdded   = [int]$exclusionAdded
             NotesAdded        = [int]$notesAdded
+            ContainerEncrypted = [bool]$containerEncrypted
             Errors            = @($errors.ToArray())
         }
     } finally {
@@ -9108,8 +9424,24 @@ function Save-SRUpdate {
     $ProgressPreference = 'SilentlyContinue'
     try {
         $update = $UpdateJson | ConvertFrom-Json
-        if ([string]::IsNullOrWhiteSpace([string]$update.MsiName) -or [string]::IsNullOrWhiteSpace([string]$update.ShaName)) {
+        $msiName = [string]$update.MsiName
+        $shaName = [string]$update.ShaName
+        if ([string]::IsNullOrWhiteSpace($msiName) -or [string]::IsNullOrWhiteSpace($shaName)) {
             throw 'The release does not include both the MSI and its SHA256 file.'
+        }
+        # Asset names come from a remote release document. Keep them leaf
+        # names so a tampered or malformed release cannot write outside the
+        # updates folder (for example into Startup) through path traversal.
+        foreach ($name in @($msiName, $shaName)) {
+            if ($name -ne [System.IO.Path]::GetFileName($name) -or $name -match '[\\/:*?"<>|]' -or $name -match '[\x00-\x1F]') {
+                throw 'The release asset name is not a safe file name.'
+            }
+        }
+        if ($msiName -notmatch '(?i)^SessionRecovery-.+\.msi$') {
+            throw 'The release MSI asset name is not valid.'
+        }
+        if ($shaName -notmatch '(?i)^SessionRecovery-.+\.msi\.sha256$') {
+            throw 'The release SHA256 asset name is not valid.'
         }
         $version = [string]$update.Version
         $safeVersion = ($version -replace '[^0-9A-Za-z._-]', '_')
@@ -9117,8 +9449,8 @@ function Save-SRUpdate {
             $Destination = Join-Path (Get-SRRoot) ('updates\' + $safeVersion)
         }
         New-Item -ItemType Directory -Path $Destination -Force | Out-Null
-        $msiPath = Join-Path $Destination ([string]$update.MsiName)
-        $shaPath = Join-Path $Destination ([string]$update.ShaName)
+        $msiPath = Join-Path $Destination $msiName
+        $shaPath = Join-Path $Destination $shaName
 
         # Public release: download the browser asset URLs without any GitHub
         # token. A token would add nothing here and used to be forwarded by
